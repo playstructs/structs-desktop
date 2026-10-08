@@ -426,6 +426,11 @@
       if (card.kind === 'guild' && card.id === S.guildId) {
         list.push({ key: 'channels', icon: 'icon-guild-directory', title: 'Browse channels' });
       }
+      // A battle for them: the simulator opens addressed to this player, and
+      // what you send lands in your DM with them (simulator.rs).
+      if (card.kind === 'player' && card.id !== myId()) {
+        list.unshift({ key: 'challenge', icon: 'icon-raid', title: 'Challenge to a battle' });
+      }
       var o = ownerOfCard(card);
       if (o && o.id !== myId()) {
         list.push({ key: 'message_owner', icon: 'icon-phone', title: 'Message ' + (o.name || o.id) });
@@ -692,6 +697,10 @@
         // every link in the timeline goes through.
         if (!card.site) { cardNote(box, 'no site published', true); return; }
         invoke('matrix_open_url', { url: card.site }).catch(function (e) { cardNote(box, String(e), true); });
+        return;
+      }
+      if (key === 'challenge') {
+        invoke('sim_address_open', { playerId: card.id }).catch(function (e) { cardNote(box, String(e), true); });
         return;
       }
       if (key === 'agreement') { rentForm(card, box); return; }

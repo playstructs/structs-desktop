@@ -42,7 +42,16 @@ const BUDGET = {
   // Raised 2026-10-06 with the setup → deploy → battle → debrief rebuild:
   // the file roughly tripled, and what is left is 2px borders, the board's
   // column widths and breakpoints — none has a token. Hex went DOWN 4 → 1.
-  'simulator.css': [1, 42],
+  'simulator.css': [1, 51],
+  // Raised 2026-10-08 with challenges (+9): the thread rail's 340px, the
+  // Post-to list's 320px cap and 600px card, and 2px focus/edge lines.
+  'simulator-social.js': [0, 0],
+  'simulator-live.js': [0, 0],
+  // Comms: the challenge card (simcard.*) and its timeline wiring. The
+  // miniature board's px are the simulator's band geometry at chat scale.
+  'simcard.js': [0, 0],
+  'simcard.css': [0, 14],
+  'chat-sim.js': [0, 0],
   // file:            colour, px
   //
   // "colour" counts `#rrggbb` AND `rgba()`/`hsl()`. It used to count only the

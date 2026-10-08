@@ -58,6 +58,10 @@ pub struct Message {
     /// A shared proof-of-work offer or result riding on this message.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub work: Option<Value>,
+    /// A simulator challenge or result this message carries: its own
+    /// `structs.sim` frame, or a sim link in its body (see `sim.rs`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sim: Option<Value>,
     /// Somebody changed this after sending it. Shown, never hidden: a message
     /// that quietly becomes different text is how a conversation gets
     /// rewritten under the people reading it.
@@ -1188,7 +1192,7 @@ fn gap_marker(room_id: &str, room: &Value) -> Message {
     Message {
         event_id: format!("gap:{}:{}", room_id, token),
         thread_root: None,
-        work: None,
+        work: None, sim: None,
         edited: false,
         reactions: Vec::new(),
         reply_to: None,
@@ -1788,6 +1792,7 @@ fn render_event(ev: &Value, gs: &GuildState, room_id: &str, me: &str) -> Option<
         event_id: event_id.to_string(),
         thread_root,
         work: super::work::parse_event(etype, &content),
+        sim: super::sim::parse_event(etype, &content, &body),
         edited: false,
         reactions: Vec::new(),
         reply_to,
@@ -3116,6 +3121,14 @@ pub fn start_sync(app: tauri::AppHandle, guild_id: String) {
                     // makes a sender look like a person.
                     directory::resolve_many(&directory::senders_in(&v)).await;
                     let d = apply_sync(&guild_id, &session, &v);
+                    // A live battle's frames, for the simulator playing or
+                    // watching it (sim.rs, Live). Typed events render as no
+                    // message, so they travel on their own event.
+                    for f in super::sim::live_frames_in(&v) {
+                        let mut f = f;
+                        f["guild_id"] = json!(guild_id);
+                        let _ = crate::mcp::events::emit_matrix(&app, "matrix::sim", f);
+                    }
                     let settled = settle_alias_disputes(&guild_id, &session).await;
                     // Anyone a room is named after who was unknown a moment
                     // ago; the next pass renders their name.
@@ -4131,6 +4144,51 @@ pub async fn create_group(
         .ok_or_else(|| "the homeserver created no room".to_string())
 }
 
+/// A live battle's own room (sim.rs, Live): private, kept a day, joinable
+/// by anyone in the room the invite was posted in — so whoever can see the
+/// invite can watch — and the guest invited outright when it is for one
+/// player. A homeserver that will not make a restricted room still makes an
+/// invite-only one: the battle is then for the two of them.
+pub async fn create_match_room(
+    session: &Session,
+    name: &str,
+    posted_in: &str,
+    invite: Option<&str>,
+) -> Result<String, String> {
+    let url = format!("{}/createRoom", base(session));
+    let invites: Vec<&str> = invite.into_iter().collect();
+    let retention = json!({ "type": "m.room.retention", "state_key": "", "content": { "max_lifetime": 86_400_000u64 } });
+    let restricted = json!({
+        "preset": "private_chat",
+        "name": name,
+        "room_version": "10",
+        "invite": invites,
+        "initial_state": [
+            { "type": "m.room.join_rules", "state_key": "", "content": {
+                "join_rule": "restricted",
+                "allow": [{ "type": "m.room_membership", "room_id": posted_in }],
+            } },
+            retention,
+        ],
+    });
+    let first = {
+        let url = url.clone();
+        authed(session, move |c, s| c.post(&url).bearer_auth(&s.access_token).json(&restricted)).await
+    };
+    let v = match first {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("[Comms] restricted match room refused ({e}); making an invite-only one");
+            let plain = json!({ "preset": "private_chat", "name": name, "invite": invites, "initial_state": [retention] });
+            authed(session, move |c, s| c.post(&url).bearer_auth(&s.access_token).json(&plain)).await?
+        }
+    };
+    v.get("room_id")
+        .and_then(|r| r.as_str())
+        .map(String::from)
+        .ok_or_else(|| "the homeserver created no room".to_string())
+}
+
 /// Remember that this room is the conversation with this PLAYER.
 ///
 /// Called by `matrix_message_player`, which is handed a player id and would
@@ -4387,6 +4445,191 @@ pub async fn send_work(
         .and_then(|e| e.as_str())
         .map(String::from)
         .ok_or_else(|| "the homeserver accepted it but returned no event id".into())
+}
+
+/// Post a simulator challenge or result (see `sim.rs`).
+///
+/// The body is the battle link with a line of the debrief's words, so every
+/// other client reads it and every preview unfurls it; the frame rides
+/// beside it under `structs.sim`. A result goes INTO the challenge's thread
+/// as an `m.notice`: the main timeline stays the conversation in every
+/// client, and the default push rules never ping a room for a score.
+/// `mentions` names whoever this result knocked off first place — the one
+/// person who wants to know.
+pub async fn send_sim(
+    session: &Session,
+    room_id: &str,
+    body: &str,
+    frame: Value,
+    thread: Option<&str>,
+    mentions: &[String],
+) -> Result<String, String> {
+    let txn = format!("structs{}{}", auth::now_secs(), TXN.fetch_add(1, Ordering::Relaxed));
+    let url = format!(
+        "{}/rooms/{}/send/m.room.message/{}",
+        base(session),
+        urlseg(room_id),
+        urlseg(&txn)
+    );
+    let mut payload = json!({
+        "msgtype": if thread.is_some() { "m.notice" } else { "m.text" },
+        "body": body,
+        super::sim::KEY: frame,
+    });
+    if let Some(root) = thread {
+        payload["m.relates_to"] = thread_relation(root);
+    }
+    if !mentions.is_empty() {
+        payload["m.mentions"] = json!({ "user_ids": mentions });
+    }
+    let v = authed_send(session, move |c, s| {
+        c.put(&url).bearer_auth(&s.access_token).json(&payload)
+    })
+    .await?;
+    v.get("event_id")
+        .and_then(|e| e.as_str())
+        .map(String::from)
+        .ok_or_else(|| "the homeserver accepted it but returned no event id".into())
+}
+
+/// `m.thread` with the reply fallback the spec asks for, so a client with no
+/// thread view still shows what the line belongs to.
+fn thread_relation(root: &str) -> Value {
+    json!({
+        "rel_type": "m.thread",
+        "event_id": root,
+        "is_falling_back": true,
+        "m.in_reply_to": { "event_id": root },
+    })
+}
+
+/// A typed frame inside a thread — a live battle's status under its invite.
+pub async fn send_event_in_thread(session: &Session, room_id: &str, root: &str, etype: &str, mut content: Value) -> Result<String, String> {
+    content["m.relates_to"] = json!({ "rel_type": "m.thread", "event_id": root });
+    send_event(session, room_id, etype, content).await
+}
+
+/// A plain line of talk inside a thread — the simulator's thread composer.
+pub async fn send_in_thread(session: &Session, room_id: &str, root: &str, body: &str) -> Result<String, String> {
+    let txn = format!("structs{}{}", auth::now_secs(), TXN.fetch_add(1, Ordering::Relaxed));
+    let url = format!(
+        "{}/rooms/{}/send/m.room.message/{}",
+        base(session),
+        urlseg(room_id),
+        urlseg(&txn)
+    );
+    let payload = json!({ "msgtype": "m.text", "body": body, "m.relates_to": thread_relation(root) });
+    let v = authed_send(session, move |c, s| {
+        c.put(&url).bearer_auth(&s.access_token).json(&payload)
+    })
+    .await?;
+    v.get("event_id")
+        .and_then(|e| e.as_str())
+        .map(String::from)
+        .ok_or_else(|| "the homeserver accepted it but returned no event id".into())
+}
+
+/// Most pages a thread is read back through. A challenge with more than a
+/// few hundred replies has its ladder from the newest of them.
+const THREAD_PAGES: usize = 5;
+
+/// Every message in a thread, oldest first, rendered as the timeline renders
+/// them — from the server's relations index, so a challenge's results are
+/// found however far back the challenge itself is.
+pub async fn thread_messages(
+    guild_id: &str,
+    session: &Session,
+    room_id: &str,
+    root: &str,
+) -> Result<Vec<Message>, String> {
+    Ok(thread_events(guild_id, session, room_id, root).await?.0)
+}
+
+/// A thread read back: its messages, rendered, and the live `status` frames
+/// in it (typed events, which render as nothing), oldest first.
+pub async fn thread_events(
+    guild_id: &str,
+    session: &Session,
+    room_id: &str,
+    root: &str,
+) -> Result<(Vec<Message>, Vec<Value>), String> {
+    let url = format!(
+        "{}/_matrix/client/v1/rooms/{}/relations/{}/m.thread",
+        session.homeserver.trim_end_matches('/'),
+        urlseg(room_id),
+        urlseg(root)
+    );
+    let mut out: Vec<Message> = Vec::new();
+    let mut frames: Vec<Value> = Vec::new();
+    let mut from: Option<String> = None;
+    for _ in 0..THREAD_PAGES {
+        let url = url.clone();
+        let tok = from.clone();
+        let v = authed(session, move |c, s| {
+            let mut req = c.get(&url).bearer_auth(&s.access_token).query(&[("limit", "100"), ("dir", "b")]);
+            if let Some(t) = tok.as_deref() {
+                req = req.query(&[("from", t)]);
+            }
+            req
+        })
+        .await?;
+        directory::resolve_many(&directory::senders_in(&v)).await;
+        {
+            let map = STATE.read().unwrap();
+            let empty = GuildState::default();
+            let gs = map.get(guild_id).unwrap_or(&empty);
+            if let Some(chunk) = v.get("chunk").and_then(|c| c.as_array()) {
+                out.extend(chunk.iter().filter_map(|ev| render_event(ev, gs, room_id, &session.user_id)));
+                for ev in chunk {
+                    if ev.get("type").and_then(|t| t.as_str()) != Some(super::sim::EVENT_TYPE) {
+                        continue;
+                    }
+                    if let Some(f) = ev.get("content").and_then(super::sim::parse_live) {
+                        frames.push(json!({ "sender": ev.get("sender"), "ts": ev.get("origin_server_ts"), "frame": f }));
+                    }
+                }
+            }
+        }
+        from = v.get("next_batch").and_then(|n| n.as_str()).map(String::from);
+        if from.is_none() {
+            break;
+        }
+    }
+    out.sort_by_key(|m| m.ts);
+    frames.sort_by_key(|f| f.get("ts").and_then(|t| t.as_u64()).unwrap_or(0));
+    Ok((out, frames))
+}
+
+/// One event, rendered — a thread's root when it has scrolled out of memory.
+pub async fn fetch_message(
+    guild_id: &str,
+    session: &Session,
+    room_id: &str,
+    event_id: &str,
+) -> Result<Option<Message>, String> {
+    if let Some(m) = STATE.read().unwrap().get(guild_id).and_then(|gs| {
+        gs.timelines.get(room_id).and_then(|t| t.iter().find(|m| m.event_id == event_id).cloned())
+    }) {
+        return Ok(Some(m));
+    }
+    let url = format!("{}/rooms/{}/event/{}", base(session), urlseg(room_id), urlseg(event_id));
+    let ev = authed(session, move |c, s| c.get(&url).bearer_auth(&s.access_token)).await?;
+    directory::resolve_many(&directory::senders_in(&ev)).await;
+    let map = STATE.read().unwrap();
+    let empty = GuildState::default();
+    let gs = map.get(guild_id).unwrap_or(&empty);
+    Ok(render_event(&ev, gs, room_id, &session.user_id))
+}
+
+/// What the room already holds in memory — the ladder also counts results
+/// pasted into the room rather than posted into the thread.
+pub fn cached_messages(guild_id: &str, room_id: &str) -> Vec<Message> {
+    STATE
+        .read()
+        .unwrap()
+        .get(guild_id)
+        .and_then(|gs| gs.timelines.get(room_id).cloned())
+        .unwrap_or_default()
 }
 
 /// Rewrite a message that has already been sent.
@@ -5807,7 +6050,7 @@ mod tests {
     fn a_backfill_keeps_what_arrived_during_it() {
         let msg = |id: &str, body: &str| Message {
             event_id: id.to_string(),
-            thread_root: None, work: None, edited: false,
+            thread_root: None, work: None, sim: None, edited: false,
             reactions: Vec::new(), reply_to: None, reply_sender: None,
             reply_excerpt: None,
             sender: "@1-61:h".into(), sender_name: "JPEG".into(), sender_tag: None,
@@ -6154,7 +6397,7 @@ mod tests {
             reply_sender: None,
             reply_excerpt: None,
             thread_root: None,
-            work: None,
+            work: None, sim: None,
             edited: false,
             mxc: None,
             width: None,

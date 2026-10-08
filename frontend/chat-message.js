@@ -28,6 +28,12 @@
     var S = ctx.S, Chat = ctx.Chat || {};
 
     function messageNode(m, prev) {
+      // A run that took first place on a challenge: the one line its thread
+      // puts in the room (chat-sim.js).
+      if (m.sim && m.thread_root && ctx.simLine) {
+        var sl = ctx.simLine(m);
+        if (sl) return sl;
+      }
       /* The shared row from `chatrow.js`, plus what only a full timeline has.
        *
        * The presentation — event lines, emotes, run-collapsing, the mention
@@ -172,6 +178,18 @@
         wrap.appendChild(fail);
       }
 
+      // A battle: the challenge row, and the body it stands in for.
+      if (m.sim && ctx.simNode) {
+        var sim = ctx.simNode(m);
+        if (sim) {
+          // In the unfurl column, like every other card.
+          var col = el('div', 'chat-refs');
+          col.appendChild(sim);
+          wrap.appendChild(col);
+          if (ctx.hidesBody && ctx.hidesBody(m)) body.classList.add('hidden', 'chat-mod-bare');
+        }
+      }
+
       var work = workCard(m);
       if (work) wrap.appendChild(work);
 
@@ -224,6 +242,8 @@
       // lines, and unfurling them cost a row each and a minute of chain reads
       // before anything a person had written got its turn.
       if (m.work) return plan;
+      // A battle this app posted is its own card; its body is generated.
+      if (m.sim && !m.sim.pasted) return plan;
       plan.bare = plan.ids.length === 1 && String(m.body).trim() === plan.ids[0];
       var shown = 0;
       plan.ids.forEach(function (id) {

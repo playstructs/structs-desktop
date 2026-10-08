@@ -146,8 +146,10 @@
         scroll.appendChild(noticeBlock('Quiet', 'Nothing has been said here yet.'));
       } else {
         var dividerDone = false;
-        S.messages.forEach(function (m, i) {
-          var prev = i > 0 ? S.messages[i - 1] : null;
+        // A challenge's thread folds into its card (chat-sim.js).
+        var shown = Chat.simFolded ? S.messages.filter(function (m) { return !Chat.simFolded(m); }) : S.messages;
+        shown.forEach(function (m, i) {
+          var prev = i > 0 ? shown[i - 1] : null;
 
           // Day separator: a timeline with no dates is a timeline you cannot
           // date. Only between days, never above the first message.

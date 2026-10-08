@@ -207,3 +207,91 @@ body.sim-deploying .sim-bar-tools { opacity: .4; pointer-events: none; }
 
 #message { position: fixed; bottom: var(--spacing-xl); left: 50%; transform: translateX(-50%); background: var(--surface-player-body); box-shadow: 0 0 0 2px var(--border); padding: var(--spacing-lg) var(--spacing-xxl); max-width: 90%; z-index: 30; }
 #message:empty { display: none; }
+
+/* ── Challenges (simulator-social.js) ──────────────────────────────────── */
+/* The Challenge panel takes the Round card's place: a challenge's settings
+   are part of the battle, so they are read here, not edited. */
+#challenge { grid-area: round; }
+.sim-challenge-b { display: flex; flex-direction: column; gap: var(--spacing-xl); padding: var(--spacing-xl) var(--spacing-xl) 0; min-width: 0; }
+.sim-challenge-top { display: flex; flex-direction: column; gap: var(--spacing-md); min-width: 0; }
+.sim-challenge-top > .sui-text-display { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sim-by { display: flex; align-items: center; gap: var(--spacing-md); min-width: 0; }
+.sim-by > span:last-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sim-them { color: var(--accent-secondary); }
+.sim-warn { color: var(--text-warning); }
+.sim-chip.sim-tag { color: var(--text-warning); box-shadow: 0 0 0 2px var(--text-warning); }
+.sim-pfp { position: relative; flex: none; overflow: hidden; width: var(--spacing-xxl); height: var(--spacing-xxl); background: var(--surface-neutral-body); }
+.sim-pfp .pfp-viewer-layer { position: absolute; top: 0; left: 0; width: 100%; height: 100%; max-width: none; transform: none; }
+.sim-pfp.sim-pfp-lg { width: var(--form-input-height-total); height: var(--form-input-height-total); }
+
+.sim-ladder { display: flex; flex-direction: column; }
+.sim-run { display: grid; grid-template-columns: var(--spacing-xl) var(--spacing-xxl) minmax(0, 1fr) auto; align-items: center; gap: var(--spacing-md); min-height: var(--form-input-height-total); padding: var(--spacing-xs) var(--spacing-md); border-top: 1px solid var(--border-subtle); }
+.sim-run:first-child { border-top: 0; }
+.sim-run-me { background: var(--surface-player-highlight); }
+.sim-run-old { opacity: .55; }
+.sim-run-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sim-run-time { text-align: right; }
+.sim-ladder-empty { padding: var(--spacing-md) 0; }
+
+.sim-thread { display: flex; flex-direction: column; padding-top: var(--spacing-lg); border-top: 2px solid var(--border-subtle); }
+.sim-thread-h { display: flex; justify-content: space-between; padding-bottom: var(--spacing-sm); }
+.sim-said { display: flex; flex-direction: column; gap: var(--spacing-xs); padding: var(--spacing-md) 0; border-top: 1px solid var(--border-subtle); min-width: 0; }
+.sim-said-h { display: flex; justify-content: space-between; gap: var(--spacing-md); color: var(--accent-secondary); }
+.sim-said-me .sim-said-h { color: var(--text-player-primary); }
+.sim-said-b { overflow-wrap: anywhere; }
+.sim-reply { display: flex; gap: var(--spacing-md); align-items: center; padding: var(--spacing-md); margin-top: var(--spacing-lg); background: var(--page-background); box-shadow: 0 -2px 0 0 var(--border); }
+#sim .sim-reply .sim-square { margin: 0; }
+.sim-challenge-top .sim-chips { gap: var(--spacing-md); }
+/* Locked or not, a challenge's tools take their own row under the names. */
+#fleet-head.sim-head-stack { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); grid-template-areas: "you cpu" "tools tools"; }
+
+/* Addressed: who the battle is for, above the round's settings. */
+.sim-for { display: flex; align-items: center; gap: var(--spacing-lg); padding: var(--spacing-sm) var(--spacing-sm) var(--spacing-sm) var(--spacing-md); background: var(--surface-player-body); box-shadow: 0 0 0 2px var(--text-warning); }
+.sim-for-who { display: flex; flex-direction: column; margin-right: auto; min-width: 0; }
+.sim-for-who .sui-text-label { color: var(--text-warning); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#sim .sim-for .sim-square { margin: 0; }
+
+/* A challenge's fleets are looked at, not changed. */
+.slot:disabled { cursor: default; }
+.slot:disabled:hover { outline: 0; }
+
+/* Battle: the thread beside the board. */
+#battle-main { flex: 1 1 auto; display: flex; min-height: 0; }
+#battle-main #board-wrap { flex: 1 1 auto; min-width: 0; }
+.sim-rail { flex: 0 0 340px; display: flex; flex-direction: column; min-height: 0; overflow: auto; background: var(--surface-default); border-left: 2px solid var(--border-subtle); }
+.sim-rail.hidden { display: none; }
+.sim-rail .sim-challenge-b { flex: 1 1 auto; }
+@media (max-width: 1100px) { .sim-rail { display: none; } }
+
+/* Debrief: the challenge beside the verdict, and what became of the run. */
+.sim-debrief-wrap { display: flex; flex-wrap: wrap; align-items: flex-start; gap: var(--spacing-xxl); padding: 0 var(--spacing-xxxl) 0 var(--spacing-xxl); }
+.sim-debrief-wrap > #db-challenge { flex: 0 0 320px; min-width: 0; margin-top: var(--spacing-xxxl); }
+.sim-debrief-wrap > .sim-debrief { flex: 999 1 640px; min-width: 0; margin: 0; }
+.sim-post { display: flex; flex-wrap: wrap; align-items: center; gap: var(--spacing-lg); padding: var(--spacing-lg) var(--spacing-lg) var(--spacing-lg) var(--spacing-xl); background: var(--surface-default); box-shadow: 0 0 0 2px var(--border-subtle); }
+.sim-post.sim-post-good { background: var(--surface-player-body); box-shadow: 0 0 0 2px var(--accent-primary); }
+.sim-post.sim-post-good > i { color: var(--text-player-primary); }
+.sim-post.sim-post-bad { box-shadow: 0 0 0 2px var(--text-enemy-primary); }
+.sim-post.sim-post-bad > i { color: var(--text-enemy-primary); }
+.sim-post-text { display: flex; flex-direction: column; margin-right: auto; min-width: 0; }
+.sim-post-good .sim-post-text .sui-text-label { color: var(--text-player-primary); }
+.sim-post-where { white-space: nowrap; }
+
+/* Post to… */
+.sim-post-card { width: min(600px, 100%); }
+.sim-post-what { display: flex; align-items: center; gap: var(--spacing-lg); padding: var(--spacing-lg); background: var(--surface-neutral-body); box-shadow: 0 0 0 2px var(--border-subtle); }
+.sim-input.sim-input-wide { width: 100%; flex: none; }
+.sim-post-rooms { max-height: 320px; overflow: auto; padding: 2px; }
+.sim-opt.sim-room { flex: none; justify-content: flex-start; gap: var(--spacing-lg); }
+.sim-room-name { margin-right: auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sim-post-go { display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 1fr); gap: var(--spacing-md); }
+#sim .sim-post-go .sui-screen-btn { margin: 2px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* Live: a person on the other side. Nobody pauses a battle for two, and the
+   computer's knobs are gone. */
+body.sim-live #pause, body.sim-live #restart { display: none; }
+.sim-chip.sim-live-chip { color: var(--text-enemy-primary); box-shadow: 0 0 0 2px var(--text-enemy-primary); }
+.sim-conn { white-space: nowrap; }
+.sim-conn-ok { color: var(--text-player-primary); }
+.sim-conn-warn { color: var(--text-warning); }
+.sim-conn-bad { color: var(--text-enemy-primary); }
+#sim button.sim-on { background: var(--surface-player-highlight); }

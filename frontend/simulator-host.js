@@ -178,6 +178,7 @@
   Host.describeActivity = describeActivity;
   Host.QUIET_MOVES = QUIET_MOVES;
   Host.QUIET_BLOCKS = QUIET_BLOCKS;
+  Host.spectatorType = spectatorType;
 
   Host.prototype.destroy = function () {
     this.stop();
@@ -237,7 +238,14 @@
   /* players::build_virtual_msg — the map's action vocabulary → chain messages. */
   Host.prototype.act = function (player, action, a) {
     if (player !== this.you.id) throw new Error('Error: no key for ' + player);
+    return '[' + this.you.name + '] ' + action + ' submitted — tx ' + this.actFor(player, action, a);
+  };
+  /* The same, for whichever side is acting: a live battle's guest moves the
+   * other fleet from another machine (simulator-live.js). Returns the hash. */
+  Host.prototype.actFor = function (player, action, a) {
+    if (!this.chain.players[player]) throw new Error('Error: no such player ' + player);
     if (!this.running) throw new Error('Error: the battle is ' + (this.finished ? 'over' : 'paused'));
+    a = a || {};
     var msg;
     switch (action) {
       case 'attack': msg = { '@type': '/structs.structs.MsgStructAttack', operatingStructId: a.attacker_id, targetStructId: [a.target_id], weaponSystem: a.weapon === 'secondary' || a.weapon === 'secondaryWeapon' ? 'secondaryWeapon' : 'primaryWeapon' }; break;
@@ -251,8 +259,7 @@
       case 'build': msg = { '@type': '/structs.structs.MsgStructBuildInitiate', structTypeId: a.struct_type_id, operatingAmbit: a.ambit, slot: a.slot }; break;
       default: throw new Error("'" + action + "' is not a struct action the map offers");
     }
-    var hash = this.chain.submit(player, msg);
-    return '[' + this.you.name + '] ' + action + ' submitted — tx ' + hash;
+    return this.chain.submit(player, msg);
   };
 
   /* ChargeCalculator.calcCharge, the figure the HUD shows. */
@@ -312,7 +319,7 @@
       owner_overloaded: you.load > you.capacity, raider_overloaded: cpu.load > cpu.capacity,
       height: chain.height, owner_last_action: you.lastAction, raider_last_action: cpu.lastAction,
       viewer_last_action: you.lastAction, fetched_at_ms: Date.now(), warning: null,
-      owner_label: 'Your fleet', raider_label: 'Computer fleet', owner_fleet: you.fleetId, sim: true,
+      owner_label: this.you.label || 'Your fleet', raider_label: this.cpu.label || 'Computer fleet', owner_fleet: you.fleetId, sim: true,
     };
   };
 
@@ -453,7 +460,9 @@
     b.txs.forEach(function (tx) {
       if (tx.ok) self.tally(tx, b.height);
       if (!tx.ok) {
-        if (tx.signer === self.you.id) self.emit('raid-tx', { transactionHash: tx.hash, status: 'failed', code: 1, error: tx.error });
+        if (tx.signer === self.you.id) self.emit('raid-tx', { transactionHash: tx.hash, status: 'failed', code: 1, error: tx.error, signer: tx.signer });
+        // A live guest's refusal is theirs to see, not this board's.
+        else if (self.onRemoteTx) self.onRemoteTx({ transactionHash: tx.hash, status: 'failed', code: 1, error: tx.error, signer: tx.signer });
         return;
       }
       tx.events.forEach(function (e) {

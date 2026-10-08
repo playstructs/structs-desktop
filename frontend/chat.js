@@ -481,7 +481,9 @@
     editButton: function (m, id) { return editButton(m, id); }, deleteButton: function (m, id) { return deleteButton(m, id); },
     replyButton: function (m) { return replyButton(m); }, pinToggle: function (m, p, id) { return pinToggle(m, p, id); },
     isPinned: function (id) { return isPinned(id); }, jumpTo: function (id) { return jumpTo(id); },
-    replyWho: function (m) { return replyWho(m); }, S: S, Chat: Chat,
+    replyWho: function (m) { return replyWho(m); },
+    simNode: function (m) { return simModule.simNode(m); }, simLine: function (m) { return simModule.simLine(m); },
+    hidesBody: function (m) { return simModule.hidesBody(m); }, S: S, Chat: Chat,
   });
   var messageNode = message.messageNode, trimUrl = message.trimUrl, refIdsIn = message.refIdsIn, spansIn = message.spansIn;
   var fillBody = message.fillBody, linkChip = message.linkChip, idChip = message.idChip, historyButton = message.historyButton;
@@ -523,6 +525,14 @@
     render: function () { render(); }, S: S, Chat: Chat,
   });
   var workCard = work.workCard;
+
+  // ── Simulator challenges ──────────────────────────────────────────────────
+  // Lives in chat-sim.js: the challenge row/card under a battle, its thread
+  // folded into it, and the one line a new best puts in the room.
+  var simModule = window.ChatSim({
+    el: el, icon: icon, invoke: invoke, serverIdOf: serverIdOf,
+    render: function () { render(); }, jumpTo: function (id) { return jumpTo(id); }, S: S, Chat: Chat,
+  });
 
   // ── Room page + composer ───────────────────────────────────────────────────
   // Lives in chat-room.js. Every module value assigned further down
@@ -1125,6 +1135,7 @@
     }
     var incoming = payload.messages || [];
     if (!incoming.length) return;
+    simModule.onIncoming(incoming);
     var following = atBottom();
     S.messages = dropEcho(S.messages, incoming).concat(incoming);
     // Keep the retained timeline bounded; scrollback is re-fetched on demand.
@@ -1255,6 +1266,8 @@
     if (popout) popout.addEventListener('click', function () { tellCard('popout'); });
 
     listen('matrix::timeline', function (e) { onTimeline(e && e.payload); });
+    // A live battle's status, under its invite (chat-sim.js).
+    listen('matrix::sim', function (e) { simModule.onLive(e && e.payload); });
     listen('matrix::typing', function (e) { onTyping(e && e.payload); });
     // Somewhere else in the app asked for a conversation — a message icon in
     // Team Ops, a raid window, anywhere a player is listed.

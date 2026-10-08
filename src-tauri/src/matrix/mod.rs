@@ -15,6 +15,7 @@ pub mod identity;
 pub mod rooms;
 pub mod avatar;
 pub mod work;
+pub mod sim;
 pub mod auth;
 pub mod client;
 pub mod directory;
@@ -862,6 +863,355 @@ pub async fn post_work(
         return client::send_work_event(&session, room_id, work).await;
     }
     client::send_work(&session, room_id, body, work, None).await
+}
+
+// ── Simulator challenges (see sim.rs) ───────────────────────────────────────
+
+/// The runs a set of messages claims on `battle`, each tagged with who.
+fn sim_runs(battle: &str, messages: &[client::Message]) -> Vec<sim::Run> {
+    messages
+        .iter()
+        .filter_map(|m| {
+            let f = m.sim.as_ref()?;
+            if f.get("battle").and_then(|b| b.as_str()) != Some(battle) {
+                return None;
+            }
+            let result = f.get("result").and_then(|r| r.as_str())?;
+            Some(sim::Run {
+                sender: m.sender.clone(),
+                name: m.sender_name.clone(),
+                player_id: m.player_id.clone(),
+                pfp_attrs: m.pfp_attrs.clone(),
+                ts: m.ts,
+                event_id: m.event_id.clone(),
+                result: result.to_string(),
+            })
+        })
+        .collect()
+}
+
+fn sim_person(m: &client::Message) -> Value {
+    json!({
+        "sender": m.sender, "name": m.sender_name, "tag": m.sender_tag,
+        "player_id": m.player_id, "pfp_attrs": m.pfp_attrs, "self": m.is_self,
+    })
+}
+
+/// Everything a challenge card or the simulator's challenge panel shows: the
+/// battle, who posted it, the ladder and the talk in its thread.
+///
+/// The ladder counts the thread's results, the author's own run if the
+/// challenge carried one, and any result for the SAME battle pasted into the
+/// room as a link — a battle code is the identity, wherever it was typed.
+async fn sim_thread_view(
+    guild_id: &str,
+    session: &store::Session,
+    room_id: &str,
+    event_id: &str,
+) -> Result<Value, String> {
+    let root = client::fetch_message(guild_id, session, room_id, event_id)
+        .await?
+        .ok_or("that challenge is gone")?;
+    let frame = root.sim.clone().ok_or("that message is not a battle")?;
+    let battle = frame.get("battle").and_then(|b| b.as_str()).unwrap_or("").to_string();
+    // A thread that cannot be read still leaves the challenge playable.
+    let (thread, frames) = client::thread_events(guild_id, session, room_id, event_id)
+        .await
+        .unwrap_or_else(|e| {
+            eprintln!("[Comms] thread {event_id}: {e}");
+            (Vec::new(), Vec::new())
+        });
+    // A live battle's state is its HOST's word — the invite's sender — and
+    // nobody else's: anyone in the room could post a status frame.
+    let live = frames
+        .iter()
+        .filter(|f| f.get("sender").and_then(|s| s.as_str()) == Some(root.sender.as_str()))
+        .filter(|f| f["frame"]["kind"] == "status")
+        .last()
+        .map(|f| {
+            let mut v = f["frame"].clone();
+            v["ts"] = f["ts"].clone();
+            // Names from the chain directory, never from the frame.
+            for key in ["guest", "winner"] {
+                if let Some(u) = v.get(key).and_then(|u| u.as_str()).map(String::from) {
+                    v[format!("{key}_name")] = json!(person_of(&u).0);
+                }
+            }
+            v
+        });
+    let mut pool: Vec<client::Message> = vec![root.clone()];
+    for m in thread.iter().chain(client::cached_messages(guild_id, room_id).iter()) {
+        if !pool.iter().any(|p| p.event_id == m.event_id) {
+            pool.push(m.clone());
+        }
+    }
+    let ladder = sim::ladder(&battle, &sim_runs(&battle, &pool));
+    let talk: Vec<Value> = thread
+        .iter()
+        .filter(|m| m.sim.is_none() && (m.kind == "text" || m.kind == "emote"))
+        .map(|m| {
+            let mut p = sim_person(m);
+            p["event_id"] = json!(m.event_id);
+            p["body"] = json!(m.body);
+            p["ts"] = json!(m.ts);
+            p
+        })
+        .collect();
+    let room_name = client::rooms_of(guild_id)
+        .into_iter()
+        .find(|r| r.room_id == room_id)
+        .map(|r| r.name)
+        .unwrap_or_default();
+    let start = talk.len().saturating_sub(40);
+    Ok(json!({
+        "guild_id": guild_id,
+        "room_id": room_id,
+        "room_name": room_name,
+        "event_id": event_id,
+        "me": session.user_id,
+        "author": sim_person(&root),
+        "ts": root.ts,
+        "frame": frame,
+        "ladder": ladder,
+        "reply_count": talk.len(),
+        "replies": talk[start..].to_vec(),
+        "live": live,
+    }))
+}
+
+// ── Live battles (sim.rs, Live) ─────────────────────────────────────────────
+
+/// Open a live battle: its match room, and the invite that names it — in a
+/// room (anyone there may take it, and anyone there may watch) or in a DM
+/// with one player. The simulator then waits in the match room.
+#[tauri::command]
+pub async fn matrix_sim_live_open(
+    guild_id: Option<String>,
+    room_id: Option<String>,
+    to_player: Option<String>,
+    battle: String,
+    block_ms: Option<u64>,
+) -> Result<Value, String> {
+    let guild_id = match guild_id.filter(|g| !g.is_empty()) {
+        Some(g) => g,
+        None => primary_key().ok_or("no guild you belong to runs a comms server")?,
+    };
+    let session = session_for(&guild_id)?;
+    let b = sim::decode_battle(&battle).ok_or("that is not a battle")?;
+    // Live plays at the chain's pace: one tick per block has to fit the
+    // homeserver's send rate (Synapse's default: 0.2 a second, burst 10).
+    let block_ms = block_ms.unwrap_or(6000);
+    if block_ms != 6000 && block_ms != 2000 {
+        return Err("a live battle runs at 2 s or 6 s blocks".into());
+    }
+    let mut guest: Option<(String, String)> = None; // (matrix id, name)
+    let room_id = match (room_id.filter(|r| !r.is_empty()), to_player.as_deref().map(str::trim).filter(|p| !p.is_empty())) {
+        (Some(r), _) => r,
+        (None, Some(pid)) => {
+            let their_id = directory::matrix_id_resolving(pid).await?;
+            let room = client::open_dm(&guild_id, &session, &their_id).await?;
+            client::note_dm_player(&guild_id, &room, pid);
+            let name = directory::get(pid).map(|i| i.username).filter(|n| !n.trim().is_empty()).unwrap_or_else(|| pid.to_string());
+            guest = Some((their_id, name));
+            room
+        }
+        (None, None) => return Err("post it where?".into()),
+    };
+    let title = format!("Live · {}", sim::name_of(&b));
+    let match_room = client::create_match_room(&session, &title, &room_id, guest.as_ref().map(|g| g.0.as_str())).await?;
+    let mut frame = json!({ "v": 1, "kind": "invite", "battle": battle, "match": match_room, "block_ms": block_ms });
+    if let Some((u, _)) = guest.as_ref() {
+        frame["to"] = json!([u]);
+    }
+    if sim::parse(&frame).is_none() {
+        return Err("that invite does not hold together".into());
+    }
+    let body = sim::invite_body(&battle, &b, guest.as_ref().map(|g| g.1.as_str()));
+    let mentions: Vec<String> = guest.iter().map(|g| g.0.clone()).collect();
+    let invite_event = client::send_sim(&session, &room_id, &body, frame, None, &mentions).await?;
+    Ok(json!({
+        "guild_id": guild_id, "room_id": room_id, "match_room": match_room, "invite_event": invite_event,
+        "me": session.user_id, "block_ms": block_ms, "guest": guest.map(|g| json!({ "user_id": g.0, "name": g.1 })),
+    }))
+}
+
+/// One frame into a match room: a tick, a move, ready, hello… Checked for
+/// shape and size (sim::parse_live); typed, so no person's client shows it.
+#[tauri::command]
+pub async fn matrix_sim_live_send(guild_id: String, room_id: String, frame: Value) -> Result<Value, String> {
+    let session = session_for(&guild_id)?;
+    if !room_id.starts_with('!') {
+        return Err("not a room".into());
+    }
+    let frame = sim::parse_live(&frame).ok_or("that is not a frame a match carries")?;
+    if frame["kind"] == "status" {
+        return Err("a status goes under its invite".into());
+    }
+    let id = client::send_event(&session, &room_id, sim::EVENT_TYPE, frame).await?;
+    Ok(json!({ "event_id": id }))
+}
+
+/// How a live battle stands, under its invite, for the card in the room.
+#[tauri::command]
+pub async fn matrix_sim_live_status(guild_id: String, room_id: String, invite_event: String, frame: Value) -> Result<Value, String> {
+    let session = session_for(&guild_id)?;
+    let frame = sim::parse_live(&frame).ok_or("that is not a status")?;
+    if frame["kind"] != "status" {
+        return Err("that is not a status".into());
+    }
+    let id = client::send_event_in_thread(&session, &room_id, &invite_event, sim::EVENT_TYPE, frame).await?;
+    Ok(json!({ "event_id": id }))
+}
+
+/// Join a match room to play or to watch. Through the host's server: the
+/// room may be one this homeserver has never seen.
+pub async fn live_join(guild_id: &str, match_room: &str, host: &str) -> Result<(), String> {
+    let session = session_for(guild_id)?;
+    let server = host.split_once(':').map(|(_, s)| s).unwrap_or("");
+    if server.is_empty() {
+        client::join(&session, match_room).await
+    } else {
+        client::join_via(&session, match_room, server).await
+    }
+}
+
+/// Who a Matrix id is: the simulator names a live opponent from the chain,
+/// never from anything they sent.
+#[tauri::command]
+pub async fn matrix_person(user_id: String) -> Result<Value, String> {
+    if let Some(pid) = directory::player_id_of(&user_id) {
+        directory::resolve_many(&[pid]).await;
+    }
+    let (name, pfp, pid) = person_of(&user_id);
+    Ok(json!({ "user_id": user_id, "name": name, "pfp_attrs": pfp, "player_id": pid }))
+}
+
+/// Who a Matrix id is, from the on-chain directory: name and portrait.
+pub fn person_of(user_id: &str) -> (String, Option<String>, Option<String>) {
+    let pid = directory::player_id_of(user_id);
+    let ident = pid.as_deref().and_then(directory::get);
+    let name = ident.as_ref().map(|i| i.username.clone()).filter(|n| !n.trim().is_empty())
+        .or_else(|| pid.clone()).unwrap_or_else(|| user_id.to_string());
+    (name, ident.and_then(|i| i.pfp_attrs), pid)
+}
+
+#[tauri::command]
+pub async fn matrix_sim_thread(guild_id: String, room_id: String, event_id: String) -> Result<Value, String> {
+    let session = session_for(&guild_id)?;
+    sim_thread_view(&guild_id, &session, &room_id, &event_id).await
+}
+
+/// Post a battle to a room, or a result into a challenge's thread.
+///
+/// Called from the simulator, which is an untrusted window (it loads codes
+/// other people paste), so it hands over CODES and nothing else: the text
+/// that reaches the room is written here from what the codes decode to.
+///
+/// Into a thread, only a personal best goes — the rule the player chose: a
+/// best posts itself, no other run does. The check is made here against the
+/// thread as it stands, not trusted from the window.
+#[tauri::command]
+pub async fn matrix_sim_post(
+    guild_id: Option<String>,
+    room_id: Option<String>,
+    to_player: Option<String>,
+    battle: String,
+    result: Option<String>,
+    thread: Option<String>,
+) -> Result<Value, String> {
+    let guild_id = match guild_id.filter(|g| !g.is_empty()) {
+        Some(g) => g,
+        None => primary_key().ok_or("no guild you belong to runs a comms server")?,
+    };
+    let session = session_for(&guild_id)?;
+    let b = sim::decode_battle(&battle).ok_or("that is not a battle")?;
+    let outcome = match result.as_deref() {
+        Some(r) => Some(sim::decode_result(r).ok_or("that is not a result")?),
+        None => None,
+    };
+
+    let mut to_user: Option<String> = None;
+    let room_id = match (room_id.filter(|r| !r.is_empty()), to_player.as_deref().map(str::trim).filter(|p| !p.is_empty())) {
+        (Some(r), _) => r,
+        (None, Some(pid)) => {
+            let their_id = directory::matrix_id_resolving(pid).await?;
+            let room = client::open_dm(&guild_id, &session, &their_id).await?;
+            client::note_dm_player(&guild_id, &room, pid);
+            to_user = Some(their_id);
+            room
+        }
+        (None, None) => return Err("post it where?".into()),
+    };
+
+    if let Some(root) = thread.as_deref() {
+        let (r, o) = match (result.as_deref(), outcome.as_ref()) {
+            (Some(r), Some(o)) => (r, o),
+            _ => return Err("a thread takes a result".into()),
+        };
+        let view = sim_thread_view(&guild_id, &session, &room_id, root).await?;
+        if view["frame"]["battle"].as_str() != Some(battle.as_str()) {
+            return Err("that result is for a different battle".into());
+        }
+        let ladder: Vec<Value> = view["ladder"].as_array().cloned().unwrap_or_default();
+        if !sim::is_personal_best(&ladder, &session.user_id, r) {
+            return Ok(json!({ "posted": false, "room_id": room_id, "best": false }));
+        }
+        let (top, beat) = sim::would_top(&ladder, &session.user_id, r);
+        let mut frame = json!({ "v": 1, "kind": "result", "battle": battle, "result": r, "top": top });
+        if let Some(u) = beat.as_deref() {
+            frame["beat"] = json!(u);
+        }
+        let body = sim::result_body(&battle, r, &b, o);
+        let mentions: Vec<String> = beat.iter().cloned().collect();
+        let event_id = client::send_sim(&session, &room_id, &body, frame, Some(root), &mentions).await?;
+        return Ok(json!({ "posted": true, "event_id": event_id, "room_id": room_id, "top": top, "beat": beat, "best": true }));
+    }
+
+    let mut frame = json!({ "v": 1, "kind": "challenge", "battle": battle });
+    if let Some(r) = result.as_deref() {
+        frame["result"] = json!(r);
+    }
+    if let Some(u) = to_user.as_deref() {
+        frame["to"] = json!([u]);
+    }
+    if sim::parse(&frame).is_none() {
+        return Err("that result does not fit its battle".into());
+    }
+    let body = sim::challenge_body(&battle, &b, result.as_deref().zip(outcome.as_ref()));
+    let mentions: Vec<String> = to_user.iter().cloned().collect();
+    let event_id = client::send_sim(&session, &room_id, &body, frame, None, &mentions).await?;
+    Ok(json!({ "posted": true, "event_id": event_id, "room_id": room_id, "guild_id": guild_id }))
+}
+
+/// A line of talk in a challenge's thread, from the simulator's panel.
+#[tauri::command]
+pub async fn matrix_sim_reply(guild_id: String, room_id: String, event_id: String, body: String) -> Result<Value, String> {
+    let session = session_for(&guild_id)?;
+    let body = body.trim();
+    if body.is_empty() {
+        return Err("nothing to send".into());
+    }
+    if body.chars().count() > 2000 {
+        return Err("that is too long for one message".into());
+    }
+    let id = client::send_in_thread(&session, &room_id, &event_id, body).await?;
+    Ok(json!({ "event_id": id }))
+}
+
+/// The rooms the simulator can post a battle to: the conversations this
+/// player is in, machine rooms and unreadable ones left out.
+#[tauri::command]
+pub fn matrix_sim_rooms() -> Result<Value, String> {
+    let guild_id = primary_key().ok_or("no guild you belong to runs a comms server")?;
+    let rooms: Vec<Value> = client::rooms_of(&guild_id)
+        .into_iter()
+        .filter(|r| r.joined && !r.system && !r.superseded && !r.encrypted)
+        .map(|r| json!({
+            "room_id": r.room_id, "name": r.name, "section": r.section, "icon": r.icon,
+            "pfp_attrs": r.pfp_attrs, "player_id": r.player_id, "home_rank": r.home_rank,
+        }))
+        .collect();
+    Ok(json!({ "guild_id": guild_id, "rooms": rooms }))
 }
 
 /// Ask a room for help with a proof.

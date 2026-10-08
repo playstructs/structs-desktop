@@ -1,0 +1,79 @@
+/* The challenge card's own parts (simcard.js): the battle in miniature, the
+ * ladder and the thread line. The frame, the row, the doors and the badges
+ * are structs-cards.css and playercard.css, as for every other unfurl. */
+
+.chl-card, .chl-row { text-align: left; }
+/* Opened, a challenge keeps the board legible: wider than the 340px other
+   cards keep, as wide as the rows. */
+.chat-refs > .chat-ref.chat-mod-card.chat-kind-challenge:not(.chat-mod-row) { max-width: 480px; }
+
+/* The frame's emblem-and-readings row is empty on a challenge: the board is
+   its picture. */
+.chl-card .sui-planet-card-body-content.pc-body { display: none; }
+
+/* ── the battle in miniature ── the simulator's bands, one row each:
+   command ship · four slots · ambit · four slots · command ship */
+.chl-board { display: flex; flex-direction: column; width: 100%; border: 1px solid var(--border); }
+.chl-band {
+  display: grid;
+  grid-template-columns: 30px repeat(4, minmax(0, 1fr)) 14px repeat(4, minmax(0, 1fr)) 30px;
+  height: 34px;
+  background-color: var(--surface-default);
+  background-size: 64px 64px;
+  border-top: 1px solid var(--border-subtle);
+}
+.chl-band:first-child { border-top: 0 none; }
+.chl-space { background-image: url('img/tiles/space/space-1-2-top-middle.png'); }
+.chl-air { background-image: url('img/tiles/air/air-1-2-top-middle.png'); }
+.chl-land { background-image: url('img/tiles/land/land-1-2-top-middle.png'); }
+.chl-water { background-image: url('img/tiles/water/water-1-2-top-middle.png'); }
+.chl-cell { position: relative; overflow: hidden; margin: 1px; }
+.chl-cell.chl-full.chl-player { box-shadow: inset 0 -1px 0 var(--text-player-primary); }
+.chl-cell.chl-full.chl-computer { box-shadow: inset 0 -1px 0 var(--text-enemy-primary); }
+/* The sprite fills the middle half of its 128px art: drawn at 60px it reads
+   as a 30px ship, which a 34px band holds. */
+.chl-art { position: absolute; left: 50%; top: 50%; width: 60px; height: 60px; transform: translate(-50%, -50%); image-rendering: pixelated; }
+.chl-computer .chl-art { transform: translate(-50%, -50%) scaleX(-1); }
+.chl-guard { position: absolute; left: 0; bottom: 0; }
+.chl-amb { display: flex; align-items: center; justify-content: center; color: var(--text-body); }
+
+/* ── tallies ── */
+.chl-stats { display: flex; gap: var(--spacing-lg); padding-top: var(--spacing-md); border-top: 1px solid var(--border-subtle); }
+.chl-stat { flex: 1 1 0; min-width: 0; }
+.chl-stat-v { white-space: nowrap; }
+
+/* ── the ladder ── */
+.chl-ladder { display: flex; flex-direction: column; }
+.chl-run {
+  display: grid;
+  grid-template-columns: 12px minmax(0, 1fr) auto auto auto;
+  align-items: center;
+  gap: var(--spacing-md);
+  min-height: 28px;
+  padding: 0 var(--spacing-xs);
+  border-top: 1px solid var(--border-subtle);
+}
+.chl-run:first-child { border-top: 0 none; }
+.chl-run .pc-person { min-width: 0; overflow: hidden; }
+.chl-run .pc-person .pc-id { display: none; }
+.chl-run.chl-me { background: var(--surface-player-highlight); }
+.chl-run.chl-old { opacity: .55; }
+.chl-time { text-align: right; white-space: nowrap; }
+.chl-lost { text-align: right; white-space: nowrap; }
+.chl-more { padding: var(--spacing-xs); }
+
+/* ── the thread, in one line ── */
+.chl-thread { display: flex; align-items: baseline; gap: var(--spacing-md); min-width: 0; padding-top: var(--spacing-md); border-top: 1px solid var(--border-subtle); }
+.chl-replies { flex: none; color: var(--accent-primary); }
+.chl-said { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chl-said-who { color: var(--accent-secondary); }
+.chl-play { flex: none; }
+
+/* A run that took first place, said once in the room — addressed to you when
+   it was your place it took. */
+.chat-event.chl-line { opacity: 1; }
+.chat-event.chl-line .chl-name { color: var(--accent-primary); }
+.chat-event.chl-line.chl-mine { box-shadow: inset 2px 0 0 var(--text-warning); }
+
+/* A live invite nobody can take any more. */
+.chl-row.chl-faded { opacity: .6; }

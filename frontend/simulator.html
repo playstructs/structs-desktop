@@ -15,7 +15,7 @@
     <nav id="crumb" class="sui-text-label" aria-label="Round">
       <span data-step="setup">Setup</span><i class="sui-icon-sm icon-chevron-right"></i><span data-step="battle">Battle</span><i class="sui-icon-sm icon-chevron-right"></i><span data-step="debrief">Debrief</span>
     </nav>
-    <button id="start" type="button" class="sui-screen-btn sui-mod-primary sim-big">Start battle<i class="sui-icon-md icon-chevron-right"></i></button>
+    <button id="start" type="button" class="sui-screen-btn sui-mod-primary sim-big"><span>Start battle</span><i class="sui-icon-md icon-chevron-right"></i></button>
   </header>
 
   <!-- ── Setup ─────────────────────────────────────────────────────────── -->
@@ -23,6 +23,11 @@
     <aside id="round" class="sim-card" aria-label="Round">
       <div class="sim-card-h"><span class="sui-text-label">Round</span></div>
       <div class="sim-card-b">
+        <div id="addressed" class="sim-for hidden">
+          <span id="addressed-pfp" class="sim-pfp sim-pfp-lg"></span>
+          <span class="sim-for-who"><span id="addressed-name" class="sui-text-label"></span><span class="sui-text-hint">your DM</span></span>
+          <button id="addressed-clear" type="button" class="sui-screen-btn sim-square" aria-label="Not for anyone" title="Not for anyone"><i class="sui-icon-sm icon-close"></i></button>
+        </div>
         <div class="sim-field">
           <div class="sim-field-h"><span class="sui-text-label sui-text-hint">Encounter</span><i class="sui-icon-sm icon-enemy-tile sui-text-hint" title="Enemy structs" aria-label="Enemy structs"></i></div>
           <div id="encounters" class="sim-list" role="radiogroup" aria-label="Encounter"></div>
@@ -50,6 +55,9 @@
         </div>
         <div class="sim-field sim-field-rule">
           <span class="sui-text-label sui-text-hint">Share</span>
+          <button id="send-to" type="button" class="sui-screen-btn sui-mod-primary sim-wide hidden"><i class="sui-icon-sm icon-outgoing"></i><span></span></button>
+          <button id="live-to" type="button" class="sui-screen-btn sui-mod-secondary sim-wide hidden"><i class="sui-icon-sm icon-raid"></i><span></span></button>
+          <button id="post-to" type="button" class="sui-screen-btn sim-wide"><i class="sui-icon-sm icon-outgoing"></i>Post to…</button>
           <div class="sim-pair">
             <button id="export" type="button" class="sui-screen-btn">Copy link</button>
             <button id="import" type="button" class="sui-screen-btn">Paste</button>
@@ -57,6 +65,8 @@
         </div>
       </div>
     </aside>
+
+    <aside id="challenge" class="sim-card sim-challenge hidden" aria-label="Challenge"></aside>
 
     <main id="fleets">
       <div id="defend-banner" class="hidden">
@@ -66,6 +76,10 @@
       <div id="fleet-head">
         <div class="sim-side"><span class="sui-text-label sim-you">Your fleet</span><span id="count-you" class="sui-text-hint"></span></div>
         <div class="sim-head-tools">
+          <span id="locked-chip" class="sim-chip sim-tag sui-text-label hidden"></span>
+          <button id="unlock" type="button" class="sui-screen-btn sui-mod-secondary hidden"><i class="sui-icon-sm icon-edit"></i>Edit fleets</button>
+          <button id="relock" type="button" class="sui-screen-btn sui-mod-secondary hidden">Back to the challenge</button>
+          <button id="live-room" type="button" class="sui-screen-btn hidden" title="Anyone in the room may take it; anyone there may watch"><i class="sui-icon-sm icon-raid"></i>Play live</button>
           <button id="mirror" type="button" class="sui-screen-btn sui-mod-secondary" title="Copy your fleet to the computer"><i class="sui-icon-sm icon-chevron-right"></i>Mirror</button>
           <button id="swap" type="button" class="sui-screen-btn sui-mod-secondary" title="Trade fleets with the computer">Swap</button>
         </div>
@@ -91,6 +105,7 @@
         <button id="to-debrief" type="button" class="sui-screen-btn sui-mod-primary hidden">Debrief<i class="sui-icon-md icon-chevron-right"></i></button>
       </div>
     </div>
+    <div id="battle-main">
     <div id="board-wrap">
       <iframe id="board" title="Battle map" src="about:blank"></iframe>
       <div id="deploy" class="sim-overlay hidden" role="status">
@@ -119,10 +134,14 @@
         </div>
       </div>
     </div>
+    <aside id="battle-thread" class="sim-rail hidden" aria-label="Challenge thread"></aside>
+    </div>
   </div>
 
   <!-- ── Debrief ───────────────────────────────────────────────────────── -->
   <div id="debrief-screen" class="hidden">
+    <div class="sim-debrief-wrap">
+    <aside id="db-challenge" class="sim-card sim-challenge hidden" aria-label="Challenge"></aside>
     <div class="sim-debrief">
       <section class="sim-verdict">
         <div class="sim-verdict-text">
@@ -141,6 +160,7 @@
           <button id="db-new" type="button" class="sim-link sui-text-label">New encounter</button>
         </div>
       </section>
+      <div id="db-post" class="sim-post hidden" role="status"></div>
       <div class="sim-debrief-cols">
         <section aria-label="Tallies">
           <div class="sim-tally sim-tally-h"><span></span><span class="sui-text-label sim-you">You</span><span class="sui-text-label sim-cpu">Computer</span></div>
@@ -152,6 +172,7 @@
           <button id="show-log" type="button" class="sui-screen-btn"><i class="sui-icon-md icon-combat-log"></i>Full battle log</button>
         </section>
       </div>
+    </div>
     </div>
   </div>
 
@@ -166,7 +187,24 @@
     </div>
   </div>
 
+  <div id="post-dialog" class="sim-overlay sim-fixed hidden" role="dialog" aria-labelledby="post-title">
+    <div class="sim-card sim-post-card">
+      <div class="sim-card-h"><span id="post-title" class="sui-text-label">Share</span>
+        <button id="post-close" type="button" class="sui-screen-btn sim-square" aria-label="Close"><i class="sui-icon-sm icon-close"></i></button></div>
+      <div class="sim-card-b">
+        <div id="post-what" class="sim-post-what"></div>
+        <label class="sim-field"><span class="sui-text-label sui-text-hint">Post to</span>
+          <input id="post-find" class="sim-input sim-input-wide" type="text" placeholder="Find a player or room" autocomplete="off" spellcheck="false"></label>
+        <div id="post-rooms" class="sim-list sim-post-rooms" role="radiogroup" aria-label="Post to"></div>
+        <div class="sim-post-go">
+          <button id="post-send" type="button" class="sui-screen-btn sui-mod-primary"><i class="sui-icon-sm icon-outgoing"></i><span>Post</span></button>
+          <button id="post-copy" type="button" class="sui-screen-btn"><i class="sui-icon-sm icon-copy"></i>Copy link</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <div id="message" role="status" aria-live="polite"></div>
-  <script src="battle-art.js"></script><script src="simulator-types.js"></script><script src="simulator-chain.js"></script><script src="simulator-ai.js"></script><script src="simulator-host.js"></script><script src="simcode.js"></script><script src="simulator.js"></script>
+  <script src="pfp.js"></script><script src="battle-art.js"></script><script src="simulator-types.js"></script><script src="simulator-chain.js"></script><script src="simulator-ai.js"></script><script src="simulator-host.js"></script><script src="simcode.js"></script><script src="simulator-live.js"></script><script src="simulator-social.js"></script><script src="simulator.js"></script>
 </body>
 </html>

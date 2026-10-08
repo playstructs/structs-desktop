@@ -242,7 +242,8 @@
     nm.title = str(d.title);
     title.appendChild(nm);
     var idl = el('span', 'pc-id');
-    idl.appendChild(T('#' + str(d.id) + (d.sub ? ' · ' + str(d.sub) : '')));
+    // `hideId`, as on the row, for a frame whose "id" is not one a person reads.
+    idl.appendChild(T((d.hideId ? '' : '#' + str(d.id) + (d.sub ? ' · ' : '')) + (d.sub ? str(d.sub) : '')));
     if (d.attn) { idl.appendChild(T(' · ')); idl.appendChild(el('span', 'pc-attn', d.attn)); }
     if (d.subTitle) idl.title = d.subTitle;
     title.appendChild(idl);

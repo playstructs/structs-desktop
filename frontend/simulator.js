@@ -30,6 +30,7 @@
   var draft, selection = null, changing = false, picking = null;
   var host = null, initial = null, startHeight = 0, deploying = false;
   var toastTimer, clockTimer, countdownTimer, debriefTimer, debriefShown = false;
+  var social = null;   // simulator-social.js, built once the functions below exist
 
   function el(tag, text, cls) { var e = document.createElement(tag); if (text != null) e.textContent = text; if (cls) e.className = cls; return e; }
   function icon(name, size) { var i = el('i', null, 'sui-icon-' + (size || 'md') + ' icon-' + name); i.setAttribute('aria-hidden', 'true'); return i; }
@@ -274,6 +275,8 @@
             b.addEventListener('click', function (side, ambit, slot, command, u) {
               if (u) selectUnit(u); else select({ side: side, ambit: ambit, slot: slot, command: command, id: null });
             }.bind(null, side, ambit, slot, command, u));
+            // A challenge's fleets are its identity: looked at, not changed.
+            if (!u && social.locked()) b.disabled = true;
           }
           if (u) {
             b.dataset.unit = u.id;
@@ -298,6 +301,7 @@
     $('count-cpu').textContent = count('computer');
     renderChecks();
     renderInspector();
+    social.renderSetup();
   }
 
   function renderReach(box, side, units) {
@@ -333,6 +337,8 @@
     var head = el('div', null, 'sim-card-h');
     head.appendChild(el('span', cap(selection.ambit) + (selection.command ? ' · command' : ' · slot ' + (selection.slot + 1)), 'sui-text-label ' + (selection.side === 'player' ? 'sim-you' : 'sim-cpu')));
     box.appendChild(head);
+    var fixed = social.locked();
+    if (!u && fixed) return;
     if (!u || changing) { box.appendChild(picker(u)); if (u) box.appendChild(actions([button('Cancel', 'sui-screen-btn', function () { changing = false; renderInspector(); })])); return; }
 
     var t = TYPES[u.type];
@@ -372,6 +378,7 @@
       seg.setAttribute('role', 'radiogroup'); seg.setAttribute('aria-label', 'Command ship ambit');
       AMBITS.filter(function (a) { return fits(t, a); }).forEach(function (a) {
         var b = button(null, 'sim-opt', function () { u.ambit = a; selection.ambit = a; renderSetup(); });
+        b.disabled = fixed;
         b.setAttribute('role', 'radio'); b.setAttribute('aria-checked', String(u.ambit === a));
         b.appendChild(el('span', a.charAt(0).toUpperCase(), 'sui-text-label'));
         b.setAttribute('aria-label', a);
@@ -393,12 +400,15 @@
       });
       guard.value = u.protects || '';
       guard.addEventListener('change', function () { setWard(u, guard.value || null); });
+      guard.disabled = fixed;
       var pick = button(null, 'sui-screen-btn sim-square', function () { picking = u.id; renderSetup(); });
       pick.appendChild(icon('defend')); pick.setAttribute('aria-label', 'Pick on the board'); pick.title = 'Pick on the board';
-      row.append(guard, pick);
+      row.append(guard);
+      if (!fixed) row.append(pick);
       def.appendChild(row);
       box.appendChild(def);
     }
+    if (fixed) return;
     box.appendChild(actions([
       button('Change', 'sui-screen-btn sui-mod-secondary', function () { changing = true; renderInspector(); }),
       button('Remove', 'sui-screen-btn sui-mod-destructive', function () { place(null); }),
@@ -481,6 +491,7 @@
     $('setup-screen').classList.toggle('hidden', name !== 'setup');
     $('battle-screen').classList.toggle('hidden', name !== 'battle');
     $('debrief-screen').classList.toggle('hidden', name !== 'debrief');
+    if (social) social.renderPanels();
   }
 
   function stopBattle() {
@@ -491,7 +502,11 @@
     document.body.classList.remove('sim-deploying');
   }
 
-  function start(config) {
+  /* `live` (simulator-social.js): { role: 'host'|'guest'|'watch', host, guest,
+   * send, attach(host), remote(r) } — a battle with a person on the other
+   * side. The host runs it with no computer; a guest or a watcher replays
+   * the host's ticks through a RemoteHost (simulator-live.js). */
+  function start(config, live) {
     try {
       config = config || currentConfig();
       validate(config.units);
@@ -500,17 +515,38 @@
       settings.blockMs = config.blockMs; settings.difficulty = config.difficulty; settings.charge = clone(config.charge);
       var chain = chainFromDraft(config);
       startHeight = chain.height;
-      var cpu = { id: CPU.id, name: CPU.fleetName + ' · ' + config.difficulty, pfp: CPU.pfp };
-      host = new Host({
-        chain: chain, you: YOU, cpu: cpu, label: 'sim', blockMs: config.blockMs,
-        ai: new Ai(CPU.id, config.difficulty, config.seed),
-        frame: function () { var f = $('board'); return f && f.contentWindow; },
-        onChange: function () { renderBattleBar(); renderPaused(); },
-      });
+      var frame = function () { var f = $('board'); return f && f.contentWindow; };
+      var onChange = function () { renderBattleBar(); renderPaused(); };
+      if (live && live.role !== 'host') {
+        // The opening board, from the code, until the host's first tick.
+        var probe = new Host({ chain: chain, you: YOU, cpu: { id: CPU.id, name: live.guest.name, pfp: live.guest.pfp }, label: 'probe', frame: function () { return null; } });
+        var opening = probe.snapshot();
+        probe.destroy();
+        var types = {};
+        window.SimulatorTypes.types.forEach(function (t) { types[t.id] = Host.spectatorType(t); });
+        host = new window.SimLive.RemoteHost({
+          frame: frame, label: 'sim', role: live.role, initial: opening, types: types,
+          players: { host: live.host, guest: live.guest }, send: live.send, onChange: onChange,
+        });
+        live.remote(host);
+      } else {
+        var cpu = live ? { id: CPU.id, name: live.guest.name, pfp: live.guest.pfp, label: live.guest.name + '\u2019s fleet' }
+          : { id: CPU.id, name: CPU.fleetName + ' · ' + config.difficulty, pfp: CPU.pfp };
+        host = new Host({
+          chain: chain, you: YOU, cpu: cpu, label: 'sim', blockMs: config.blockMs,
+          ai: live ? null : new Ai(CPU.id, config.difficulty, config.seed),
+          frame: frame, onChange: onChange,
+        });
+        if (live) live.attach(host);
+      }
       debriefShown = false;
       setScreen('battle');
       $('board').src = 'raidview.html?planet=' + chain.planetId + '&label=sim&sim=1';
-      deploy(config);
+      if (live && live.role === 'watch') { deploying = false; renderBattleBar(); }
+      // A guest's matchup reads from its own side, as its board does.
+      else if (live && live.role === 'guest') deploy(social.swapped(config));
+      else deploy(config);
+      social.renderBattle();
       clockTimer = setInterval(function () { renderBattleBar(); renderPaused(); }, 250);
     } catch (e) { message(e.message); }
   }
@@ -522,6 +558,7 @@
     var mine = config.units.filter(function (u) { return u.side === 'player'; }).length;
     var theirs = config.units.length - mine;
     $('deploy-you').textContent = mine + ' structs · ' + config.charge.player + ' charge';
+    document.querySelector('#deploy .sim-side-cpu .sim-cpu').textContent = social.opponentName() || 'Computer';
     $('deploy-cpu').textContent = theirs + ' structs · ' + config.charge.computer + ' charge';
     renderReach($('deploy-reach-you'), 'player', config.units);
     renderReach($('deploy-reach-cpu'), 'computer', config.units);
@@ -546,6 +583,16 @@
     var chips = $('chips'); chips.replaceChildren();
     [cap(cfg.difficulty), BLOCK_TIMES.filter(function (b) { return b.ms === settings.blockMs; }).map(function (b) { return b.name; })[0] || (settings.blockMs / 1000 + ' s')]
       .forEach(function (text) { chips.appendChild(el('span', text, 'sim-chip sui-text-label')); });
+    if (social.matches(cfg)) {
+      chips.insertBefore(el('span', social.battleName(), 'sim-chip sim-tag sui-text-label'), chips.firstChild);
+      var lad = (social.view() && social.view().ladder) || [];
+      if (lad[0]) chips.appendChild(el('span', 'best ' + lad[0].outcome.time, 'sui-text-label sui-text-hint'));
+    }
+    if (social.isLive()) {
+      chips.insertBefore(el('span', 'Live', 'sim-chip sim-live-chip sui-text-label'), chips.firstChild);
+      var conn = social.connection();
+      if (conn) chips.appendChild(el('span', conn.text, 'sui-text-label sim-conn sim-conn-' + conn.state));
+    }
     var standing = host.standing(), fielded = host.fielded;
     var st = $('standing'); st.replaceChildren(
       el('span', standing[YOU.id] + '/' + fielded[YOU.id], 'sim-you'), el('span', ' · ', 'sui-text-hint'),
@@ -553,7 +600,8 @@
     st.title = 'Structs standing';
     var f = host.finished;
     var block = host.chain.height - startHeight;
-    $('phase').textContent = deploying ? 'Deploying' : f ? 'Battle over' : host.running ? 'Block ' + block : 'Paused · block ' + block;
+    $('phase').textContent = deploying ? 'Deploying' : f ? 'Battle over' : host.running ? 'Block ' + block
+      : social.isLive() ? 'Waiting · block ' + block : 'Paused · block ' + block;
     $('pause').querySelector('span').textContent = host.running || deploying ? 'Pause' : 'Resume';
     $('pause').classList.toggle('hidden', !!f);
     $('end').classList.toggle('hidden', !!f);
@@ -566,7 +614,7 @@
 
   var pausedShown = false;
   function renderPaused() {
-    var show = !!host && !host.running && !host.finished && !deploying;
+    var show = !!host && !host.running && !host.finished && !deploying && !social.isLive();
     $('paused').classList.toggle('hidden', !show);
     // The choices are rebuilt only as the menu opens: the clock ticks every
     // 250 ms and a rebuild under the pointer would swallow the click.
@@ -599,7 +647,13 @@
     var verdict = f.winner === 'you' ? 'victory' : f.winner === 'cpu' ? 'defeat' : 'draw';
     $('verdict').textContent = cap(verdict);
     $('verdict').className = 'sui-text-display sim-huge ' + verdict;
-    $('reason').textContent = f.forfeit ? 'You ended the battle' : verdict === 'victory' ? 'Computer command ship destroyed'
+    var them = social.opponentName();
+    var themTitle = them ? them : 'Computer';
+    document.querySelector('.sim-tally-h .sim-cpu').textContent = themTitle;
+    $('reason').textContent = f.gone ? (f.winner === 'you' ? (them || 'The other side') + ' left the battle' : 'The connection dropped')
+      : f.forfeit ? (f.winner === 'you' ? (them || 'They') + ' ended the battle' : 'You ended the battle')
+      : them ? (verdict === 'victory' ? them + '\u2019s command ship destroyed' : verdict === 'defeat' ? 'Your command ship destroyed' : 'Both command ships destroyed')
+      : verdict === 'victory' ? 'Computer command ship destroyed'
       : verdict === 'defeat' ? 'Your command ship destroyed'
       : f.stalemate === 'quiet' ? 'Stalemate · ' + Host.QUIET_BLOCKS + ' blocks without a hit'
       : f.stalemate === 'moves' ? 'Stalemate · ' + Host.QUIET_MOVES + ' command ship moves without a hit'
@@ -633,9 +687,37 @@
     if (!moments.children.length) moments.appendChild(el('div', 'No structs destroyed', 'sim-moment sui-text-hint'));
 
     var next = LEVELS[LEVELS.indexOf(initial.difficulty) + 1];
-    $('db-harder').classList.toggle('hidden', !next);
+    var liveRole = social.liveRole();
+    $('db-edit').classList.toggle('hidden', !!liveRole);
+    $('db-swap').classList.toggle('hidden', !!liveRole);
+    $('db-rematch').classList.toggle('hidden', liveRole === 'guest' || liveRole === 'watch');
+    $('db-harder').classList.toggle('hidden', !next || !!liveRole);
     if (next) { $('db-harder').textContent = 'Harder'; $('db-harder').title = 'Rematch against a ' + cap(next) + ' opponent'; }
     setScreen('debrief');
+    var code = resultCode();
+    if (code) social.debrief(initial, code);
+  }
+
+  /* How this battle went, as the results code (simcode.js, spec
+   * proposals/sim-results-link.md): what a challenge's ladder ranks. */
+  function runResult() {
+    if (!host || !host.finished) return null;
+    var s = host.summary(), f = s.finished;
+    var tally = function (id) {
+      var t = s.stats[id] || {};
+      return { lost: s.lost[id], attacks: t.attacks, damage: t.damage, evaded: t.evaded, blocked: t.blocked, countered: t.countered };
+    };
+    return {
+      winner: f.winner === 'you' ? 'player' : f.winner === 'cpu' ? 'computer' : 'draw',
+      forfeit: !!f.forfeit, stalemate: f.stalemate || null,
+      blocks: Math.max(0, f.height - startHeight), seconds: Math.round(s.elapsedMs / 1000),
+      stats: { player: tally(YOU.id), computer: tally(CPU.id) },
+    };
+  }
+  function resultCode() {
+    var r = runResult();
+    if (!r) return null;
+    try { return SimCode.encodeResult(r); } catch (e) { return null; }
   }
 
   /* First blood, every command ship, and the latest kills — five at most. */
@@ -675,15 +757,25 @@
   function copyLink(config) {
     try { copyText(battleLink(config), 'Battle link copied.', 'Battle link'); } catch (e) { message('This battle cannot be shared: ' + e.message + '.'); }
   }
-  /* The debrief's share: how it went, and the battle to try it yourself. */
-  function shareResult() {
-    if (!host || !host.finished || !initial) return;
+  /* The debrief's share: how it went, and the battle to try it yourself —
+   * to a room or a DM (Post to…), or as a link for anywhere else. */
+  function resultLine() {
     var s = host.summary(), f = s.finished;
     var verdict = f.winner === 'you' ? 'Victory' : f.winner === 'cpu' ? 'Defeat' : 'Draw';
     var blocks = Math.max(0, f.height - startHeight);
-    var line = [verdict + ' vs ' + cap(initial.difficulty), format(s.elapsedMs), blocks + (blocks === 1 ? ' block' : ' blocks'),
+    return [verdict + ' vs ' + cap(initial.difficulty), format(s.elapsedMs), blocks + (blocks === 1 ? ' block' : ' blocks'),
       'lost ' + s.lost[YOU.id] + ' of ' + s.fielded[YOU.id]].join(' · ');
-    try { copyText(line + ' — ' + battleLink(initial), 'Result copied.', 'Share result'); } catch (e) { message('This battle cannot be shared: ' + e.message + '.'); }
+  }
+  function shareResult() {
+    if (!host || !host.finished || !initial) return;
+    social.openPost(initial, resultCode(), resultLine());
+  }
+  /* Copy for anywhere outside Comms: the result line and its link, or the
+   * battle's link. A result link is also "play this battle". */
+  function copyFor(config, result, line) {
+    if (!result) { copyLink(config); return; }
+    try { copyText((line ? line + ' — ' : '') + battleLink(config) + '/' + result, 'Result copied.', 'Share result'); }
+    catch (e) { message('This battle cannot be shared: ' + e.message + '.'); }
   }
   function openCode(text, title) {
     $('layout-code').value = text || '';
@@ -735,6 +827,8 @@
   function openLink(code) {
     var c = SimCode.decode(code);
     if (!c) { message('That link does not hold a battle.'); return false; }
+    var ctx = social.context();
+    if (ctx && ctx.battle !== code) social.leave();
     try {
       if (host) { stopBattle(); $('board').src = 'about:blank'; }
       picking = null; changing = false;
@@ -747,6 +841,33 @@
 
   /* ── Wiring ────────────────────────────────────────────────────────────── */
 
+  social = window.SimSocial({
+    $: $, el: el, icon: icon, button: button, cap: cap, message: message,
+    shareConfig: shareConfig, currentConfig: currentConfig, copyFor: copyFor,
+    initial: function () { return initial; },
+    renderAll: function () { renderRound(); renderSetup(); },
+    startLive: function (cfg, live) { start(cfg, live); },
+    swapped: function (cfg) {
+      var c = clone(cfg);
+      c.units = swapped(c.units);
+      c.charge = { player: cfg.charge.computer, computer: cfg.charge.player };
+      return c;
+    },
+    summary: function () { return host ? host.summary() : {}; },
+    /* The guest is gone or gave up: the host's side wins. */
+    concede: function (gone) {
+      if (!host || host.finished) return;
+      host.finished = { winner: 'you', height: host.chain.height, gone: !!gone, forfeit: !gone };
+      host.stop();
+    },
+    loadChallenge: function (cfg) {
+      if (host) { stopBattle(); $('board').src = 'about:blank'; }
+      picking = null; changing = false;
+      setScreen('setup');
+      try { applyConfig(cfg); } catch (e) { message(e.message); }
+    },
+  });
+
   function selectDefault() {
     var cmd = draft.filter(function (u) { return u.side === 'player' && u.type === COMMAND_ID; })[0];
     selection = cmd ? { side: 'player', ambit: cmd.ambit, slot: 0, command: true, id: cmd.id } : null;
@@ -754,7 +875,7 @@
   }
   function loadLayout() { draft = layout(settings.preset, $('seed').value); selectDefault(); renderRound(); renderSetup(); }
 
-  $('start').addEventListener('click', function () { start(); });
+  $('start').addEventListener('click', function () { if (social.onStart()) return; start(); });
   $('ai-down').addEventListener('click', function () { settings.difficulty = LEVELS[Math.max(0, LEVELS.indexOf(settings.difficulty) - 1)]; renderRound(); });
   $('ai-up').addEventListener('click', function () { settings.difficulty = LEVELS[Math.min(LEVELS.length - 1, LEVELS.indexOf(settings.difficulty) + 1)]; renderRound(); });
   $('reseed').addEventListener('click', function () {
@@ -787,7 +908,7 @@
   $('pause-end').addEventListener('click', function () { if (host) host.forfeit(); });
   $('to-debrief').addEventListener('click', showDebrief);
 
-  $('db-rematch').addEventListener('click', function () { start(initial); });
+  $('db-rematch').addEventListener('click', function () { if (social.rematch()) return; start(initial); });
   $('db-edit').addEventListener('click', function () { toSetup(false); });
   $('db-swap').addEventListener('click', function () {
     var c = clone(initial);
@@ -802,12 +923,14 @@
     start(c);
   });
   $('db-code').addEventListener('click', shareResult);
-  $('db-new').addEventListener('click', function () { toSetup(true); });
+  $('db-new').addEventListener('click', function () { social.leave(); toSetup(true); });
+  $('post-to').addEventListener('click', function () { social.openPost(currentConfig(), null); });
   $('show-log').addEventListener('click', function () { setScreen('battle'); });
 
   document.addEventListener('keydown', function (e) {
     if (e.key !== 'Escape') return;
     if (!$('code-dialog').classList.contains('hidden')) closeCode();
+    else if (!$('post-dialog').classList.contains('hidden')) social.closePost();
     else if (picking) { picking = null; renderSetup(); }
   });
   /* A hidden window holds the battle; coming back picks it up again. macOS
@@ -817,6 +940,9 @@
   var autoPaused = false;
   document.addEventListener('visibilitychange', function () {
     if (document.hidden) {
+      // A live battle runs on the host's clock for two people: nobody's
+      // window being covered may stop it.
+      if (social.isLive()) return;
       if (host && host.running) { autoPaused = true; host.stop(); }
     } else if (autoPaused) {
       autoPaused = false;
@@ -828,9 +954,11 @@
   window.Simulator = {
     getHost: function () { return host; }, getLayout: function () { return draft; }, getSettings: function () { return settings; },
     layout: layout, validate: validate, readiness: readiness, start: start, toSetup: toSetup, showDebrief: showDebrief, openLink: openLink,
+    takeContext: function () { return social.take(); }, social: social, runResult: runResult,
   };
   setScreen('setup');
   loadLayout();
   var linked = /[?&]sim=([A-Za-z0-9_-]{4,2000})/.exec(location.search || '');
   if (linked) openLink(linked[1]);
+  social.take();
 })();
