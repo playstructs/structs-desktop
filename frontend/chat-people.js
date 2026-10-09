@@ -14,7 +14,7 @@
 //                       pfpPortrait, presenceDot, roomRow, refreshRooms, openRoom,
 //                       sendMessage, say, S, Chat })
 //     → { renderMembers, memberRow, loadMembers, browseOrder, renderBrowse, loadBrowse,
-//         personRow, renderPeople, loadPeople, startDm }
+//         personRow, renderPeople, loadPeople, startDm, challenge }
 (function () {
   'use strict';
   window.ChatPeople = function (ctx) {
@@ -86,9 +86,18 @@
       left.appendChild(info);
       row.appendChild(left);
 
-      // A player can be messaged; a bot cannot.
+      // A player can be challenged and messaged; a bot cannot.
       if (p.player_id && !p.is_self) {
         var right = el('div', 'sui-result-row-right-section');
+        var fight = el('button', 'chat-ref-action');
+        fight.title = 'Challenge to a battle';
+        fight.setAttribute('aria-label', 'Challenge to a battle');
+        fight.appendChild(icon('icon-raid', 'sui-icon-sm'));
+        fight.addEventListener('click', function (ev) {
+          ev.stopPropagation();
+          challenge(p.player_id);
+        });
+        right.appendChild(fight);
         var btn = el('button', 'chat-ref-action');
         btn.appendChild(icon('icon-phone', 'sui-icon-sm'));
         btn.appendChild(el('span', null, 'Message'));
@@ -377,16 +386,27 @@
         })
         // A DM that cannot be addressed is a normal outcome (their guild runs no
         // comms server), so it belongs in the timeline, not on an error page.
-        .catch(function (e) {
-          if (S.view === 'room') say(String(e), true); else showError(String(e));
-        });
+        .catch(failed);
     }
     Chat.startDm = startDm;
+
+    // The simulator, opened addressed to this player — the same door their
+    // card's "Challenge to a battle" opens.
+    function challenge(playerId) {
+      return invoke('sim_address_open', { playerId: playerId }).catch(failed);
+    }
+
+    // An action that did not happen is said where you are: in the timeline
+    // inside a room, on the error page anywhere else.
+    function failed(e) {
+      if (S.view === 'room') say(String(e), true); else showError(String(e));
+    }
 
     return {
       renderMembers: renderMembers, memberRow: memberRow, loadMembers: loadMembers,
       browseOrder: browseOrder, renderBrowse: renderBrowse, loadBrowse: loadBrowse,
       personRow: personRow, renderPeople: renderPeople, loadPeople: loadPeople, startDm: startDm, createGroup: createGroup,
+      challenge: challenge,
     };
   };
 })();

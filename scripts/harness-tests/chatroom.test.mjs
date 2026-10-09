@@ -18,8 +18,8 @@ function boot(state = {}, fixtures = {}) {
   const ctx = {
     el, icon: (n, s) => { const i = el('i', s ? n + ' ' + s : n); return i; }, byId: (id) => w.document.getElementById(id),
     clear: (n) => { while (n.firstChild) n.removeChild(n.firstChild); },
-    invoke: (cmd, args) => { calls.push([cmd, args]); return Promise.resolve(fixtures[cmd]); },
-    go: (v) => calls.push(['go', v]), S, Chat: {},
+    invoke: (cmd, args) => { calls.push([cmd, args]); const f = fixtures[cmd]; return f instanceof Error ? Promise.reject(f) : Promise.resolve(f); },
+    go: (v) => calls.push(['go', v]), S, Chat: { say: (t, alert) => calls.push(['say', t, alert]) },
     render: () => calls.push(['render']),
     pageHeader: (label, back, right) => { const h = el('div', 'hdr', label); if (right) h.appendChild(right); return h; },
     noticeBlock: (t, d) => el('div', 'notice', t + ' ' + d),
@@ -134,6 +134,30 @@ function boot(state = {}, fixtures = {}) {
   assert.ok(/unpin/.test(pinned.title), 'a pinned room offers to unpin: ' + pinned.title);
   pinned.click();
   assert.deepEqual(calls.filter((c) => c[0] === 'setPinned').pop(), ['setPinned', false]);
+}
+
+// C. A DM with a player offers a battle with them, first in the header; a
+//    channel, a DM with no player behind it, and a DM with yourself do not.
+{
+  const dm = { name: 'JPEG', section: 'direct', player_id: '1-61' };
+  const { rm, calls } = boot({ room: dm, profile: { user_id: '@1-194:x' } }, { sim_address_open: null });
+  const page = rm.renderRoom();
+  const fight = page.querySelector('#chat-room-challenge');
+  assert.ok(fight && fight.classList.contains('sui-nav-btn'), 'a DM header carries the challenge');
+  assert.equal(fight.title, 'Challenge to a battle');
+  assert.ok(fight.querySelector('.icon-raid.sui-text-secondary'), 'the crossed swords, quiet like its siblings');
+  assert.equal(page.querySelector('.chat-header-actions').firstElementChild, fight, 'first in the header');
+  fight.click();
+  await tick(5);
+  assert.equal(JSON.stringify(calls.filter((c) => c[0] === 'sim_address_open').map((c) => c[1])), JSON.stringify([{ playerId: '1-61' }]), 'the simulator, addressed to the DM\'s player');
+  assert.ok(!boot({ room: { name: 'Galaxy Net', section: 'galaxy' } }).rm.renderRoom().querySelector('#chat-room-challenge'), 'a channel has none');
+  assert.ok(!boot({ room: { name: 'Indexer', section: 'direct' } }).rm.renderRoom().querySelector('#chat-room-challenge'), 'a DM with no player has none');
+  assert.ok(!boot({ room: { name: 'Me', section: 'direct', player_id: '1-194' }, profile: { user_id: '@1-194:x' } }).rm.renderRoom().querySelector('#chat-room-challenge'), 'nor a DM with yourself');
+  // A simulator that would not open is said in this timeline.
+  const bad = boot({ room: dm }, { sim_address_open: new Error('that is not a player') });
+  bad.rm.renderRoom().querySelector('#chat-room-challenge').click();
+  await tick(5);
+  assert.ok(bad.calls.some((c) => c[0] === 'say' && /not a player/.test(c[1]) && c[2] === true), 'said in the room, as an alert');
 }
 
 console.log('chat-room: all checks passed');

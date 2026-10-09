@@ -45,10 +45,37 @@ function boot(fixtures = {}) {
   assert.ok(bot.querySelector('.icon-computer') && !bot.querySelector('.pfp') && !bot.querySelector('button'), 'a bot gets its own glyph and no Message button');
   const them = pp.memberRow({ player_id: '1-248', name: 'Phoniffer', presence: { status_msg: 'raiding' } });
   assert.ok(them.querySelector('.dot') && /raiding/.test(them.textContent), 'presence first, then what they say they are doing');
-  them.querySelector('button').click();
+  [...them.querySelectorAll('button')].find((b) => /Message/.test(b.textContent)).click();
   await tick(5);
   assert.equal(JSON.stringify(calls.find((c) => c[0] === 'matrix_dm')[1]), JSON.stringify({ guildId: '0-1', playerId: '1-248' }));
   assert.ok(calls.some((c) => c[0] === 'refreshRooms') && calls.some((c) => c[0] === 'openRoom' && c[1] === '!dm:x'), 'a DM is refreshed into the list and opened');
+}
+
+// 1b. A member row: another player can be challenged — the simulator opens
+//     addressed to them, and the row's own click (the DM) does not fire.
+{
+  const { pp, calls } = boot({ matrix_dm: { room_id: '!dm:x' }, sim_address_open: null });
+  const fightOf = (row) => row.querySelector('button[title="Challenge to a battle"]');
+  assert.ok(!fightOf(pp.memberRow({ player_id: '1-194', name: 'Marklifer', is_self: true })), 'you cannot challenge yourself');
+  assert.ok(!fightOf(pp.memberRow({ user_id: '@bot:x', name: 'Herald' })), 'a bot cannot be challenged');
+  const them = pp.memberRow({ player_id: '1-248', name: 'Phoniffer' });
+  const fight = fightOf(them);
+  assert.ok(fight && fight.classList.contains('chat-ref-action'), 'the challenge is a row action, like Message');
+  assert.equal(fight.getAttribute('aria-label'), 'Challenge to a battle');
+  assert.ok(fight.querySelector('.icon-raid.sui-icon-sm') && !fight.textContent.trim(), 'the crossed swords, no label');
+  assert.ok(fight.nextElementSibling && /Message/.test(fight.nextElementSibling.textContent), 'before Message');
+  fight.dispatchEvent(new fight.ownerDocument.defaultView.MouseEvent('click', { bubbles: true }));
+  await tick(5);
+  assert.equal(JSON.stringify(calls.filter((c) => c[0] === 'sim_address_open').map((c) => c[1])), JSON.stringify([{ playerId: '1-248' }]));
+  assert.ok(!calls.some((c) => c[0] === 'matrix_dm'), 'challenging does not also open the DM');
+  // A simulator that would not open is said, the way a failed DM is.
+  const bad = boot({ sim_address_open: new Error('that is not a player') });
+  bad.S.view = 'room';
+  await bad.pp.challenge('1-x');
+  assert.ok(bad.calls.some((c) => c[0] === 'say' && /not a player/.test(c[1]) && c[2] === true), 'said in the room, as an alert');
+  bad.S.view = 'members';
+  await bad.pp.challenge('1-x');
+  assert.ok(bad.calls.some((c) => c[0] === 'showError' && /not a player/.test(c[1])), 'elsewhere, on the error page');
 }
 
 // 2. Members load for the room that asked, not the one you moved to.

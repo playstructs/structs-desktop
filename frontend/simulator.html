@@ -144,7 +144,8 @@
         </div>
       </div>
 
-      <!-- The command bar: readiness, the fleets' tools, then the launch. -->
+      <!-- The command bar: readiness, the fleets' tools, then the launch —
+           against the computer (Start battle) or a person (Play live). -->
       <div id="sim-go" class="d-command">
         <div class="d-command-l"><div id="checks" class="d-ready" aria-live="polite"></div></div>
         <div class="d-command-c" role="group" aria-label="Fleets">
@@ -156,14 +157,12 @@
               <button id="post-to" type="button" role="menuitem" class="d-menu-item"><i class="sui-icon icon-send-alpha d-gly is-16" aria-hidden="true"></i><span>Post to…</span></button>
               <button id="export" type="button" role="menuitem" class="d-menu-item"><i class="sui-icon icon-copy d-gly is-16" aria-hidden="true"></i><span>Copy link</span></button>
               <button id="import" type="button" role="menuitem" class="d-menu-item"><i class="sui-icon icon-incoming d-gly is-16" aria-hidden="true"></i><span>Paste a battle</span></button>
-              <div class="d-menu-sep" role="separator"></div>
-              <button id="live-to" type="button" role="menuitem" class="d-menu-item hidden"><i class="sui-icon icon-raid d-gly is-16" aria-hidden="true"></i><span>Play them live</span></button>
-              <button id="live-room" type="button" role="menuitem" class="d-menu-item hidden" title="Anyone in the room may take it"><i class="sui-icon icon-raid d-gly is-16" aria-hidden="true"></i><span>Play live</span></button>
             </div>
           </span>
         </div>
         <div class="d-command-r">
-          <button id="send-to" type="button" class="d-btn is-violet is-lg hidden"><span>Send to</span><span id="send-to-name" class="d-sr"></span><span id="send-to-pfp" class="d-pf is-32 is-violet"></span></button>
+          <button id="send-to" type="button" class="d-btn is-violet is-lg hidden"><i class="sui-icon icon-send-alpha d-gly" aria-hidden="true"></i><span>Send to</span><span id="send-to-name" class="d-sr"></span></button>
+          <button id="play-live" type="button" class="d-btn is-violet is-lg" title="Play live"><i class="sui-icon icon-raid d-gly" aria-hidden="true"></i><span>Play live</span><span id="play-live-name" class="d-sr"></span><span id="play-live-pfp" class="d-pf is-32 is-violet hidden"></span></button>
           <button id="start" type="button" class="d-launch"><span>Start battle</span><i class="sui-icon icon-chevron-right d-gly" aria-hidden="true"></i></button>
         </div>
       </div>
@@ -171,9 +170,9 @@
     </div>
   </div>
 
-  <!-- Paste and Post to… are deck dialogs (SimDeck.modal), built when they
-       open and appended here: inside the scaled layout, so they scale with
-       the window. -->
+  <!-- Paste, Post to… and Play live are deck dialogs (SimDeck.modal), built
+       when they open and appended here: inside the scaled layout, so they
+       scale with the window. -->
 </div>
 
   <!-- ── Battle ────────────────────────────────────────────────────────── -->

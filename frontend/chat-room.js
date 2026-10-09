@@ -26,11 +26,34 @@
     var maybeLoadHistory = ctx.maybeLoadHistory, noteTyping = ctx.noteTyping, submit = ctx.submit, complete = ctx.complete;
     var recall = ctx.recall, resetCompletion = ctx.resetCompletion, clearCompletionHint = ctx.clearCompletionHint;
 
+    // Your own player id, off your Matrix id (`@1-194:server`).
+    function myPlayerId() {
+      var m = S.profile && S.profile.user_id && /^@(\d+-\d+):/.exec(S.profile.user_id);
+      return m ? m[1] : null;
+    }
+
     function renderRoom() {
       var page = el('div', 'chat-page');
       var name = (S.room && (S.room.name || S.room.canonical_alias)) || S.roomId || '';
 
       var right = el('div', 'chat-header-actions');
+
+      // A DM is with one player, and a battle is the other thing you do with
+      // them: the simulator, opened addressed to them. First, because no other
+      // room's header has it. A failure lands in this timeline.
+      var peer = S.room && S.room.section === 'direct' && S.room.player_id;
+      if (peer && peer !== myPlayerId()) {
+        var fight = el('a', 'sui-nav-btn');
+        fight.id = 'chat-room-challenge';
+        fight.href = 'javascript:void(0)';
+        fight.title = 'Challenge to a battle';
+        fight.appendChild(icon('icon-raid sui-text-secondary'));
+        fight.addEventListener('click', function () {
+          invoke('sim_address_open', { playerId: peer })
+            .catch(function (e) { if (Chat.say) Chat.say(String(e), true); });
+        });
+        right.appendChild(fight);
+      }
 
       var who = el('a', 'sui-nav-btn');
       who.id = 'chat-room-people';

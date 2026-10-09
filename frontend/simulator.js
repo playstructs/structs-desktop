@@ -497,7 +497,10 @@
       detail: detail,
       title: list.map(function (c) { return c.text; }).join('; '),
     });
+    // Both launches wait on the same fleets: the computer's and a person's.
     $('start').disabled = !!block;
+    $('play-live').disabled = !!block;
+    fitCommand();
   }
 
   /* ── Inspector (COMMAND DECK) ──────────────────────────────────────────── */
@@ -1042,6 +1045,7 @@
       box.replaceChildren.apply(box, pills.map(function (p) { p.title = p.text; return Deck.pill(p); }));
     }
     fitStatus();
+    fitCommand();
     renderTools();
     renderSteps();
     var done = host && host.finished;
@@ -1072,6 +1076,19 @@
     if (fits()) return;
     nav.classList.add('s-tighter');
     fits();
+  }
+
+  /* The command bar keeps one row. While its keys leave the readiness no
+   * room for its word, it gives way a step at a time (simulator.css): the
+   * fleets' tools fold to their glyphs, then the bar's keys draw closer,
+   * then Send to keeps its glyph. Measured rather than set by mode, so any
+   * mix of keys — Send to, Play live — finds its fit. */
+  var FOLDS = ['s-fold', 's-tight', 's-tighter'];
+  function fitCommand() {
+    var bar = $('sim-go'), head = bar && bar.querySelector('.d-ready-h');
+    if (!head || document.body.dataset.screen !== 'setup') return;
+    FOLDS.forEach(function (c) { bar.classList.remove(c); });
+    for (var i = 0; i < FOLDS.length && head.scrollWidth > head.clientWidth; i++) bar.classList.add(FOLDS[i]);
   }
 
   /* Pause and End/Leave, at the nav's right. A watcher only leaves; while
@@ -1562,10 +1579,10 @@
   document.querySelectorAll('#sim-steps [data-step]').forEach(function (a) {
     a.addEventListener('click', function () { if (stepOpen(a.dataset.step)) STEP_GO[a.dataset.step](); });
   });
-  if (window.ResizeObserver) new ResizeObserver(function () { placeBattle(); fitStatus(); }).observe($('menu-page-panel'));
+  if (window.ResizeObserver) new ResizeObserver(function () { placeBattle(); fitStatus(); fitCommand(); }).observe($('menu-page-panel'));
   // The defence web follows the board's tiles as the column resizes.
   if (window.ResizeObserver) new ResizeObserver(function () { drawDefWeb(); }).observe($('arena'));
-  window.addEventListener('resize', function () { placeBattle(); fitStatus(); });
+  window.addEventListener('resize', function () { placeBattle(); fitStatus(); fitCommand(); });
 
   $('db-rematch').addEventListener('click', function () {
     var role = social.liveRole();
@@ -1609,7 +1626,7 @@
   document.addEventListener('keydown', function (e) {
     if (e.key !== 'Escape') return;
     // An open dialog takes its own Escape, SimDeck's stack, topmost first:
-    // Post to… and Paste close, the End confirm cancels, Paused resumes.
+    // Post to…, Play live and Paste close, the End confirm cancels, Paused resumes.
     // The Share menus take theirs before it reaches here.
     if (Deck.modalOpen()) return;
     if (picking) disarm();

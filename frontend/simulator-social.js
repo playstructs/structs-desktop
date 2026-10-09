@@ -16,13 +16,16 @@
  *            rule the player chose), said in the alert band; any other run
  *            stays here. Live: the head-to-head band.
  *
- * and, for any battle, "Post to…": a room or a DM from Comms. Nothing here
- * writes text into a room: Rust builds every message from the battle and
- * result codes (matrix_sim_post); the only words that leave are the ones a
- * player types to the match (the lobby's composer, the rail).
+ * and, for any battle, "Post to…": a room or a DM from Comms; and "Play
+ * live": the same rooms, to play a person instead of the computer. Nothing
+ * here writes text into a room: Rust builds every message from the battle and
+ * result codes (matrix_sim_post, matrix_sim_live_open); the only words that
+ * leave are the ones a player types to the match (the lobby's composer, the
+ * rail).
  *
  *   window.SimSocial(api) → { take, adopt, isChallenge, locked, matches, addressed,
- *                             renderSetup, renderBattle, debrief, openPost, closePost, leave }
+ *                             renderSetup, renderBattle, debrief, openPost, closePost,
+ *                             openPlay, closePlay, leave }
  */
 (function () {
   'use strict';
@@ -66,8 +69,10 @@
       return invoke('sim_take_context').then(function (c) { if (c) adopt(c); }).catch(function () {});
     }
     function adopt(c) {
-      closeMatch();
-      stopDirect();
+      // What arrives takes the board: a live battle on it is left the way
+      // Leave leaves one, and an open picker would name the old battle.
+      quitLive();
+      closePlay(); closePost();
       if (c.kind === 'challenge') {
         var cfg = Code.decode(c.battle);
         if (!cfg) { api.message('That challenge does not hold a battle.'); return; }
@@ -83,12 +88,17 @@
     }
     /* Leaving keeps the battle on the board; it just stops being the challenge. */
     function leave() {
-      // After the battle too: the other side's debrief stops saying Connected.
+      quitLive();
+      ctx = null; view = null; left = false; post = null; live = null; api.renderAll();
+    }
+    /* The other side hears a live battle end here — a forfeit mid-battle, a
+     * lobby's invite withdrawn; after the battle too, so their debrief stops
+     * saying Connected — and its match room closes. */
+    function quitLive() {
       if (isLive() && live) sendFrame({ v: 1, kind: 'leave', forfeit: live.phase === 'battle' });
       if (isLive() && ctx.role === 'host' && live && live.phase === 'lobby') sendStatus({ state: 'cancelled' });
       closeMatch();
       stopDirect();
-      ctx = null; view = null; left = false; post = null; live = null; api.renderAll();
     }
     /* Done with a live battle that had a room of its own: leave it and
      * forget it, so it never sits in anyone's room list. A battle in a DM
@@ -220,18 +230,21 @@
       loadMatchChat();
       api.renderAll();
     }
-    /* Host: open the battle to a player (their DM) or to a room (anyone there). */
+    /* Host: open the battle to a player (their DM) or to a room (anyone
+     * there). Answers whether it opened; a failure is said here. */
+    var LIVE_MS = 4000;
     function openLive(target) {
       var code = codeOf(api.currentConfig());
-      if (!code) { api.message('This battle cannot be played live.'); return; }
+      if (!code) { api.message('This battle cannot be played live.'); return Promise.resolve(false); }
       api.message('Opening a live battle…');
-      invoke('matrix_sim_live_open', { guildId: target.guildId || null, roomId: target.roomId || null, toPlayer: target.toPlayer || null, battle: code, blockMs: 4000 })
+      return invoke('matrix_sim_live_open', { guildId: target.guildId || null, roomId: target.roomId || null, toPlayer: target.toPlayer || null, battle: code, blockMs: LIVE_MS })
         .then(function (r) {
           adopt({ kind: 'live', role: 'host', guild_id: r.guild_id, room_id: r.room_id, invite_event: r.invite_event, match_room: r.match_room,
             battle: code, block_ms: r.block_ms, host: r.me, me: r.me, host_name: 'You', expect: r.guest || null, target: target });
           api.message(r.guest ? 'Invited ' + r.guest.name + '.' : 'Posted. The first to accept plays.');
+          return true;
         })
-        .catch(function (e) { api.message('Not opened — ' + errText(e)); });
+        .catch(function (e) { api.message('Not opened — ' + errText(e)); return false; });
     }
     function liveOpts(role) {
       return {
@@ -735,8 +748,14 @@
       var to = addressed();
       reveal('addressed', !!to);
       reveal('send-to', !!to);
-      reveal('live-to', !!to);
-      reveal('live-room', isChallenge() && !left);
+      // The second launch key: against a person. A live battle is already one.
+      // Addressed, it wears their face: it is the key that plays them.
+      reveal('play-live', !isLive());
+      reveal('play-live-pfp', !!to);
+      var play = $('play-live');
+      if (play) play.title = to ? 'Play ' + to.name + ' live' : 'Play live';
+      if ($('play-live-name')) $('play-live-name').textContent = to ? ' with ' + to.name : '';
+      if (to) portraitInto('play-live-pfp', to.pfp_attrs);
       if (to) {
         var name = String(to.name || '');
         if ($('addressed-name')) $('addressed-name').textContent = name;
@@ -748,10 +767,7 @@
           send.title = 'Send to ' + name;
           if ($('send-to-name')) $('send-to-name').textContent = name;
           else if (send.querySelector('span')) send.querySelector('span').textContent = 'Send to ' + name;
-          portraitInto('send-to-pfp', to.pfp_attrs);
         }
-        var lt = $('live-to');
-        if (lt) { lt.title = 'Play ' + name + ' live'; if (lt.querySelector('span')) lt.querySelector('span').textContent = 'Play ' + name + ' live'; }
       }
       renderPanels();
     }
@@ -928,30 +944,67 @@
         .then(function () { $('send-to').disabled = false; });
     }
 
+    // ── Rooms, as Post to… and Play live list them ───────────────────────
+    /* A labelled find field, the radio group it narrows, and each room a
+     * radio row marked by the same StructsChatRow parts the Comms channel
+     * list uses, so a room looks the same everywhere. The real radio is
+     * visually hidden: the row is the target, its ground says it is picked. */
+    function findField(id, label) {
+      var input = de('input', 'd-code-in');
+      input.type = 'text'; input.id = id;
+      input.placeholder = 'Find a player or room';
+      input.autocomplete = 'off'; input.spellcheck = false;
+      var field = de('div', 'd-sec');
+      var l = de('label', 'd-lbl d-hint', label);
+      l.htmlFor = id;
+      var box = de('span', 'd-code');
+      box.appendChild(input);
+      field.appendChild(l);
+      field.appendChild(box);
+      return { root: field, input: input };
+    }
+    function roomsBox(id, label) {
+      var box = de('div', 's-rooms');
+      box.id = id;
+      box.setAttribute('role', 'radiogroup');
+      box.setAttribute('aria-label', label);
+      return box;
+    }
+    /* By name, or by a DM's player id whole — never part of one: 1-19 is
+     * inside 1-195. */
+    function found(r, q) {
+      return !q || String(r.name || '').toLowerCase().indexOf(q) !== -1 || String(r.player_id || '').toLowerCase() === q;
+    }
+    var markParts = { icon: function (name) { return D.glyph(String(name).replace(/^icon-/, '')); } };
+    /* One room as a radio row: `group` names the radios, `picked` is the
+     * value checked, `onPick(value)` hears a new pick. */
+    function roomRow(r, group, picked, onPick) {
+      var row = de('label', 's-room');
+      var input = de('input', 'd-sr');
+      input.type = 'radio'; input.name = group; input.value = r.room_id;
+      input.checked = picked === r.room_id;
+      input.addEventListener('change', function () { if (input.checked) onPick(r.room_id); });
+      row.appendChild(input);
+      var R = window.StructsChatRow;
+      row.appendChild(R.roomMark(r, markParts));
+      var nm = String(r.name || r.room_id);
+      row.appendChild(de('span', 'd-txt s-room-n', nm));
+      row.appendChild(de('span', 'd-txt d-hint s-room-sub', R.roomSub(r) || ''));
+      row.title = nm;
+      return row;
+    }
+    function isDm(r) { return r.section === 'direct' || !!r.player_id; }
+
     // ── Post to… ─────────────────────────────────────────────────────────
     /* A deck dialog (SimDeck.modal), built when it opens and gone when it
      * closes. What it holds is built once, so its ids and handlers stay put:
-     * what is being shared, a find field, and the rooms as radio rows — each
-     * marked by the same StructsChatRow parts the Comms channel list uses, so
-     * a room looks the same in both. */
+     * what is being shared, a find field, and the rooms as radio rows. */
     var postTo = { rooms: [], guild: null, pick: null, config: null, result: null, line: '', modal: null };
     var postWhat = de('p', 'd-txt d-hint s-post-what');
     postWhat.id = 'post-what';
-    var postFind = de('input', 'd-code-in');
-    postFind.type = 'text'; postFind.id = 'post-find';
-    postFind.placeholder = 'Find a player or room';
-    postFind.autocomplete = 'off'; postFind.spellcheck = false;
-    var postField = de('div', 'd-sec');
-    var postFindLabel = de('label', 'd-lbl d-hint', 'Post to');
-    postFindLabel.htmlFor = 'post-find';
-    var postFindBox = de('span', 'd-code');
-    postFindBox.appendChild(postFind);
-    postField.appendChild(postFindLabel);
-    postField.appendChild(postFindBox);
-    var postRooms = de('div', 's-rooms');
-    postRooms.id = 'post-rooms';
-    postRooms.setAttribute('role', 'radiogroup');
-    postRooms.setAttribute('aria-label', 'Post to');
+    var postField = findField('post-find', 'Post to');
+    var postFind = postField.input;
+    var postRooms = roomsBox('post-rooms', 'Post to');
     var postCopy = D.btn({ id: 'post-copy', text: 'Copy link', glyph: 'copy', onClick: function () {
       var c = postTo.config, r = postTo.result, l = postTo.line;
       closePost();
@@ -973,7 +1026,7 @@
       var m = D.modal({
         id: 'post-dialog', parent: $('menu-page-layout'), width: 'md', tone: 'violet', railGlyph: 'outgoing',
         title: result ? 'Share result' : 'Share battle', titleId: 'post-title', role: 'dialog',
-        body: [postWhat, postField, postRooms], cta: [postCopy, postSendBtn],
+        body: [postWhat, postField.root, postRooms], cta: [postCopy, postSendBtn],
         focus: postFind, backdropCancels: true, onCancel: closePost,
       });
       postTo.modal = m;
@@ -997,28 +1050,12 @@
       postTo.modal = null;
       if (m) m.close();
     }
-    var markParts = { icon: function (name) { return D.glyph(String(name).replace(/^icon-/, '')); } };
-    function roomRow(r) {
-      var row = de('label', 's-room');
-      var input = de('input', 'd-sr');
-      input.type = 'radio'; input.name = 'post-room'; input.value = r.room_id;
-      input.checked = postTo.pick === r.room_id;
-      input.addEventListener('change', function () { if (input.checked) pickRoom(r.room_id); });
-      row.appendChild(input);
-      var R = window.StructsChatRow;
-      row.appendChild(R.roomMark(r, markParts));
-      var nm = String(r.name || r.room_id);
-      row.appendChild(de('span', 'd-txt s-room-n', nm));
-      row.appendChild(de('span', 'd-txt d-hint s-room-sub', R.roomSub(r) || ''));
-      row.title = nm;
-      return row;
-    }
     function roomList() {
       var q = postFind.value.trim().toLowerCase();
-      var list = postTo.rooms.filter(function (r) { return !q || String(r.name || '').toLowerCase().indexOf(q) !== -1; });
+      var list = postTo.rooms.filter(function (r) { return found(r, q); });
       postRooms.replaceChildren();
       if (!list.length) postRooms.appendChild(emptyNode(postTo.rooms.length ? 'No room by that name' : 'No rooms yet'));
-      list.forEach(function (r) { postRooms.appendChild(roomRow(r)); });
+      list.forEach(function (r) { postRooms.appendChild(roomRow(r, 'post-room', postTo.pick, pickRoom)); });
       postTo.shown = list;
       pickRoom(postTo.pick);
     }
@@ -1047,18 +1084,135 @@
         .catch(function (e) { if (postTo.modal === m) b.disabled = false; api.message('Not posted — ' + errText(e)); });
     }
     postFind.addEventListener('input', roomList);
+
+    // ── Play live ────────────────────────────────────────────────────────
+    /* The command bar's second launch: this battle against a person. A deck
+     * dialog built like Post to…: what will be played, a find field, and the
+     * same radio rows — your DMs (the invite is for the one person there),
+     * then the rooms (anyone there may take it). A battle that came from
+     * somewhere has its own row on top, picked for you: its player — their
+     * DM, or a row of their own while there is none — or, while the fleets
+     * are still the challenge's, the challenge's room. A player id typed into
+     * the field with no DM yet is a row of its own as well. */
+    // One invite opens at a time, whichever dialog asked: `busy` outlives a
+    // closed picker, and only the reply that set it clears it.
+    var playTo = { rooms: [], guild: null, loaded: false, items: [], pick: null, busy: false, modal: null };
+    var playWhat = de('p', 'd-txt d-hint s-post-what');
+    playWhat.id = 'live-what';
+    var playField = findField('live-find', 'Invite');
+    var playFind = playField.input;
+    var playRooms = roomsBox('live-rooms', 'Invite');
+    var playSendBtn = D.btn({ id: 'live-send', tone: 'teal', text: 'Invite', glyph: 'raid', disabled: true, onClick: function () { sendPlay(); } });
+
+    function openPlay() {
+      closePlay();
+      var c = api.currentConfig();
+      var name = isChallenge() && !left ? battleName() : c.seed ? cap(c.seed) : 'Battle';
+      var n = function (side) { return (c.units || []).filter(function (u) { return u.side === side; }).length; };
+      // A person, not the computer: the fleets, never the computer's level.
+      playWhat.textContent = [name, n('player') + ' v ' + n('computer'), (LIVE_MS / 1000) + ' s blocks'].join(' · ');
+      playFind.value = '';
+      playTo.rooms = []; playTo.guild = null; playTo.loaded = false; playTo.items = [];
+      pickPlay(null);
+      playRooms.replaceChildren(emptyNode('Reading your rooms…'));
+      var m = D.modal({
+        id: 'live-dialog', parent: $('menu-page-layout'), width: 'md', tone: 'violet', railGlyph: 'raid',
+        title: 'Play live', titleId: 'live-title', role: 'dialog',
+        body: [playWhat, playField.root, playRooms], cta: [playSendBtn],
+        focus: playFind, backdropCancels: true, onCancel: closePlay,
+      });
+      playTo.modal = m;
+      m.show();
+      invoke('matrix_sim_rooms').then(function (r) {
+        if (playTo.modal !== m) return;
+        playTo.rooms = (r && r.rooms) || []; playTo.guild = (r && r.guild_id) || null; playTo.loaded = true;
+        var own = playOwn();
+        playTo.pick = own ? own.room.room_id : null;
+        playList();
+      }).catch(function (e) {
+        if (playTo.modal === m) playRooms.replaceChildren(emptyNode(errText(e)));
+      });
+    }
+    function closePlay() {
+      var m = playTo.modal;
+      playTo.modal = null;
+      if (m) m.close();
+    }
+    function dmWith(pid) { return playTo.rooms.filter(function (r) { return isDm(r) && r.player_id === pid; })[0] || null; }
+    /* Each row says what Invite will do there: invite the one person, or
+     * open it to a room. */
+    function roomItem(r) {
+      var nm = String(r.name || r.player_id || 'the room');
+      var target = { guildId: playTo.guild || r.guild_id || null, roomId: r.room_id };
+      return isDm(r) ? { room: r, label: 'Invite ' + nm, target: target }
+        : { room: r, label: 'Open in ' + nm, title: 'Anyone in ' + nm + ' may take it', target: target };
+    }
+    function personItem(pid, room) { return { room: room, label: 'Invite ' + room.name, target: { guildId: playTo.guild, toPlayer: pid } }; }
+    /* The battle's own row. A challenge's room opens as the Comms that
+     * posted it (an identity's window posts as that identity), which the
+     * primary's list may not even hold. */
+    function playOwn() {
+      var to = addressed();
+      if (to) {
+        var dm = dmWith(to.player_id), nm = String(to.name || to.player_id);
+        return dm ? roomItem(dm) : personItem(to.player_id, { room_id: 'player:' + to.player_id, name: nm, player_id: to.player_id, pfp_attrs: to.pfp_attrs || null });
+      }
+      if (!isChallenge() || left) return null;
+      var r = playTo.rooms.filter(function (x) { return x.room_id === ctx.room_id; })[0] || { room_id: ctx.room_id, name: (view && view.room_name) || 'Challenge room' };
+      var it = roomItem(r);
+      it.target.guildId = ctx.guild_id;
+      return it;
+    }
+    function playList() {
+      var q = playFind.value.trim().toLowerCase();
+      var items = [];
+      function add(it) {
+        if (it && found(it.room, q) && !items.some(function (x) { return x.room.room_id === it.room.room_id; })) items.push(it);
+      }
+      add(playOwn());
+      if (/^1-\d+$/.test(q) && !dmWith(q)) add(personItem(q, { room_id: 'player:' + q, name: 'Player ' + q, icon: 'icon-member' }));
+      playTo.rooms.filter(isDm).concat(playTo.rooms.filter(function (r) { return !isDm(r); })).forEach(function (r) { add(roomItem(r)); });
+      playTo.items = items;
+      playRooms.replaceChildren();
+      if (!items.length) playRooms.appendChild(emptyNode(playTo.rooms.length ? 'No player or room by that name' : 'No rooms yet'));
+      items.forEach(function (it) { playRooms.appendChild(roomRow(it.room, 'live-pick', playTo.pick, pickPlay)); });
+      pickPlay(playTo.pick);
+    }
+    function playItem() { return playTo.items.filter(function (it) { return it.room.room_id === playTo.pick; })[0] || null; }
+    /* Invite waits for a pick the list shows, and says what it will do. */
+    function pickPlay(key) {
+      playTo.pick = key;
+      var it = playItem(), b = playSendBtn;
+      b.disabled = !it || playTo.busy;
+      var label = it ? it.label : 'Invite';
+      b.querySelector('span').textContent = label;
+      b.title = (it && it.title) || label;
+    }
+    /* Opened: the lobby takes the board, and adopt closes whichever picker
+     * is up. Not opened: the reason is said (openLive) and Invite wakes. */
+    function sendPlay() {
+      var it = playItem();
+      if (!it || !playTo.modal || playTo.busy) return;
+      playTo.busy = true;
+      pickPlay(playTo.pick);
+      openLive(it.target).then(function (ok) {
+        playTo.busy = false;
+        if (!ok && playTo.modal) pickPlay(playTo.pick);
+      });
+    }
+    playFind.addEventListener('input', function () { if (playTo.loaded) playList(); });
+
     function bind(id, fn) { var n = $(id); if (n) n.addEventListener('click', fn); }
     bind('send-to', sendNow);
+    bind('play-live', openPlay);
     bind('addressed-clear', leave);
-    bind('live-to', function () { var to = addressed(); if (to) openLive({ toPlayer: to.player_id }); });
-    bind('live-room', function () { if (isChallenge()) openLive({ guildId: ctx.guild_id, roomId: ctx.room_id }); });
     $('unlock').addEventListener('click', unlock);
     bind('relock', relock);
 
     return {
       take: take, adopt: adopt, isChallenge: isChallenge, locked: locked, matches: matches, addressed: addressed,
       renderSetup: renderSetup, renderBattle: renderBattle, renderPanels: renderPanels, debrief: debrief,
-      openPost: openPost, closePost: closePost, leave: leave, battleName: battleName,
+      openPost: openPost, closePost: closePost, openPlay: openPlay, closePlay: closePlay, leave: leave, battleName: battleName,
       context: function () { return ctx; }, view: function () { return view; },
       talk: talk, isLive: isLive, liveRole: function () { return isLive() ? ctx.role : null; }, onStart: onStart, openLive: openLive,
       opponentName: opponentName, connection: connection, swapped: function (c) { return api.swapped(c); },

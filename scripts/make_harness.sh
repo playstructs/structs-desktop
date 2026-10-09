@@ -1564,6 +1564,8 @@ cat > "$CFIX" <<'EOF'
 //   ?fixture=unauth    networks exist, none signed in  (connection ladder)
 //   ?fixture=nomatrix  no guild publishes a matrix service
 //   ?fixture=failed    a sign-in that broke mid-ladder
+//   ?room=<room id>    open that room once the list is in (&page=members
+//                      then goes to its member list) — one screen, headless
 (function () {
   'use strict';
   var variant = (/[?&]fixture=([a-z]+)/.exec(location.search || '') || [])[1] || 'default';
@@ -1936,6 +1938,8 @@ cat > "$CFIX" <<'EOF'
     matrix_media: { data_url: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAgAAAAICAIAAABLbSncAAAAGUlEQVR4nGMQNnVzPrsNk2TAKgokGQalDgAHu0qB1ZgbGgAAAABJRU5ErkJggg==',
                     mime: 'image/png' },
     mcp_raid_view_open: null,
+    // Opens the simulator addressed to a player (a challenge).
+    sim_address_open: null,
     matrix_agreement_open: { ok: true, tx: 'ABCD1234' },
     matrix_mark_read: { ok: true },
     // Answers only for ids the chain knows; 1-1945 is absent on purpose.
@@ -2113,6 +2117,22 @@ cat > "$CFIX" <<'EOF'
     // offers an API the real runtime lacks hides the bug it should catch.
     window: { getCurrentWindow: function () { return { label: 'chat' }; } },
   };
+
+  // ?room= / &page=: wait for the room list, then open the room through the
+  // window's own navigator, so the screen is the one a click would reach.
+  var wantRoom = (/[?&]room=([^&]+)/.exec(location.search || '') || [])[1];
+  var wantPage = (/[?&]page=([a-z]+)/.exec(location.search || '') || [])[1];
+  if (wantRoom) {
+    var tries = 0;
+    var poll = setInterval(function () {
+      var C = window.Chat, st = C && C._state;
+      if (!(st && st.rooms && st.rooms.length) && ++tries < 100) return;
+      clearInterval(poll);
+      if (!C || !C.openRoom) return;
+      Promise.resolve(C.openRoom(decodeURIComponent(wantRoom)))
+        .then(function () { if (wantPage) C.go(wantPage); });
+    }, 50);
+  }
 })();
 EOF
 

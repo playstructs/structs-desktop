@@ -1285,12 +1285,45 @@ async function openCard(w, ref) {
   check('…and cannot be messaged', bot.querySelector('button') === null);
 
   const jpeg = rows.find((r) => text(r).includes('JPEG'));
-  check('another player can be messaged', jpeg.querySelector('button') !== null);
-  jpeg.querySelector('button').dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
+  const msgBtn = [...jpeg.querySelectorAll('button')].find((b) => text(b).includes('Message'));
+  check('another player can be messaged', !!msgBtn);
+
+  // …and challenged, from the same row: the simulator, addressed to them.
+  const fight = jpeg.querySelector('button[title="Challenge to a battle"]');
+  check('another player can be challenged', !!fight && !!fight.querySelector('.icon-raid'));
+  check('…but not you, and not a bot',
+    !rows[0].querySelector('button[title="Challenge to a battle"]')
+      && !bot.querySelector('button[title="Challenge to a battle"]'));
+  const dmsBefore = w.__HARNESS_CALLS__.filter((c) => c.cmd === 'matrix_dm').length;
+  fight.dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
+  await tick();
+  const sim = w.__HARNESS_CALLS__.filter((c) => c.cmd === 'sim_address_open').pop();
+  check('…which opens the simulator addressed to their player id',
+    !!sim && sim.args.playerId === '1-61', JSON.stringify(sim && sim.args));
+  check('…and does not also open the DM',
+    w.__HARNESS_CALLS__.filter((c) => c.cmd === 'matrix_dm').length === dmsBefore
+      && w.Chat._state.view === 'members', w.Chat._state.view);
+
+  msgBtn.dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
   await tick();
   const dm = w.__HARNESS_CALLS__.filter((c) => c.cmd === 'matrix_dm').pop();
   check('…and messaging them uses their player id',
     !!dm && dm.args.playerId === '1-61', JSON.stringify(dm && dm.args));
+
+  // The DM it opened offers the same battle from its header; a channel does not.
+  const head = d.getElementById('chat-room-challenge');
+  check('a DM with a player offers a battle in its header',
+    w.Chat._state.view === 'room' && !!head
+      && head === d.querySelector('.chat-page .chat-header-actions').firstElementChild,
+    w.Chat._state.view);
+  if (head) head.dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
+  await tick();
+  const sim2 = w.__HARNESS_CALLS__.filter((c) => c.cmd === 'sim_address_open').pop();
+  check('…addressed to that player', !!sim2 && sim2 !== sim && sim2.args.playerId === '1-61',
+    JSON.stringify(sim2 && sim2.args));
+  await w.Chat.openRoom('!snc:matrix.beta.playstructs.com');
+  await tick();
+  check('…and a channel does not', !d.getElementById('chat-room-challenge'));
 
   // Back goes to the conversation, not out to the channel list.
   const { w: w2, d: d2 } = await open();

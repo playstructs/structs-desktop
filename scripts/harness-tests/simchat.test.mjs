@@ -9,8 +9,9 @@
 //    into its card; only a run that took first place reaches the room.
 // 4. The simulator page (simulator.html + simulator-social.js) against a
 //    stub Tauri: a challenge opens locked with its panel, a best posts itself
-//    into the thread, a battle addressed to a player is sent to them, and
-//    Post to… lists rooms and posts by codes alone.
+//    into the thread, a battle addressed to a player is sent to them, Post
+//    to… lists rooms and posts by codes alone, and Play live opens a match
+//    with a player or in a room.
 import { JSDOM } from 'jsdom';
 import { readFileSync } from 'node:fs';
 import { resolve, dirname } from 'node:path';
@@ -164,12 +165,12 @@ async function simulator(context, answers = {}) {
   const page = resolve(repo, 'frontend/simulator.html');
   const calls = [];
   const subs = {};
+  let pending = context;
   const sdom = await JSDOM.fromFile(page, {
     url: pathToFileURL(page).href, runScripts: 'dangerously', resources: 'usable', pretendToBeVisual: true,
     beforeParse(sw) {
       sw.HTMLCanvasElement.prototype.getContext = () => null;
       sw.navigator.clipboard = { writeText: () => Promise.resolve() };
-      let pending = context;
       sw.__TAURI__ = {
         core: { invoke: (cmd, args) => {
           calls.push([cmd, args || {}]);
@@ -184,7 +185,8 @@ async function simulator(context, answers = {}) {
   const sw = sdom.window;
   for (let i = 0; i < 100 && !sw.Simulator; i++) await tick(20);
   await tick(50);
-  return { sw, calls, subs, $: (id) => sw.document.getElementById(id), close: () => sdom.window.close() };
+  // setPending(c): the next context Rust would hand over (Simulator.takeContext takes it).
+  return { sw, calls, subs, $: (id) => sw.document.getElementById(id), setPending: (c) => { pending = c; }, close: () => sdom.window.close() };
 }
 
 {
@@ -321,13 +323,29 @@ async function simulator(context, answers = {}) {
   check('who it is for: a strip right under the Mission header — For, then the name alone', !$('addressed').classList.contains('hidden')
     && text($('for-l')) === 'For' && text($('addressed-name')) === 'JPEG' && $('addressed').closest('#round')
     && $('addressed').previousElementSibling && $('addressed').previousElementSibling.matches('.d-panel-h'));
-  check('…Send sits beside Start in the command bar; Play live is in the Share menu', $('send-to').parentNode === $('start').parentNode
-    && $('start').parentNode.matches('#sim-go > .d-command-r') && $('share-card').contains($('live-to')));
-  check('…Start stays the launch key, Send a violet key before it', $('start').matches('.d-launch') && $('send-to').matches('.d-btn.is-violet')
-    && $('send-to').nextElementSibling === $('start'));
+  check('…Send sits beside the launch keys in the command bar: Send, Play live, Start', $('send-to').parentNode === $('start').parentNode
+    && $('start').parentNode.matches('#sim-go > .d-command-r') && $('send-to').nextElementSibling === $('play-live') && $('play-live').nextElementSibling === $('start'));
+  check('…Start stays the launch key, Send and Play live violet keys before it', $('start').matches('.d-launch') && $('send-to').matches('.d-btn.is-violet')
+    && $('play-live').matches('.d-btn.is-violet.is-lg') && !$('play-live').classList.contains('hidden'));
+  check('…and the Share menu holds no live item', !$('share-card').querySelector('#live-to, #live-room, .icon-raid') && !$('live-to') && !$('live-room'));
   check('…and the readiness says who it is for', /for JPEG$/.test(text($('checks').querySelector('.d-ready-d'))));
   check('…and the Send button names them', !$('send-to').classList.contains('hidden') && /Send to\s*JPEG/.test($('send-to').textContent) && $('send-to').title === 'Send to JPEG');
+  check('…Play live wears their face and names them; Send to has its own glyph, Post to\'s', $('play-live').contains($('play-live-pfp')) && !$('play-live-pfp').classList.contains('hidden')
+    && $('play-live').title === 'Play JPEG live' && /^Play live\s*with JPEG$/.test(text($('play-live'))) && $('send-to').querySelector('i.sui-icon.icon-send-alpha.d-gly') && !$('send-to').querySelector('.d-pf'));
   check('…× says what it stops', $('addressed-clear').getAttribute('aria-label') === 'Stop setting this up for JPEG');
+  {
+    // fitCommand: jsdom lays nothing out, so whether the readiness word fits is stubbed.
+    const head = $('checks').querySelector('.d-ready-h'), bar = $('sim-go');
+    const fits = (fn) => { Object.defineProperty(head, 'scrollWidth', { configurable: true, get: fn }); s.sw.dispatchEvent(new s.sw.Event('resize')); };
+    Object.defineProperty(head, 'clientWidth', { configurable: true, get: () => 50 });
+    fits(() => (bar.classList.contains('s-tight') ? 40 : 80));
+    check('a crowded command bar folds the tools, then draws closer — and stops once the word fits', bar.classList.contains('s-fold') && bar.classList.contains('s-tight') && !bar.classList.contains('s-tighter'), bar.className);
+    fits(() => 80);
+    check('…still crowded, Send to keeps its glyph; no fold hides the readiness — why a start is blocked stays beside the keys', bar.classList.contains('s-tighter')
+      && !/#sim-go\.s-[a-z]+[^{,]*\.d-ready/.test(read('frontend/simulator.css')), bar.className);
+    fits(() => 10);
+    check('…and given room, it unfolds', !['s-fold', 's-tight', 's-tighter'].some((c) => bar.classList.contains(c)), bar.className);
+  }
   $('send-to').click();
   await tick(20);
   check('Send posts the battle to them by player id, not by room', posts.length === 1 && posts[0].toPlayer === '1-61' && posts[0].battle && !posts[0].roomId && !posts[0].result);
@@ -414,14 +432,14 @@ async function simulator(context, answers = {}) {
   const share = $('share'), menu = $('share-card');
   check('Share is a menu key; its menu starts closed', share.getAttribute('aria-haspopup') === 'menu' && menu.hidden && menu.getAttribute('role') === 'menu');
   share.click();
-  check('…a press opens it: Post to…, Copy link, Paste a battle', !menu.hidden && share.getAttribute('aria-expanded') === 'true'
-    && ['post-to', 'export', 'import'].every((id) => menu.contains($(id)) && $(id).getAttribute('role') === 'menuitem'));
+  check('…a press opens it: Post to…, Copy link, Paste a battle — and nothing else', !menu.hidden && share.getAttribute('aria-expanded') === 'true'
+    && ['post-to', 'export', 'import'].every((id) => menu.contains($(id)) && $(id).getAttribute('role') === 'menuitem')
+    && menu.querySelectorAll('.d-menu-item').length === 3 && !menu.querySelector('.d-menu-sep'));
   menu.dispatchEvent(new sw.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
   check('…Escape closes it', menu.hidden && share.getAttribute('aria-expanded') === 'false');
   {
     // W3: the keyboard way in and through: ArrowDown opens on the first
-    // item, arrows walk the shown items (Play live is hidden here), Escape
-    // gives focus back to Share.
+    // item, arrows walk the items and wrap, Escape gives focus back to Share.
     const kd = (n, key) => n.dispatchEvent(new sw.KeyboardEvent('keydown', { key, bubbles: true, cancelable: true }));
     share.focus();
     kd(share, 'ArrowDown');
@@ -438,6 +456,9 @@ async function simulator(context, answers = {}) {
   check('the command bar: readiness, the fleets\' tools, the launch', $('sim-go').matches('.d-command') && $('checks').matches('.d-ready') && $('checks').closest('.d-command-l')
     && ['mirror', 'swap', 'share'].every((id) => $(id).matches('button.d-tool') && $(id).closest('.d-command-c'))
     && $('start').matches('button.d-launch') && $('start').closest('.d-command-r') && !$('locked-chip') && $('fleet-head').querySelectorAll('button').length === 0);
+  check('…and its second launch, Play live: a violet key as tall as Start, the crossed swords, right before it', $('play-live').matches('button.d-btn.is-violet.is-lg')
+    && !$('play-live').classList.contains('hidden') && $('play-live').nextElementSibling === $('start') && text($('play-live')) === 'Play live'
+    && $('play-live').querySelector('i.sui-icon.icon-raid.d-gly') && !$('play-live').disabled);
   check('every icon on the Mission panel and the command bar is a deck glyph or sprite', [...round.querySelectorAll('i.sui-icon'), ...$('sim-go').querySelectorAll('i.sui-icon')]
     .every((i) => i.classList.contains('d-gly') || i.classList.contains('d-ico')));
   check('…and every control there is a real button with a name', [...round.querySelectorAll('button'), ...$('sim-go').querySelectorAll('button')]
@@ -715,6 +736,12 @@ async function simulator(context, answers = {}) {
   $('post-find').value = 'jp';
   $('post-find').dispatchEvent(new s.sw.Event('input'));
   check('…typing narrows it', $('post-rooms').querySelectorAll('.s-room').length === 1);
+  $('post-find').value = '1-6';
+  $('post-find').dispatchEvent(new s.sw.Event('input'));
+  check('…a player id only whole: 1-6 is not 1-61', /No room by that name/.test(text($('post-rooms'))), text($('post-rooms')));
+  $('post-find').value = '1-61';
+  $('post-find').dispatchEvent(new s.sw.Event('input'));
+  check('…and 1-61 finds their DM', $('post-rooms').querySelectorAll('.s-room').length === 1 && text($('post-rooms').querySelector('.s-room-n')) === 'JPEG');
   $('post-rooms').querySelector('.s-room').click();
   check('…a click anywhere on the row picks it, and Post wakes', $('post-rooms').querySelector('input[name="post-room"]').checked && !off($('post-send')) && /^Post to /.test(text($('post-send'))));
   $('post-send').click();
@@ -731,6 +758,262 @@ async function simulator(context, answers = {}) {
   check('…Enter loads, and a bad link says why while the dialog stays', $('code-dialog') && /link|battle/i.test(text($('message'))), text($('message')));
   s.sw.document.dispatchEvent(new s.sw.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
   check('…Escape closes it', !$('code-dialog'));
+  s.close();
+}
+
+{
+  console.log('\n— Play live');
+  const opened = [];
+  let failNext = false;
+  const rooms = [
+    { room_id: '!a:h', name: 'SN.Corporation', section: 'local', icon: 'icon-guild', members: 25 },
+    { room_id: '!b:h', name: 'JPEG', section: 'direct', player_id: '1-61', pfp_attrs: null },
+    { room_id: '!w:h', name: 'War Room', section: 'local', icon: 'icon-raid', members: 6 },
+    { room_id: '!c:h', name: 'T.Xue', section: 'direct', player_id: '1-9', pfp_attrs: null },
+  ];
+  const s = await simulator(null, {
+    matrix_sim_rooms: () => ({ guild_id: '0-5', rooms }),
+    matrix_sim_live_open: (a) => {
+      opened.push(a);
+      if (failNext) { failNext = false; throw new Error('that player has no comms account'); }
+      return { guild_id: '0-5', room_id: a.roomId, match_room: a.roomId, invite_event: '$inv', me: '@1-1:h', block_ms: 4000, guest: { user_id: '@1-61:h', name: 'JPEG' } };
+    },
+    matrix_person: (a) => ({ user_id: a.userId, name: 'Marklifer', pfp_attrs: null, player_id: '1-1' }),
+    matrix_timeline: () => ({ messages: [] }),
+  });
+  const { sw, $ } = s;
+  const off = (n) => !!n && (n.disabled === true || n.getAttribute('aria-disabled') === 'true');
+  const names = () => [...$('live-rooms').querySelectorAll('.s-room .s-room-n')].map(text);
+  const type = (v) => { $('live-find').value = v; $('live-find').dispatchEvent(new sw.Event('input')); };
+  check('the sandbox shows Play live beside Start', !$('play-live').classList.contains('hidden') && $('play-live').nextElementSibling === $('start'));
+  {
+    // Both launches wait on the same fleets: no computer command ship, no start of either kind.
+    const d = sw.Simulator.getLayout(), i = d.findIndex((u) => u.id === 'computer-cmd'), cmd = d.splice(i, 1)[0];
+    // A charge change re-reads the fleets (the battery only answers a new value).
+    const recheck = (v) => { $('charge-player').value = v; $('charge-player').dispatchEvent(new sw.Event('input', { bubbles: true })); };
+    recheck('8');
+    check('a battle that cannot start cannot be played live either', $('start').disabled && $('play-live').disabled && /Can.t start/.test(text($('checks'))), text($('checks')));
+    d.splice(i, 0, cmd);
+    recheck('9');
+    check('…and fleets put right wake both', !$('start').disabled && !$('play-live').disabled, text($('checks')));
+  }
+  $('play-live').click();
+  await tick(30);
+  {
+    const dlg = $('live-dialog');
+    const box = dlg && dlg.querySelector('.d-modal');
+    check('it opens a deck dialog like Post to…: in the scaled layout, titled Play live, the crossed swords on its rail', dlg && dlg.matches('.d-scrim') && $('menu-page-layout').contains(dlg)
+      && box && box.matches('.d-modal.is-violet.is-md[role="dialog"][aria-modal="true"]') && /^Play live$/.test(text($(box.getAttribute('aria-labelledby'))))
+      && dlg.querySelector('.d-modal-rail i.sui-icon.icon-raid'));
+    check('…what will be played: the battle, its fleets (no computer level: a person plays it), 4 s blocks', /^Spearpoint · 9 v 9 · 4 s blocks$/.test(text($('live-what'))), text($('live-what')));
+    check('…a find field, the deck\'s code field, labelled', $('live-find').matches('.d-code > input.d-code-in') && $('live-find').placeholder === 'Find a player or room'
+      && /^Invite$/.test(text(dlg.querySelector('label[for="live-find"]'))) && sw.document.activeElement === $('live-find'));
+    const ctas = [...dlg.querySelectorAll('.d-modal-cta > button')];
+    check('…one key: Invite, teal, the crossed swords', ctas.length === 1 && ctas[0] === $('live-send') && $('live-send').matches('.d-btn.is-teal') && $('live-send').querySelector('.icon-raid'));
+  }
+  check('…your DMs first, then the rooms as given — Post to\'s rows', names().join() === 'JPEG,T.Xue,SN.Corporation,War Room'
+    && $('live-rooms').matches('[role="radiogroup"]') && [...$('live-rooms').querySelectorAll('.s-room')].every((r) => r.matches('label.s-room') && r.querySelector('input.d-sr[type="radio"]'))
+    && $('live-rooms').querySelectorAll('.s-room .pfp-frame').length === 2 && /PID #1-61/.test(text($('live-rooms').querySelector('.s-room'))), names().join());
+  check('…nothing picked for you: Invite waits', !$('live-rooms').querySelector('input:checked') && off($('live-send')) && text($('live-send')) === 'Invite');
+  sw.document.dispatchEvent(new sw.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+  check('…Escape closes it', !$('live-dialog'));
+  $('play-live').click();
+  await tick(30);
+  type('1-999');
+  const rowNew = $('live-rooms').querySelector('.s-room');
+  check('a player id typed in, with no DM yet, is a row of its own', names().join() === 'Player 1-999' && rowNew.querySelector('.chat-room-icon i.icon-member'));
+  rowNew.click();
+  check('…picked, Invite names them', !off($('live-send')) && text($('live-send')) === 'Invite Player 1-999');
+  failNext = true;
+  $('live-send').click();
+  await tick(30);
+  check('…Invite opens a match for that player, by id', opened.length === 1 && opened[0].toPlayer === '1-999' && !opened[0].roomId && opened[0].guildId === '0-5' && opened[0].battle && opened[0].blockMs === 4000);
+  check('…and when it fails, the dialog stays, Invite wakes, and the reason is said', $('live-dialog') && !off($('live-send')) && /Not opened — that player has no comms account/.test(text($('message'))), text($('message')));
+  type('1-61');
+  check('a player id with a DM finds the DM, not a second row', names().join() === 'JPEG');
+  type('1-6');
+  check('…an id only whole: 1-6 is a player of its own, never 1-61', names().join() === 'Player 1-6', names().join());
+  type('');
+  check('…clearing the field brings the list back, the pick kept only if shown', names().length === 4 && off($('live-send')));
+  $('live-rooms').querySelectorAll('.s-room')[2].click();
+  check('a room: Open in it — anyone there may take it', text($('live-send')) === 'Open in SN.Corporation' && /Anyone in SN\.Corporation/.test($('live-send').title));
+  $('live-rooms').querySelectorAll('.s-room')[0].click();
+  check('a DM: Invite them', text($('live-send')) === 'Invite JPEG');
+  $('live-send').click();
+  check('…the key holds while it opens', off($('live-send')));
+  await tick(40);
+  check('…the match opens in that DM, in that guild', opened.length === 2 && opened[1].roomId === '!b:h' && opened[1].guildId === '0-5' && !opened[1].toPlayer);
+  check('…the dialog closes and the lobby is the board: Start reads Ready, Play live is gone', !$('live-dialog') && text($('start')) === 'Ready'
+    && /Live battle/.test(text($('challenge'))) && $('play-live').classList.contains('hidden'));
+  s.close();
+}
+
+{
+  console.log('\n— Play live from a challenge, and signed out');
+  const opened = [];
+  const s = await simulator({ kind: 'challenge', guild_id: '0-1', room_id: '!r:h', event_id: '$root', battle }, {
+    matrix_sim_thread: () => ({ me, frame, room_name: 'SN.Corporation', ladder: [] }),
+    // Rooms that each name their guild, and none at the top.
+    matrix_sim_rooms: () => ({ rooms: [{ guild_id: '0-1', room_id: '!x:h', name: 'War Room', section: 'local' }, { guild_id: '0-1', room_id: '!r:h', name: 'SN.Corporation', section: 'local' }] }),
+    matrix_sim_live_open: (a) => { opened.push(a); return { guild_id: '0-1', room_id: a.roomId, match_room: '!m:h', invite_event: '$inv', me: '@1-1:h', block_ms: 4000, guest: null }; },
+    matrix_person: (a) => ({ user_id: a.userId, name: 'Marklifer', pfp_attrs: null, player_id: '1-1' }),
+    matrix_timeline: () => ({ messages: [] }),
+  });
+  await tick(30);
+  const { $ } = s;
+  check('a challenge shows Play live beside Start', !$('play-live').classList.contains('hidden'));
+  $('play-live').click();
+  await tick(30);
+  check('…its picker has the challenge\'s own room picked, first and once', $('live-rooms').querySelector('input:checked') && $('live-rooms').querySelector('input:checked').value === '!r:h'
+    && $('live-rooms').querySelector('.s-room input').value === '!r:h' && $('live-rooms').querySelectorAll('.s-room').length === 2
+    && text($('live-send')) === 'Open in SN.Corporation' && !$('live-send').disabled && /^Spearpoint · /.test(text($('live-what'))));
+  $('live-send').click();
+  await tick(40);
+  check('…opened there, in the room\'s own guild', opened.length === 1 && opened[0].roomId === '!r:h' && opened[0].guildId === '0-1' && !$('live-dialog'));
+  s.close();
+
+  // Edited, the fleets are no longer the challenge: nothing is picked for you.
+  const e = await simulator({ kind: 'challenge', guild_id: '0-1', room_id: '!r:h', event_id: '$root', battle }, {
+    matrix_sim_thread: () => ({ me, frame, room_name: 'SN.Corporation', ladder: [] }),
+    matrix_sim_rooms: () => ({ guild_id: '0-1', rooms: [{ room_id: '!r:h', name: 'SN.Corporation', section: 'local' }] }),
+  });
+  await tick(30);
+  e.$('unlock').click();
+  await tick(20);
+  e.$('play-live').click();
+  await tick(30);
+  check('an edited challenge picks nothing: its room is no longer its battle\'s', !e.$('live-rooms').querySelector('input:checked') && e.$('live-send').disabled && text(e.$('live-send')) === 'Invite');
+  e.close();
+
+  // A challenge an identity's Comms window opened: its room is that session's,
+  // which the primary's list need not hold — still first, picked, and opened as it.
+  const idOpened = [];
+  const id = await simulator({ kind: 'challenge', guild_id: '0-5#1-271', room_id: '!id:h', event_id: '$root', battle }, {
+    matrix_sim_thread: () => ({ me, frame, room_name: 'Fleet Yard', ladder: [] }),
+    matrix_sim_rooms: () => ({ guild_id: '0-5', rooms: [{ room_id: '!a:h', name: 'SN.Corporation', section: 'local' }] }),
+    matrix_sim_live_open: (a) => { idOpened.push(a); return { guild_id: a.guildId, room_id: a.roomId, match_room: '!m:h', invite_event: '$inv', me: '@1-271:h', block_ms: 4000, guest: null }; },
+  });
+  await tick(30);
+  id.$('play-live').click();
+  await tick(30);
+  check('a challenge from another Comms session: its own room is first and picked', [...id.$('live-rooms').querySelectorAll('.s-room .s-room-n')].map(text).join() === 'Fleet Yard,SN.Corporation'
+    && id.$('live-rooms').querySelector('input:checked') && id.$('live-rooms').querySelector('input:checked').value === '!id:h' && text(id.$('live-send')) === 'Open in Fleet Yard');
+  id.$('live-send').click();
+  await tick(30);
+  check('…and opens in that session, not the primary', idOpened.length === 1 && idOpened[0].guildId === '0-5#1-271' && idOpened[0].roomId === '!id:h');
+  id.close();
+
+  const t = await simulator({ kind: 'addressed', player_id: '1-61', name: 'JPEG-the-long', pfp_attrs: null }, {
+    matrix_sim_rooms: () => ({ guild_id: '0-1', rooms: [{ room_id: '!g:h', name: 'Galaxy', section: 'galaxy' }, { room_id: '!b:h', name: 'JPEG', section: 'direct', player_id: '1-61', pfp_attrs: null }] }),
+  });
+  t.$('play-live').click();
+  await tick(30);
+  check('addressed, with a DM: the DM is picked, and the key reads Invite JPEG', t.$('live-rooms').querySelector('input:checked') && t.$('live-rooms').querySelector('input:checked').value === '!b:h'
+    && text(t.$('live-send')) === 'Invite JPEG' && !t.$('live-send').disabled && t.$('live-rooms').querySelectorAll('.s-room').length === 2);
+  t.close();
+
+  const u = await simulator(null, { matrix_sim_rooms: () => { throw new Error('no guild you belong to runs a comms server'); } });
+  u.$('play-live').click();
+  await tick(30);
+  check('signed out of Comms: the list says why, and Invite stays off', /no guild you belong to runs a comms server/.test(text(u.$('live-rooms'))) && u.$('live-send').disabled);
+  u.$('live-find').value = '1-999';
+  u.$('live-find').dispatchEvent(new u.sw.Event('input'));
+  check('…typing changes nothing until there is a list', /no guild you belong to/.test(text(u.$('live-rooms'))) && u.$('live-send').disabled);
+  u.close();
+
+  const g = await simulator({ kind: 'live', role: 'guest', guild_id: '0-1', room_id: '!dm:h', invite_event: '$inv', match_room: '!dm:h',
+    battle, block_ms: 4000, host: '@1-61:h', host_name: 'JPEG', host_pfp: null, me: '@1-1:h' }, { matrix_timeline: () => ({ messages: [] }) });
+  await tick(30);
+  check('a live lobby has no Play live: it is one already', g.$('play-live').classList.contains('hidden') && /^Ready/.test(text(g.$('start'))));
+  g.close();
+}
+
+{
+  console.log('\n— Play live: one invite at a time, and what arrives while it is open');
+  const opened = [];
+  let answer = null, gate = null;
+  const rooms = [{ room_id: '!b:h', name: 'JPEG', section: 'direct', player_id: '1-61', pfp_attrs: null }, { room_id: '!c:h', name: 'T.Xue', section: 'direct', player_id: '1-9', pfp_attrs: null }];
+  const answers = {
+    matrix_sim_rooms: () => (gate || Promise.resolve()).then(() => ({ guild_id: '0-5', rooms })),
+    // The reply waits for the test: answer(true) opens, answer(false) refuses.
+    matrix_sim_live_open: (a) => { opened.push(a); return new Promise((ok, no) => { answer = (yes) => (yes ? ok({ guild_id: '0-5', room_id: a.roomId, match_room: a.roomId, invite_event: '$inv', me: '@1-1:h', block_ms: 4000, guest: { user_id: '@1-61:h', name: 'JPEG' } }) : no(new Error('the homeserver is busy'))); }); },
+  };
+  const s = await simulator(null, answers);
+  const { sw, $ } = s;
+  const pick = (name) => [...$('live-rooms').querySelectorAll('.s-room')].find((r) => text(r.querySelector('.s-room-n')) === name).click();
+  const esc = () => sw.document.dispatchEvent(new sw.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+  $('play-live').click();
+  await tick(30);
+  pick('JPEG');
+  $('live-send').click();
+  await tick(10);
+  esc();
+  $('play-live').click();
+  await tick(30);
+  pick('JPEG');
+  check('closed and reopened while an invite opens: Invite holds until it answers', $('live-dialog') && $('live-send').disabled && opened.length === 1);
+  $('live-send').click();
+  await tick(10);
+  check('…a press there opens nothing more', opened.length === 1);
+  answer(false);
+  await tick(20);
+  check('…refused: the open picker wakes, the reason said', $('live-dialog') && !$('live-send').disabled && /Not opened — the homeserver is busy/.test(text($('message'))), text($('message')));
+  $('live-send').click();
+  await tick(10);
+  answer(true);
+  await tick(30);
+  check('…opened: the lobby takes the board, no picker', opened.length === 2 && !$('live-dialog') && $('play-live').classList.contains('hidden'));
+  s.close();
+
+  const t = await simulator(null, answers);
+  t.$('play-live').click();
+  await tick(30);
+  t.setPending({ kind: 'addressed', player_id: '1-9', name: 'T.Xue', pfp_attrs: null });
+  await t.sw.Simulator.takeContext();
+  await tick(30);
+  check('a player handed over from Comms while the picker is open closes it: it named the old battle', !t.$('live-dialog') && /^T\.Xue$/.test(text(t.$('addressed-name'))));
+  t.$('play-live').click();
+  await tick(30);
+  check('…opened again, their DM is picked', t.$('live-rooms').querySelector('input:checked') && t.$('live-rooms').querySelector('input:checked').value === '!c:h' && text(t.$('live-send')) === 'Invite T.Xue');
+  t.setPending({ kind: 'live', role: 'guest', guild_id: '0-1', room_id: '!dm:h', invite_event: '$inv', match_room: '!dm:h',
+    battle, block_ms: 4000, host: '@1-61:h', host_name: 'JPEG', host_pfp: null, me: '@1-1:h' });
+  await t.sw.Simulator.takeContext();
+  await tick(30);
+  check('…a live battle arriving closes it too, and hides Play live', !t.$('live-dialog') && t.$('play-live').classList.contains('hidden'));
+  t.close();
+
+  // A slow rooms answer reaches only the picker that is open.
+  let release;
+  gate = new Promise((r) => { release = r; });
+  const u = await simulator(null, answers);
+  u.$('play-live').click();
+  await tick(10);
+  u.sw.document.dispatchEvent(new u.sw.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+  u.$('play-live').click();
+  await tick(10);
+  release();
+  await tick(30);
+  check('a rooms answer that comes late lists once, in the open picker, picking nothing', u.$('live-rooms').querySelectorAll('.s-room').length === 2 && u.$('live-send').disabled);
+  u.close();
+  gate = null;
+}
+
+{
+  console.log('\n— a new battle handed over during a live one');
+  const frames = [], statuses = [];
+  const s = await simulator({ kind: 'live', role: 'host', guild_id: '0-1', room_id: '!dm:h', invite_event: '$inv', match_room: '!dm:h',
+    battle, block_ms: 4000, host: '@1-1:h', host_name: 'You', me: '@1-1:h', expect: { user_id: '@1-61:h', name: 'JPEG' } }, {
+    matrix_sim_live_send: (a) => { frames.push(a.frame); return { event_id: '$x' }; },
+    matrix_sim_live_status: (a) => { statuses.push(a.frame); return { event_id: '$s' }; },
+    matrix_timeline: () => ({ messages: [] }),
+  });
+  await tick(30);
+  check('the host waits in a DM lobby', /Live battle/.test(text(s.$('challenge'))));
+  s.setPending({ kind: 'addressed', player_id: '1-9', name: 'T.Xue', pfp_attrs: null });
+  await s.sw.Simulator.takeContext();
+  await tick(30);
+  check('Comms\' Challenge to a battle leaves it as Leave would: the guest hears it, the invite is withdrawn', frames.some((f) => f.kind === 'leave' && f.forfeit === false)
+    && statuses.some((f) => f.state === 'cancelled') && /^T\.Xue$/.test(text(s.$('addressed-name'))) && !s.$('play-live').classList.contains('hidden'));
   s.close();
 }
 
@@ -967,10 +1250,15 @@ async function simulator(context, answers = {}) {
   await tick(50);
   const { $, subs } = s;
   const fire = (frame, sender = '@1-61:h') => (subs['matrix::sim'] || []).forEach((cb) => cb({ payload: { room_id: '!m:h', sender, frame } }));
-  check('addressed: Play JPEG live sits under Send', !$('live-to').classList.contains('hidden') && /Play JPEG live/.test(text($('live-to'))));
-  $('live-to').click();
+  check('addressed: Play live sits beside Send', !$('play-live').classList.contains('hidden') && $('send-to').nextElementSibling === $('play-live'));
+  $('play-live').click();
   await tick(30);
-  check('…which opens a match by code, for that player, at 4 s blocks', opened.length === 1 && opened[0].toPlayer === '1-61' && opened[0].battle && opened[0].blockMs === 4000);
+  // No DM with them yet (no rooms here): their own row, picked.
+  check('…its picker has them picked, a DM or not', $('live-rooms').querySelector('input:checked') && /^Invite JPEG$/.test(text($('live-send'))) && !$('live-send').disabled);
+  $('live-send').click();
+  await tick(30);
+  check('…which opens a match by code, for that player, at 4 s blocks', opened.length === 1 && opened[0].toPlayer === '1-61' && !opened[0].roomId && opened[0].battle && opened[0].blockMs === 4000);
+  check('…and gives way to the lobby: no picker, no Play live', !$('live-dialog') && $('play-live').classList.contains('hidden'));
   check('the host waits in the lobby for them', /Live battle/.test(text($('challenge'))) && /Waiting for JPEG/.test(text($('challenge'))));
   fire({ v: 1, kind: 'hello' }, '@1-99:h');
   check('…a stranger\'s hello is not the invited guest', /Waiting for JPEG/.test(text($('challenge'))));

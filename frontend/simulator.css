@@ -47,12 +47,24 @@ body:not([data-screen="setup"]) #sim-go { display: none; }
 #sim-go:has(#send-to:not(.hidden)) > .d-command-r { flex: 0 0 auto; }
 /* The launch never gives way; the readiness takes what is left. */
 #sim-go > .d-command-r { min-width: max-content; }
-#send-to > .d-pf { margin-right: calc(-1 * var(--spacing-sm)); }
+#play-live > .d-pf { margin-right: calc(-1 * var(--spacing-sm)); }
+/* A crowded bar gives way a step at a time (fitCommand): the fleets' tools
+   keep their glyphs (their words stay for a screen reader, and in their
+   titles); then the bar and its keys draw closer, inside the bar's own
+   edges; then Send to keeps its glyph. The readiness never goes: why a
+   start is blocked stays beside the keys it blocks, at worst cut short. */
+#sim-go.s-fold .d-tool > span, #sim-go.s-tighter #send-to > span { position: absolute; clip-path: inset(50%); white-space: nowrap; }
+#checks .d-ready-h { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+#sim-go.s-tight { column-gap: var(--spacing-md); }
+#sim-go.s-tight > .d-command-r { gap: var(--spacing-sm); }
+#sim-go.s-tight > .d-command-r > :is(.d-btn.is-lg, .d-launch) { gap: var(--spacing-sm); padding-left: var(--spacing-md); padding-right: var(--spacing-md); }
 /* One row while the launch, the tools and a word of readiness fit (the
    readiness ellipsizes first); only a very narrow window wraps it. */
 @container sim-shell (max-width: 539px) {
   #sim-go { flex-wrap: wrap; height: auto; row-gap: var(--spacing-xs); padding: var(--spacing-xs) var(--spacing-md); }
   #sim-go > .d-command-c { order: 3; flex: 1 1 100%; justify-content: center; }
+  /* The tools have a row of their own here: their words stay. */
+  #sim-go.s-fold .d-tool > span { position: static; clip-path: none; }
 }
 /* Top bar right (W2-battle): the status pills on every screen, then the
    battle's own tools, Pause and End, after a separator. The pills give way
@@ -385,3 +397,6 @@ body[data-screen="battle"] #menu-page-panel { min-height: 0; }
 .s-room-n { color: var(--text-body); }
 .s-room:has(> input:checked) .s-room-n { color: var(--accent-primary); }
 .s-room-sub { max-width: calc(4 * var(--spacing-xxxl)); }
+/* The send key names its room: a long name gives way, not the dialog. */
+.d-modal-cta > :is(#post-send, #live-send) { flex: 0 1 auto; min-width: 0; }
+.d-modal-cta > :is(#post-send, #live-send) > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
