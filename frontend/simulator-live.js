@@ -204,8 +204,12 @@
         if (!T || !T.core) throw new Error('no sound runtime');
         return T.core.invoke(cmd, args);
       }
-      default:
+      default: {
+        // The Comms rail, as for the host's board (simulator-host.js).
+        var said = this.opts.comms ? this.opts.comms(cmd, args) : undefined;
+        if (said !== undefined) return said;
         throw new Error(cmd + ' is not part of the simulator');
+      }
     }
   };
 

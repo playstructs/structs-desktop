@@ -42,7 +42,12 @@ const BUDGET = {
   // Raised 2026-10-06 with the setup → deploy → battle → debrief rebuild:
   // the file roughly tripled, and what is left is 2px borders, the board's
   // column widths and breakpoints — none has a token. Hex went DOWN 4 → 1.
-  'simulator.css': [1, 51],
+  // Lowered 2026-10-08 (51 → 34) when the window took the game's own scaler:
+  // laid out at 1x, its board geometry and card widths halved.
+  // +5 2026-10-08 SUI review: field values and the thread clock in SUI's content
+  // face (DirectiveZero 8/12, the .sui-text-tiny metrics) where the parts default
+  // to the chrome face, and the debrief Challenge panel's fixed basis.
+  'simulator.css': [0, 35],
   // Raised 2026-10-08 with challenges (+9): the thread rail's 340px, the
   // Post-to list's 320px cap and 600px card, and 2px focus/edge lines.
   'simulator-social.js': [0, 0],
@@ -51,7 +56,7 @@ const BUDGET = {
   // Comms: the challenge card (simcard.*) and its timeline wiring. The
   // miniature board's px are the simulator's band geometry at chat scale.
   'simcard.js': [0, 0],
-  'simcard.css': [0, 14],
+  'simcard.css': [0, 12],
   'chat-sim.js': [0, 0],
   // file:            colour, px
   //
@@ -77,7 +82,7 @@ const BUDGET = {
   // chat.html +3 (2026-09-29): the reference ROWS — the unfurl column's 600px,
   // the 340px a card keeps inside it and the action menu's 240px floor, none
   // of which SUI has a token for. (It stood at 55 against 54 before this.)
-  'chat.html':          [0, 57],
+  'chat.html':          [0, 56],
   'chat.js':            [0, 0],
   // The sections extracted from chat.js (2026-09-05) and the shared
   // listener helper: built with textContent and tokens, no pixels of their own.
@@ -168,6 +173,10 @@ const BUDGET = {
   // with the chip itself — one implementation for every window.
   'board.html':         [2, 125],
   'board.js':           [0, 0],
+  // The shared SUI builders (Team Ops' H.* aliases, the Battle Simulator):
+  // SUI markup and tokens only.
+  'sui-parts.js':       [0, 0],
+  'sui-parts.css':      [0, 0],
   'board-pages.js':     [3, 11],
   // The 1px is `minmax(420px, 1fr)` — a column BREAKPOINT, which is not
   // spacing and has no token.
@@ -514,11 +523,11 @@ console.log('\n— type sizes are SUI roles');
 // 32px is the Game Stats hero figure and only that: the one number the page
 // leads with, in a window that renders 1:1 with no 2× transform, at exactly
 // twice the DirectiveZero face so the pixels stay whole (.gs-hero-v).
-// 24px and 64px are the Battle Simulator's titles and its VICTORY/DEFEAT
-// verdict: the simulator draws SUI at 2x (labels 16px), so its display face
-// sits at 24px — exactly 3x ExtremeHazard's 8px design size — and the verdict
-// at 64px, exactly 8x. Whole pixels, approved in the 2026-10-06 design round.
-const TYPE_DEBT = { 'structs-config.js': ['15'], 'board.html': ['32'], 'simulator.css': ['24', '64'] };
+// 32px is also the Battle Simulator's VICTORY/DEFEAT verdict and its deploy
+// countdown: the simulator is laid out at the game's 1x under the game's own
+// scaler (#menu-page-layout), so its titles are SUI's display face as is, and
+// the verdict is that face at exactly 4x ExtremeHazard's 8px design size.
+const TYPE_DEBT = { 'structs-config.js': ['15'], 'board.html': ['32'], 'simulator.css': ['32'] };
 for (const file of windowFiles) {
   const src = readFileSync(root + '/frontend/' + file, 'utf8');
   const sizes = [

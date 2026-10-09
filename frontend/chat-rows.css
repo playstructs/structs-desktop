@@ -285,3 +285,18 @@
   color: var(--accent-destructive); margin: var(--spacing-xs) 0;
   font-family: 'ExtremeHazard', sans-serif; font-size: 8px; text-transform: uppercase; }
 .chat-new::before, .chat-new::after { content: ''; flex: 1 1 auto; border-top: thin solid var(--accent-destructive); }
+
+/* ── A room's portrait (StructsChatRow.roomMark) ────────────────────────
+ * Fills the portrait slot rather than sitting in a smaller box inside it:
+ * `.sui-result-row-portrait` is `align-items: flex-start`, so a smaller
+ * child was pinned to the TOP of the row's portrait column while the DM
+ * portraits beside it filled the slot. Same box, so the glyph lands in the
+ * middle of it. */
+.chat-room-icon {
+  display: flex; align-items: center; justify-content: center;
+  width: 100%; height: 100%;
+}
+/* The mark itself is sized by SUI's own `.sui-result-row-portrait img`
+ * (width: 100%), the same rule the webapp's Guild Directory uses — so
+ * nothing here sets a size and the two cannot drift apart. */
+.chat-room-mark { display: block; }

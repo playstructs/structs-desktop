@@ -15,6 +15,12 @@
 //         loadMyPfp, resolveRoom, paintComposerIdentity, inRoom, loadChat, loadRoomChat,
 //         renderChat, syncComposer, sendChat, reachableRoom, wireComposer, onCommsState }
 //
+// In the Battle Simulator (`sim=1`) there is no planet to talk about: the
+// simulator hands the rail a room of its own instead (`sim_comms_room` —
+// a live battle's DM or match room, or a challenge's thread), answers the
+// rail's reads and sends for that room alone, and the rail shows only while
+// it has one (`data-sim-talk`). Everything else here is unchanged.
+//
 // Whether Comms is up is NOT decided here. `window.StructsComms` (comms-state.js)
 // holds the one answer every window reads; this rail only says what IT tried
 // and whether that worked. Before this the rail set `connected: false` on any
@@ -51,7 +57,9 @@
                       // The object's OWN room, once looked up: `{alias, room_id,
                       // can_create, joined}`. Null means not looked up yet or no
                       // such room, and both leave the panel on the search path.
-                      room: null };
+                      room: null,
+                      // The simulator's room, when it gave one: {room_id, guild_id, topic, empty}.
+                      given: null };
 
     /* "planet" or "fleet" — whichever this window is actually about.
      *
@@ -63,6 +71,7 @@
     // "Planet 2-16116" — the channel's name, and the one the room is created
     // with, so the header does not change under the player when it appears.
     function objectTitle() {
+      if (chatState.given) return chatState.given.topic || 'Comms';
       if (!target() || !target().id) return 'Comms';
       return objectWord().charAt(0).toUpperCase() + objectWord().slice(1)
         + ' ' + target().id;
@@ -70,6 +79,7 @@
 
     // Matches the topic `matrix_object_room_create` sets on the real room.
     function defaultTopic() {
+      if (chatState.given) return chatState.given.topic || '';
       if (!target() || !target().id) return '';
       return 'Everything said about ' + objectWord() + ' ' + target().id + '.';
     }
@@ -196,8 +206,21 @@
         .catch(function () {});
     }
 
+    function isSim() { return document.documentElement.hasAttribute('data-sim'); }
     function resolveRoom() {
       if (!target() || !window.__TAURI__) return Promise.resolve();
+      // The simulator's room, as the simulator gives it: already ours to read
+      // and speak in, so it is a JOINED room from the first paint.
+      if (isSim()) {
+        return window.__TAURI__.core.invoke('sim_comms_room', {})
+          .then(function (r) {
+            chatState.given = r && r.room_id ? r : null;
+            chatState.room = chatState.given ? { room_id: r.room_id, guild_id: r.guild_id, joined: true } : null;
+            if (chatState.given) chatState.guildId = r.guild_id;
+            document.documentElement.toggleAttribute('data-sim-talk', !!chatState.given);
+          })
+          .catch(function () { chatState.given = null; chatState.room = null; document.documentElement.removeAttribute('data-sim-talk'); });
+      }
       return window.__TAURI__.core.invoke('matrix_object_room', { objectId: target().id, guildId: sessionKey() })
         .then(function (res) { chatState.room = res || null; })
         // A lookup failure is not a panel failure: the search path still works.
@@ -249,6 +272,8 @@
         return;
       }
       if (inRoom()) return loadRoomChat();
+      // A simulator with nothing to talk about has no rail to fill.
+      if (isSim()) return;
       chatState.loading = true;
       window.__TAURI__.core.invoke('matrix_object_chatter', { objectId: target().id, guildId: sessionKey() })
         .then(function (res) {
@@ -368,8 +393,9 @@
       }
       if (!chatState.rows.length) {
         // A fleet is not a planet. The rail opens on both.
-        body.appendChild(R.notice('Quiet',
-          'Nothing has been said about this ' + objectWord() + ' yet.'));
+        body.appendChild(R.notice('Quiet', chatState.given
+          ? (chatState.given.empty || 'Nothing has been said yet.')
+          : 'Nothing has been said about this ' + objectWord() + ' yet.'));
         return;
       }
       /* The Comms window's own row, not a lookalike.

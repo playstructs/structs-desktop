@@ -170,4 +170,36 @@ const planet = { id: '2-15361', kind: 'planet' };
   assert.ok(/Signed out/.test(body()), 'signed out says so: ' + body());
 }
 
+// The Battle Simulator gives the rail its room: shown only while there is
+// one, read and spoken in directly, titled as the simulator says.
+{
+  const { rc, w, calls } = boot(planet, {
+    sim_comms_room: { room_id: '!dm:h', guild_id: '0-1', topic: 'Spearpoint · with JPEG', empty: 'Nothing has been said yet.' },
+    matrix_timeline: { room: { name: 'JPEG' }, messages: [] },
+    matrix_send: { event_id: '$1' },
+  });
+  w.document.documentElement.setAttribute('data-sim', '');
+  rc.chatState.connected = true;
+  await rc.resolveRoom();
+  assert.ok(w.document.documentElement.hasAttribute('data-sim-talk'), 'a room given: the rail shows');
+  assert.ok(rc.inRoom(), '…as a joined room, read directly');
+  assert.ok(!calls.some((c) => c[0] === 'matrix_object_room'), 'no planet room is looked up in the simulator');
+  rc.loadChat();
+  await tick(10);
+  const read = calls.find((c) => c[0] === 'matrix_timeline');
+  assert.equal(read[1].roomId, '!dm:h');
+  assert.equal(w.document.querySelector('.rv-chat-title').textContent, 'Spearpoint · with JPEG', 'titled as the simulator says');
+  assert.ok(/Nothing has been said yet/.test(w.document.getElementById('rv-chat-body').textContent), '…and quiet in its words, not a planet\'s');
+
+  const none = boot(planet, { sim_comms_room: null });
+  none.w.document.documentElement.setAttribute('data-sim', '');
+  none.w.document.documentElement.setAttribute('data-sim-talk', '');
+  await none.rc.resolveRoom();
+  assert.ok(!none.w.document.documentElement.hasAttribute('data-sim-talk'), 'nothing to talk about: no rail');
+  none.rc.chatState.connected = true;
+  none.rc.loadChat();
+  await tick(10);
+  assert.ok(!none.calls.some((c) => c[0] === 'matrix_object_chatter'), '…and no planet search either');
+}
+
 console.log('raid-comms: all checks passed');

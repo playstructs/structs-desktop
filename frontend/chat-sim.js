@@ -106,32 +106,53 @@
     }
 
     function menuItems(m, id, box) {
-      return [
+      var list = [
         { icon: 'icon-copy', title: 'Copy link', run: function () { copyLink(m, box); } },
         { icon: 'icon-link-out', title: 'Open on structs.app', run: function () {
           invoke('matrix_open_url', { url: m.sim.link }).catch(function (e) { note(box, String(e), true); });
         } },
       ];
+      // A row opens to its card, from the menu as from the body — as every
+      // other row Comms unfurls (chat-refs.js).
+      var pending = !!(m.pending || !serverIdOf(m));
+      if (!pending && !ST.open[id] && (m.sim.kind === 'challenge' || m.sim.kind === 'result')) {
+        list.unshift({ icon: 'icon-chevron-down', title: 'Open the card', run: function () { ST.open[id] = 1; render(); } });
+      }
+      return list;
+    }
+    /* The More door is found again each time: a repaint draws a new one. */
+    function moreDoorOf(box) { return box.querySelector('.pc-act[title="More"]'); }
+    function closeMenu(box) {
+      var o = box.querySelector('.chat-ref-menu');
+      if (o) o.parentNode.removeChild(o);
+      var d = moreDoorOf(box);
+      if (d) d.classList.remove('sc-on');
+      ST.menu = null;
     }
     function openMenu(box, list, id) {
-      var old = box.querySelector('.chat-ref-menu');
-      if (old) { old.parentNode.removeChild(old); ST.menu = null; return; }
+      if (box.querySelector('.chat-ref-menu')) { closeMenu(box); return; }
       ST.menu = id;
       var menu = el('div', 'chat-ref-menu');
       list.forEach(function (it) {
         var a = el('a', 'chat-ref-menu-item');
         a.href = 'javascript:void(0)';
         a.appendChild(icon(it.icon, 'sui-icon-sm'));
+        // The type class sits on the span: the window's own `a` rule sets a
+        // face, and it outranks a class on the anchor itself.
         a.appendChild(el('span', 'sui-text-label-block', it.title));
         a.addEventListener('click', function (ev) {
           ev.stopPropagation();
-          ST.menu = null;
-          if (menu.parentNode) menu.parentNode.removeChild(menu);
+          closeMenu(box);
           it.run();
         });
         menu.appendChild(a);
       });
+      menu.addEventListener('keydown', function (ev) { if (ev.key === 'Escape') { ev.stopPropagation(); closeMenu(box); } });
       box.insertBefore(menu, box.children[1] || null);
+      // Into the menu, so Escape (and the arrow of a reader) lands in it.
+      if (menu.firstChild) menu.firstChild.focus();
+      var d = moreDoorOf(box);
+      if (d) d.classList.add('sc-on');
     }
 
     /* The row or card under a message that carries a battle. */
@@ -151,7 +172,7 @@
         onCopy: function () { copyLink(m, box); },
         onReplies: function () { play(m, id, box); },
       };
-      var node;
+      var node, opened = !!ST.open[id] && m.sim.kind !== 'invite';
       if (m.sim.kind === 'invite') {
         // A live battle: take it, watch it, or see how it went.
         var join = function (role) {
@@ -165,11 +186,14 @@
         node = Card.inviteRow(view, { onAccept: pending ? null : function () { join('guest'); },
           onWatch: pending ? null : function () { join('watch'); }, onMore: opts.onMore });
       }
+      // Opened, a challenge or a result is the battle's card: its board,
+      // ladder and thread, with a door back to the row.
+      else if (opened) node = Card.card(view, opts);
       // A shared result says how IT went: its own frame, whoever pasted it.
-      else if (m.sim.kind === 'result' && m.sim.pasted && !ST.open[id]) node = Card.resultRow({ frame: m.sim, author: { name: m.sender_name } }, opts);
-      else node = ST.open[id] && m.sim.kind === 'challenge' ? Card.card(view, opts) : Card.row(view, opts);
+      else if (m.sim.kind === 'result' && m.sim.pasted) node = Card.resultRow({ frame: m.sim, author: { name: m.sender_name } }, opts);
+      else node = Card.row(view, opts);
       box.appendChild(node);
-      if (!(ST.open[id] && m.sim.kind === 'challenge')) box.classList.add('chat-mod-row');
+      if (!opened) box.classList.add('chat-mod-row');
       if (ST.menu === id) openMenu(box, menuItems(m, id, box), id);
       box.setAttribute('data-sim', id);
       return box;
@@ -178,7 +202,7 @@
     /* The one line a challenge's thread puts in the room: a run that took
      * first place. Whoever it knocked off reads it addressed to them. */
     function simLine(m) {
-      if (!m || !m.sim || !m.thread_root || !(m.sim.kind === 'result' && m.sim.top)) return null;
+      if (!m || !m.sim || !m.thread_root || !(m.sim.kind === 'result' && m.sim.top) || !window.StructsSimCard) return null;
       var mine = !!(m.sim.beat && m.sim.beat === me());
       // The room's own event line (who · what · when), so it sits with
       // "joined" and "named the room" rather than looking like a message.
@@ -187,18 +211,19 @@
       if (mine) line.classList.add('chl-mine');
       var what = line.querySelector('.chat-event-what') || line;
       what.textContent = '';
-      what.appendChild(icon('icon-success', 'sui-icon-sm'));
+      var Card = window.StructsSimCard;
+      var o = m.sim.outcome;
+      // The run's own verdict: a best that is a defeat shows its verdict, not a tick.
+      var g = icon(o ? Card.verdictGlyph(o) : 'icon-success', 'sui-icon-sm');
+      if (o) g.classList.add(Card.verdictTone(o));
+      what.appendChild(g);
       what.appendChild(el('span', null, mine ? ' beat your best on ' : ' set the best on '));
       var a = el('a', 'chl-name');
       a.href = 'javascript:void(0)';
       a.textContent = m.sim.name || 'the battle';
       a.addEventListener('click', function () { ST.open[m.thread_root] = 1; jumpTo(m.thread_root); render(); });
       what.appendChild(a);
-      var o = m.sim.outcome;
-      if (o) {
-        var tone = o.winner === 'player' ? 'sc-ok' : o.winner === 'draw' ? 'sc-tone-warning' : 'sc-bad-text';
-        what.appendChild(el('span', tone, ' · ' + o.verdict + ' ' + o.time + ' · lost ' + o.lost));
-      }
+      if (o) what.appendChild(el('span', Card.verdictTone(o), ' · ' + o.verdict + ' ' + o.time + ' · lost ' + o.lost));
       return line;
     }
 

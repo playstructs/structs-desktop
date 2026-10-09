@@ -1307,6 +1307,10 @@
       state.simClock = { ms: Number(p.clock_ms), running: !!p.running, at: Date.now() };
       paintSimClock();
     }
+    if (p && p.fielded && typeof p.fielded === 'object') {
+      simBeatFielded = p.fielded;
+      paintSimStanding();
+    }
     var h = Number(p && p.height) || 0;
     if (!(h > state.height)) return;
     state.height = h;
@@ -1320,6 +1324,39 @@
     n.textContent = String(Math.floor(sec / 60)).padStart(2, '0') + ':' + String(sec % 60).padStart(2, '0');
   }
   if (params.sim === '1') setInterval(paintSimClock, 250);
+  /* The simulator's standing: each side's structs as the game counts them
+   * (PlanetCardComponent's deployed-structs resource) — "standing/fielded",
+   * the viewer's beside the clock, the enemy's in the enemy panel. The board
+   * is already drawn from the viewer's side (a live guest's is mirrored), so
+   * `defender` is always "you". A destroyed struct leaves the chain a few
+   * blocks later and a defeated fleet leaves the map, so every struct seen
+   * is remembered: fielded counts them all, standing all but the destroyed.
+   * A heartbeat that carries the host's own `fielded` (by player id) covers
+   * a watcher who joined after the first losses were swept. */
+  var simSeen = {}, simDead = {}, simBeatFielded = null;
+  function paintSimStanding() {
+    if (params.sim !== '1') return;
+    var snap = state.snapshot;
+    if (!snap) return;
+    Object.keys(state.structsById).forEach(function (id) {
+      var s = state.structsById[id];
+      if (s.side === 'defender' || s.side === 'attacker') simSeen[id] = s.side;
+      if (s.destroyed) simDead[id] = true;
+    });
+    var n = { defender: { standing: 0, fielded: 0 }, attacker: { standing: 0, fielded: 0 } };
+    Object.keys(simSeen).forEach(function (id) {
+      var side = n[simSeen[id]];
+      side.fielded++;
+      if (!simDead[id]) side.standing++;
+    });
+    if (simBeatFielded) {
+      var mine = Number(simBeatFielded[snap.owner]), theirs = Number(simBeatFielded[snap.raider_id]);
+      if (mine > n.defender.fielded) n.defender.fielded = mine;
+      if (theirs > n.attacker.fielded) n.attacker.fielded = theirs;
+    }
+    setText('rv-sim-you-n', n.defender.standing + '/' + n.defender.fielded);
+    setText('rv-sim-them-n', n.attacker.standing + '/' + n.attacker.fielded);
+  }
   function chargeOf(s) { return chargeOfPlayer(s.owner); }
   /* `Player.isOverloaded()` for a player on this board: the snapshot's
    * answer for either combatant, the roster's for anyone else we control. */
@@ -3270,6 +3307,7 @@
       // window would refuse to show one after having shown it elsewhere.
       bannerShownFor = null;
       pendingBanner = null;
+      simSeen = {}; simDead = {}; simBeatFielded = null;
     }
     var previous = state.structsById;
     state.structsById = {};
@@ -3326,6 +3364,7 @@
     if (state.pending) markTargets();
     if (snap.raid_status) showBanner(snap.raid_status);
     renderHeader();
+    paintSimStanding();
     var notices = [];
     if (snap.warning) notices.push(snap.warning);
     if (unplaced) notices.push(unplaced + ' struct(s) had no free tile (a second fleet contests the same slots).');
@@ -3388,6 +3427,7 @@
       noteBuildStarted(detail.struct_id || detail.structId, subjectPlayer(d.subject));
     }
     renderHeader();
+    paintSimStanding();
   }
 
   /* A frame named a struct that is being built: the oldest pending build of

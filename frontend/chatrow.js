@@ -391,7 +391,67 @@
     return frag;
   }
 
+  /* ── A room, as the channel list draws it ──────────────────────────────
+   *
+   * The portrait and the sub-line of a room row, shared so any list of rooms
+   * (the Channels page, the simulator's Post to…) draws a room one way.
+   * `h` carries the window's own helpers ({ pfpPortrait, icon, fmtCount });
+   * each falls back to a plain one here.
+   */
+  function countText(n) {
+    n = Number(n) || 0;
+    if (n >= 1e6) { var m = n / 1e6; return (m >= 10 ? Math.round(m) : Math.round(m * 10) / 10) + 'M'; }
+    if (n >= 1000) { var k = n / 1000; return (k >= 10 ? Math.round(k) : Math.round(k * 10) / 10) + 'K'; }
+    return String(n);
+  }
+  /* Whether this is a PERSON is the server's classification (`section`), not
+   * something to infer from having a player id: a DM with a bot has none. */
+  function roomIsDm(r) { return !!(r && (r.section === 'direct' || r.pfp_attrs || r.player_id)); }
+
+  /* What fills `.sui-result-row-portrait`: a direct message's portrait, SN
+   * Corp's own mark on the Structs-wide channels, or the room's glyph. */
+  function roomMark(r, h) {
+    h = h || {};
+    if (roomIsDm(r)) {
+      // A direct message IS a person — the same portrait the roster shows.
+      if (h.pfpPortrait) return h.pfpPortrait(r.pfp_attrs);
+      var frame = el('div', 'sui-result-row-portrait-image pfp-frame');
+      if (root.StructsPfp) root.StructsPfp.fillPortrait(frame, r.pfp_attrs);
+      return frame;
+    }
+    if (r.home_rank != null && r.default_pin) {
+      /* The Structs-wide channels are SN Corp's, on its homeserver, for every
+       * player: its own mark, straight into the portrait as the webapp's Guild
+       * Directory draws a guild logo (`.sui-result-row-portrait img` fills
+       * it). A room the PLAYER pinned keeps its own glyph. */
+      var mark = document.createElement('img');
+      mark.className = 'chat-room-mark';
+      mark.src = 'img/logo-snc.gif';
+      mark.alt = '';
+      return mark;
+    }
+    var well = el('div', 'sui-result-row-portrait-icon chat-room-icon');
+    var name = r.system ? 'icon-computer' : (r.icon || 'icon-beacon');
+    well.appendChild(h.icon ? h.icon(name, 'sui-icon-md') : el('i', 'sui-icon sui-icon-md ' + name));
+    return well;
+  }
+
+  /* A room row's sub-line: who a DM is with, how many a channel holds. An
+   * invitation says who asked. A count the server has not given is no line
+   * at all — absence is not zero. Answers '' when there is nothing to say. */
+  function roomSub(r, h) {
+    var fmt = (h && h.fmtCount) || countText;
+    if (r.player_id) return (r.tag ? '[' + r.tag + '] ' : '') + 'PID #' + r.player_id;
+    if (r.invited) return r.invited_by ? 'Invited by ' + r.invited_by : 'You have been invited';
+    // "2 Players" under a direct message counts a conversation, which is not
+    // a fact anybody wants.
+    if (r.section === 'direct') return '';
+    return Number(r.members) > 0 ? fmt(r.members) + (Number(r.members) === 1 ? ' Player' : ' Players') : '';
+  }
+
   root.StructsChatRow = {
+    roomMark: roomMark,
+    roomSub: roomSub,
     notice: notice,
     idChips: idChips,
     body: body,

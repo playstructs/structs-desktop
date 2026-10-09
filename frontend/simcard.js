@@ -12,6 +12,9 @@
  *   StructsSimCard.inviteRow(view, opts)  a live battle: Accept, Watch, or how it went
  *   StructsSimCard.board(code)            the miniature, or null
  *   StructsSimCard.state(view)            'open' | 'played' | 'for-you' | 'best' | 'beaten'
+ *   StructsSimCard.ladderList(view, opts) who played it, best first ({max, onPerson, compact})
+ *   StructsSimCard.verdictGlyph(outcome)  the verdict as the game draws it: icon-success / -subtract / -alert
+ *   StructsSimCard.verdictTone(outcome)   …and its colour: sc-ok / sc-tone-warning / sc-bad-text
  *
  * `view` is what Rust's matrix_sim_thread answers ({frame, ladder, author,
  * replies, me, …}); before that arrives it is just {frame}, and every part
@@ -76,7 +79,12 @@
       }
       band.appendChild(cell('player', 'cmd'));
       [0, 1, 2, 3].forEach(function (s) { band.appendChild(cell('player', s)); });
-      band.appendChild(el('span', 'chl-amb sui-text-label', ambit.charAt(0).toUpperCase()));
+      // The ambit is the game's own sprite, as Team Ops and the Map Viewer label it.
+      var amb = el('span', 'chl-amb');
+      var ai = el('i', 'sui-icon sui-icon-sm sui-icon-' + ambit);
+      ai.title = cap(ambit);
+      amb.appendChild(ai);
+      band.appendChild(amb);
       [0, 1, 2, 3].forEach(function (s) { band.appendChild(cell('computer', s)); });
       band.appendChild(cell('computer', 'cmd'));
       box.appendChild(band);
@@ -122,7 +130,7 @@
     var f = frameOf(view), s = state(view), lad = ladderOf(view), top = first(view), m = mine(view);
     var bits = [sizeText(f)];
     if (s === 'for-you') {
-      bits = ['from ' + str(view.author && view.author.name)];
+      // Who sent it is the message header right above; the badge says it is yours.
       if (f.outcome) bits.push('to beat ' + f.outcome.time);
     } else if (s === 'best') {
       bits.push('1st of ' + lad.length);
@@ -137,15 +145,21 @@
     return bits.filter(Boolean).join(' · ');
   }
 
-  function emblem() { return C().emblem.art('Command Ship', 'sm'); }
-  function verdictReading(e) {
+  /* One verdict vocabulary for every place a run is drawn — Comms rows, the
+   * ladder, the room's event line, the simulator's own panel and debrief: the
+   * game's battle-verdict glyphs (victory icon-success, defeat icon-alert)
+   * and the catalogue's tones. A defeat is never a tick and never the close X. */
+  function verdictGlyph(o) { return o && o.winner === 'player' ? 'icon-success' : o && o.winner === 'draw' ? 'icon-subtract' : 'icon-alert'; }
+  function verdictTone(o) { return o && o.winner === 'player' ? 'sc-ok' : o && o.winner === 'draw' ? 'sc-tone-warning' : 'sc-bad-text'; }
+  function verdictReading(e, title) {
     var o = e.outcome || {};
-    var won = o.winner === 'player';
     // A reading without a glyph prints its title as a caption; every verdict has one.
-    var glyph = won ? 'icon-success' : o.winner === 'draw' ? 'icon-subtract' : 'icon-close';
-    return { value: o.time, icon: 'sui-icon-md ' + glyph, title: str(o.verdict) + ' · best · ' + str(e.name),
-      cls: won ? 'sc-ok' : o.winner === 'draw' ? 'sc-tone-warning' : 'sc-bad-text' };
+    return { value: o.time, icon: 'sui-icon-md ' + verdictGlyph(o),
+      title: title != null ? title : str(o.verdict) + ' · best · ' + str(e.name), cls: verdictTone(o) };
   }
+  /* The kind as a toned glyph, as the catalogue marks a raid or an incident —
+   * never the Command Ship art, which is what a fleet row wears. */
+  function emblem(glyph, tone) { return C().emblem.glyph(glyph, 'sm', tone); }
 
   function playDoor(opts, title) {
     return opts.onPlay ? { icon: 'icon-raid', title: title || 'Play', onClick: function (ev, node) { opts.onPlay(ev, node); } } : null;
@@ -163,7 +177,7 @@
       kind: 'challenge', id: f.battle, hideId: true, title: f.name || 'Battle',
       badge: BADGE[s] || difficultyBadge(f),
       sub: subText(view), state: STRIPE[s],
-      emblem: emblem(),
+      emblem: emblem('icon-raid', s === 'beaten' ? 'enemy' : s === 'for-you' ? 'warning' : 'player'),
       // The best run's time, in its verdict's colour: a defeat can lead a
       // ladder nobody has won, and must not wear a tick.
       readings: shown ? [verdictReading(shown)] : [],
@@ -172,20 +186,25 @@
     return node;
   }
 
-  /* A result someone shared: how it went first, then which battle. */
+  /* A result someone shared: the battle by name, how it went as its badge,
+   * the figures as readings. Who shared it is the message header above. */
   function resultRow(view, opts) {
     opts = opts || {};
     var f = frameOf(view), o = f.outcome || {};
-    var who = view && view.author && view.author.name;
+    var won = o.winner === 'player', drew = o.winner === 'draw';
     var node = C().row({
-      kind: 'challenge-result', id: f.battle, hideId: true, title: o.verdict || 'Result',
-      badge: { text: f.name || 'Battle', mod: 'default' },
-      sub: [o.time, 'lost ' + o.lost + ' of ' + o.fielded, o.blocks + ' blocks', who].filter(Boolean).join(' · '),
-      state: o.winner === 'player' ? 'live' : o.winner === 'draw' ? 'warn' : 'bad',
-      emblem: emblem(),
-      readings: [],
+      kind: 'challenge-result', id: f.battle, hideId: true, title: f.name || 'Battle',
+      badge: { text: o.verdict || 'Result', mod: won ? 'default' : drew ? 'warning' : 'destructive' },
+      sub: [sizeText(f), o.blocks != null ? o.blocks + ' blocks' : null].filter(Boolean).join(' · '),
+      state: won ? 'live' : drew ? 'warn' : 'bad',
+      emblem: emblem(verdictGlyph(o), won ? 'player' : drew ? 'warning' : 'enemy'),
+      readings: [
+        o.time ? verdictReading({ outcome: o }, str(o.verdict)) : null,
+        o.lost != null ? { value: o.lost + '/' + o.fielded, icon: 'sui-icon-md sui-icon-destroyed', title: 'Structs lost of fielded' } : null,
+      ],
     }, { doors: [playDoor(opts, 'Play this battle'), moreDoor(opts)], onClick: opts.onOpen });
-    node.classList.add('chl-row', o.winner === 'player' ? 'chl-won' : o.winner === 'draw' ? 'chl-drew' : 'chl-lost');
+    // The stripe and the badge carry the outcome; the row is just a row.
+    node.classList.add('chl-row');
     return node;
   }
 
@@ -211,32 +230,47 @@
     cancelled: { badge: { text: 'Cancelled', mod: 'default' }, stripe: null },
     lapsed: { badge: { text: 'Lapsed', mod: 'default' }, stripe: null },
   };
-  /* opts: { onAccept, onWatch, onMore } */
+  /* opts: { onAccept, onWatch, onMore }
+   * The battle by name, how it stands as its badge, and who plays whom as the
+   * raid row draws a two-sided fight: two faces either side of "vs". */
   function inviteRow(view, opts) {
     opts = opts || {};
     var f = frameOf(view), live = (view && view.live) || {}, st = inviteState(view);
-    var host = view && view.author ? (view.author.self ? 'You' : str(view.author.name)) : '';
+    var author = (view && view.author) || null;
+    var host = author ? (author.self ? 'You' : str(author.name)) : '';
     var guest = live.guest_name || null;
-    var sub;
-    if (st === 'ended') sub = live.winner_name ? live.winner_name + ' won · ' + host + ' v ' + (guest || '…') : 'a draw · ' + host + ' v ' + (guest || '…');
-    else if (st === 'live' || st === 'lobby') sub = host + ' v ' + (guest || '…') + ' · ' + (f.name || 'Battle');
-    else if (st === 'waiting') sub = (f.to && f.to.length ? 'sent' : 'anyone may take it') + ' · ' + (f.name || 'Battle') + ' · ' + (f.block_ms / 1000) + ' s';
-    else sub = (view && view.author && view.author.self ? '' : 'from ' + host + ' · ') + (f.name || 'Battle') + ' · ' + (f.block_ms / 1000) + ' s';
+    var sub = '';
+    if (st === 'ended' && !live.winner_name) sub = 'a draw';
+    else if (st === 'waiting') sub = f.to && f.to.length ? 'sent' : 'anyone may take it';
+    var v = el('div', 'sc-versus-row');
+    var H = author && author.player_id ? C().person({ id: author.player_id, name: author.name, pfp: author.pfp_attrs }) : null;
+    // Without the chain's id a player is a name, set as a name is set.
+    v.appendChild(H || el('span', 'pc-id sui-text-label', host || '…'));
+    v.appendChild(el('span', 'sui-text-label sc-vs', 'vs'));
+    var G = live.guest_id ? C().person({ id: live.guest_id, name: live.guest_name, pfp: live.guest_pfp }) : null;
+    v.appendChild(G || el('span', 'pc-id sui-text-label', guest || (st === 'for-you' ? 'You' : st === 'waiting' && !(f.to || []).length ? 'anyone' : (f.to && f.to[0] && f.to[0].name) || '…')));
     var doors = [];
     if ((st === 'for-you' || st === 'open') && opts.onAccept) doors.push({ icon: 'icon-raid', title: 'Accept', onClick: function (ev, n) { opts.onAccept(ev, n); } });
-    if ((st === 'live' || st === 'lobby') && opts.onWatch) doors.push({ icon: 'icon-detected', title: 'Watch', onClick: function (ev, n) { opts.onWatch(ev, n); } });
+    if ((st === 'live' || st === 'lobby') && opts.onWatch) doors.push({ icon: 'icon-raid', title: 'Watch', onClick: function (ev, n) { opts.onWatch(ev, n); } });
     doors.push(moreDoor(opts));
     var node = C().row({
-      kind: 'challenge-invite', id: f.battle, hideId: true, title: 'Live battle',
-      badge: INVITE[st].badge, sub: sub, state: INVITE[st].stripe, emblem: emblem(), readings: [],
+      kind: 'challenge-invite', id: f.battle, hideId: true, title: f.name || 'Battle',
+      badge: INVITE[st].badge, sub: sub, state: INVITE[st].stripe, line3: v,
+      emblem: emblem('icon-raid', st === 'live' ? 'enemy' : (st === 'for-you' || st === 'waiting') ? 'warning' : 'hint'),
+      readings: [f.block_ms ? { value: (f.block_ms / 1000) + ' s', icon: 'sui-icon-md icon-in-progress', title: 'Block time' } : null],
+      marks: st === 'ended' ? [{ icon: 'sui-icon sui-icon-md ' + (live.winner_name ? 'icon-success' : 'icon-subtract'),
+        value: live.winner_name || null, title: live.winner_name ? 'Won' : 'A draw' }] : null,
     }, { doors: doors });
     node.classList.add('chl-row', 'chl-invite');
     if (st === 'lapsed' || st === 'cancelled') node.classList.add('chl-faded');
     return node;
   }
 
-  /* Who played, best first: rank, face, name, verdict, time, lost. */
+  /* Who played, best first: rank, face and name, then the run as readings —
+   * its time behind the verdict glyph, and what it lost. opts: { max,
+   * onPerson, compact } — compact leaves the losses out (a narrow panel). */
   function ladderList(view, opts) {
+    opts = opts || {};
     var lad = ladderOf(view);
     if (!lad.length) return null;
     var me = view && view.me;
@@ -244,13 +278,13 @@
     lad.slice(0, opts.max || 5).forEach(function (e) {
       var o = e.outcome || {};
       var line = el('div', 'chl-run' + (e.sender === me ? ' chl-me' : '') + (o.current ? '' : ' chl-old'));
-      line.appendChild(el('span', 'chl-rank sui-text-hint', str(e.rank)));
+      line.appendChild(el('span', 'chl-rank sui-text-label sui-text-hint', str(e.rank)));
       var who = e.player_id ? C().person({ id: e.player_id, name: e.name, pfp: e.pfp_attrs },
         opts.onPerson ? { onClick: function (ev) { opts.onPerson(e, ev); } } : null) : el('span', 'pc-nm', str(e.name));
       line.appendChild(who);
-      line.appendChild(el('span', 'chl-verdict ' + (o.winner === 'player' ? 'sc-ok' : o.winner === 'draw' ? 'sc-tone-warning' : 'sc-bad-text'), str(o.verdict)));
-      line.appendChild(el('span', 'chl-time', str(o.time)));
-      line.appendChild(el('span', 'chl-lost sui-text-hint', 'lost ' + str(o.lost)));
+      var vr = verdictReading(e, str(o.verdict));
+      line.appendChild(C().readings([vr,
+        opts.compact ? null : { value: str(o.lost), icon: 'sui-icon-md sui-icon-destroyed', title: 'Structs lost' }]));
       if (!o.current) line.title = 'Played on older rules (r' + str(o.revision) + ')';
       box.appendChild(line);
     });
@@ -258,17 +292,20 @@
     return box;
   }
 
+  /* The tallies are the player card's record rack. Best wears its run's
+   * verdict colour: a defeat can lead a ladder nobody has won. */
   function stats(view) {
     var lad = ladderOf(view), top = first(view);
     var won = lad.filter(function (e) { return e.outcome && e.outcome.winner === 'player'; }).length;
-    var box = el('div', 'chl-stats');
-    [[lad.length, 'Played'], [won, 'Won'], [top ? top.outcome.time : '–', 'Best']].forEach(function (p, i) {
-      var cell = el('div', 'chl-stat');
-      cell.appendChild(el('div', 'chl-stat-v' + (i === 2 && top ? ' sc-ok' : ''), str(p[0])));
-      cell.appendChild(el('div', 'chl-stat-l sui-text-label sui-text-hint', p[1]));
-      box.appendChild(cell);
-    });
-    return box;
+    var rack = P().record([
+      { value: lad.length, label: 'Played' },
+      { value: won, label: 'Won' },
+      { value: top ? top.outcome.time : null, label: 'Best', title: top ? str(top.outcome.verdict) + ' · ' + str(top.name) : null },
+    ]);
+    rack.classList.add('chl-stats');
+    var best = rack.children[2] && rack.children[2].querySelector('.pc-rec-v');
+    if (top && best) best.classList.add(verdictTone(top.outcome));
+    return rack;
   }
 
   /* Opened. opts: { onPlay, onMore, onCopy, onCollapse, onReplies, onPerson } */
@@ -283,36 +320,49 @@
     if (lad) extra.push(lad);
     var replies = (view && view.reply_count) || 0;
     if (replies) {
+      // Comms' own pointer to a thread. The type class sits on the inner
+      // span: the window's `a` rule outranks a class on the anchor itself.
       var last = view.replies && view.replies[view.replies.length - 1];
-      var th = el('div', 'chl-thread');
-      var link = el(opts.onReplies ? 'a' : 'span', 'chl-replies sui-text-label', replies + (replies === 1 ? ' reply' : ' replies'));
+      var th = el(opts.onReplies ? 'a' : 'div', 'chat-reply-quote chat-mod-thread chl-thread');
       if (opts.onReplies) {
-        link.href = 'javascript:void(0)';
-        link.addEventListener('click', function (ev) { ev.stopPropagation(); opts.onReplies(ev); });
+        th.href = 'javascript:void(0)';
+        th.addEventListener('click', function (ev) { ev.stopPropagation(); opts.onReplies(ev); });
       }
-      th.appendChild(link);
       if (last) {
-        var said = el('span', 'chl-said');
-        said.appendChild(el('span', 'chl-said-who', str(last.name)));
-        said.appendChild(el('span', 'sui-text-hint', ' ' + str(last.body)));
-        th.appendChild(said);
+        th.appendChild(el('span', 'chat-reply-who', str(last.name)));
+        th.appendChild(el('span', 'chat-reply-text chl-said', str(last.body)));
       }
+      th.appendChild(el('span', 'chl-replies sui-text-label sui-text-primary', replies + (replies === 1 ? ' reply' : ' replies')));
       extra.push(th);
     }
-    var play = null;
     if (opts.onPlay) {
-      play = el('a', 'sui-screen-btn sui-mod-primary chl-play');
+      // The one verb, last in the body and across it, as the game's planet
+      // card ends with its buttons.
+      var play = el('a', 'sui-screen-btn sui-mod-primary chl-play');
       play.href = 'javascript:void(0)';
       play.appendChild(el('i', 'sui-icon sui-icon-md icon-raid'));
       play.appendChild(el('span', null, 'Play'));
       play.addEventListener('click', function (ev) { ev.stopPropagation(); opts.onPlay(ev, play); });
+      var cta = el('div', 'sui-screen-btn-flex-wrapper chl-cta');
+      cta.appendChild(play);
+      extra.push(cta);
     }
-    var who = view && view.author ? [str(view.author.name)] : [];
+    // Block time is a setting: a quiet mark beside the doors, as the player
+    // card's foot carries its marks.
+    var foot = null;
+    if (f.block_ms) {
+      foot = el('div', 'pc-marks sc-marks');
+      var bt = el('span', 'pc-mark');
+      bt.title = 'Block time';
+      bt.appendChild(el('i', 'sui-icon sui-icon-md icon-in-progress'));
+      bt.appendChild(document.createTextNode(' ' + (f.block_ms / 1000) + ' s'));
+      foot.appendChild(bt);
+    }
     var node = C().card({
-      kind: 'challenge', id: f.battle, hideId: true, title: f.name || 'Battle',
-      sub: who.concat([sizeText(f), (f.block_ms / 1000) + ' s blocks']).filter(Boolean).join(' · '),
+      kind: 'challenge', id: f.battle, hideId: true, title: f.name || 'Battle', headIcon: 'icon-raid',
+      sub: sizeText(f),
       badge: BADGE[s] || difficultyBadge(f), state: STRIPE[s],
-      readings: [], extra: extra, foot: play,
+      readings: [], extra: extra, foot: foot,
     }, {
       doors: [
         opts.onCopy ? { icon: 'icon-copy', title: 'Copy link', onClick: function (ev) { opts.onCopy(ev); } } : null,
@@ -324,5 +374,6 @@
     return node;
   }
 
-  root.StructsSimCard = { row: row, card: card, resultRow: resultRow, inviteRow: inviteRow, inviteState: inviteState, board: board, state: state, ladderList: ladderList, subText: subText };
+  root.StructsSimCard = { row: row, card: card, resultRow: resultRow, inviteRow: inviteRow, inviteState: inviteState, board: board, state: state,
+    ladderList: ladderList, subText: subText, verdictGlyph: verdictGlyph, verdictTone: verdictTone };
 })(typeof window !== 'undefined' ? window : globalThis);

@@ -5,7 +5,9 @@
 .chl-card, .chl-row { text-align: left; }
 /* Opened, a challenge keeps the board legible: wider than the 340px other
    cards keep, as wide as the rows. */
-.chat-refs > .chat-ref.chat-mod-card.chat-kind-challenge:not(.chat-mod-row) { max-width: 480px; }
+.chat-refs > .chat-ref.chat-mod-card.chat-kind-challenge:not(.chat-mod-row) { max-width: none; }
+/* A wide call to action centres its label in the room the icon leaves. */
+.chl-cta .sui-screen-btn span { text-align: center; }
 
 /* The frame's emblem-and-readings row is empty on a challenge: the board is
    its picture. */
@@ -16,7 +18,7 @@
 .chl-board { display: flex; flex-direction: column; width: 100%; border: 1px solid var(--border); }
 .chl-band {
   display: grid;
-  grid-template-columns: 30px repeat(4, minmax(0, 1fr)) 14px repeat(4, minmax(0, 1fr)) 30px;
+  grid-template-columns: 30px repeat(4, minmax(0, 1fr)) var(--icon-sm) repeat(4, minmax(0, 1fr)) 30px;
   height: 34px;
   background-color: var(--surface-default);
   background-size: 64px 64px;
@@ -35,39 +37,35 @@
 .chl-art { position: absolute; left: 50%; top: 50%; width: 60px; height: 60px; transform: translate(-50%, -50%); image-rendering: pixelated; }
 .chl-computer .chl-art { transform: translate(-50%, -50%) scaleX(-1); }
 .chl-guard { position: absolute; left: 0; bottom: 0; }
-.chl-amb { display: flex; align-items: center; justify-content: center; color: var(--text-body); }
+.chl-amb { display: flex; align-items: center; justify-content: center; }
 
-/* ── tallies ── */
-.chl-stats { display: flex; gap: var(--spacing-lg); padding-top: var(--spacing-md); border-top: 1px solid var(--border-subtle); }
-.chl-stat { flex: 1 1 0; min-width: 0; }
-.chl-stat-v { white-space: nowrap; }
+/* ── tallies ── the player card's record rack (playercard.js parts.record) */
+.chl-stats { padding-top: var(--spacing-md); border-top: 1px solid var(--border-subtle); }
 
 /* ── the ladder ── */
 .chl-ladder { display: flex; flex-direction: column; }
 .chl-run {
   display: grid;
-  grid-template-columns: 12px minmax(0, 1fr) auto auto auto;
+  grid-template-columns: var(--icon-sm) minmax(0, 1fr) auto;
   align-items: center;
   gap: var(--spacing-md);
   min-height: 28px;
-  padding: 0 var(--spacing-xs);
+  /* The left clears the 2px mark a .chl-me row carries. */
+  padding: 0 var(--spacing-xs) 0 var(--spacing-md);
   border-top: 1px solid var(--border-subtle);
 }
 .chl-run:first-child { border-top: 0 none; }
 .chl-run .pc-person { min-width: 0; overflow: hidden; }
 .chl-run .pc-person .pc-id { display: none; }
-.chl-run.chl-me { background: var(--surface-player-highlight); }
+.chl-run .pc-reads { gap: var(--spacing-xl); }
+/* You, marked the way the catalogue marks a selection — not the hover fill alone. */
+.chl-run.chl-me { background: var(--surface-player-highlight); box-shadow: inset 2px 0 0 var(--accent-primary); }
 .chl-run.chl-old { opacity: .55; }
-.chl-time { text-align: right; white-space: nowrap; }
-.chl-lost { text-align: right; white-space: nowrap; }
 .chl-more { padding: var(--spacing-xs); }
 
-/* ── the thread, in one line ── */
-.chl-thread { display: flex; align-items: baseline; gap: var(--spacing-md); min-width: 0; padding-top: var(--spacing-md); border-top: 1px solid var(--border-subtle); }
-.chl-replies { flex: none; color: var(--accent-primary); }
-.chl-said { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.chl-said-who { color: var(--accent-secondary); }
-.chl-play { flex: none; }
+/* ── the thread, in one line ── Comms' own thread pointer (chat-rows.css) */
+.chl-thread { margin: 0; }
+.chl-replies { flex: none; margin-left: auto; }
 
 /* A run that took first place, said once in the room — addressed to you when
    it was your place it took. */
@@ -77,3 +75,7 @@
 
 /* A live invite nobody can take any more. */
 .chl-row.chl-faded { opacity: .6; }
+
+/* P1-comms-cards: a live invite whose state needs no words keeps no empty
+   sub-line — the versus line under the name says who plays whom. */
+.chl-row .pc-ident > .pc-id:empty { display: none; }

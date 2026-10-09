@@ -307,21 +307,28 @@
       objs.forEach(function (o) { line.appendChild(o); });
       body.appendChild(line);
     }
-    var rec = (opts.record || []).filter(Boolean);
-    if (rec.length) {
-      var rack = el('div', 'pc-record');
-      rec.forEach(function (r) {
-        var t = el('div', 'pc-rec');
-        if (r.title) t.title = r.title;
-        t.appendChild(el('div', 'pc-rec-v', r.value == null ? '\u2014' : str(r.value)));
-        t.appendChild(el('div', 'pc-rec-l', str(r.label)));
-        rack.appendChild(t);
-      });
-      body.appendChild(rack);
-    }
+    var rack = record(opts.record);
+    if (rack) body.appendChild(rack);
     node.appendChild(body);
     wireClick(node, opts);
     return node;
+  }
+
+  /* What they have done, as tiles: a reading stood on its label. `list` is
+   * [{ value, label, title? }]; an absent value reads as a dash. Answers the
+   * `.pc-record` rack, or null when there is nothing to show. */
+  function record(list) {
+    var rec = (list || []).filter(Boolean);
+    if (!rec.length) return null;
+    var rack = el('div', 'pc-record');
+    rec.forEach(function (r) {
+      var t = el('div', 'pc-rec');
+      if (r.title) t.title = r.title;
+      t.appendChild(el('div', 'pc-rec-v', r.value == null ? '\u2014' : str(r.value)));
+      t.appendChild(el('div', 'pc-rec-l', str(r.label)));
+      rack.appendChild(t);
+    });
+    return rack;
   }
 
   /* ── one aligned line ──────────────────────────────────────────────── */
@@ -353,7 +360,7 @@
     // The building blocks, for the card's siblings (guildcard.js draws a guild
     // with the same readings, doors and frame). One vocabulary, one file.
     parts: { el: el, icon: icon, badge: badge, reading: reading, actions: actions,
-             personLine: personLine, wireClick: wireClick, BADGE_MODS: BADGE_MODS },
+             personLine: personLine, wireClick: wireClick, record: record, BADGE_MODS: BADGE_MODS },
     CHARGE_LEVEL_THRESHOLDS: CHARGE_LEVEL_THRESHOLDS,
     BATTERY_CHUNKS: BATTERY_CHUNKS,
     chargeLevel: chargeLevel,

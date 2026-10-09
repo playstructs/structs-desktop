@@ -330,8 +330,27 @@ check('…with the production cheatsheet copy merged in', byName.Battleship.prim
   const RV = w.RaidView;
   check('the Map Viewer boots from the host and seats every struct', Object.keys(RV._state.structsById).length === 6 && !/no free tile/.test(w.document.getElementById('rv-note').textContent));
   check('…without a planetary block, all four ambits drawn', !Object.keys(RV._anchors()).some((k) => k.startsWith('plan|')) && ['space', 'air', 'land', 'water'].every((a) => RV._anchors()['cmd|defender|' + a]));
+  // jsdom's cascade loses the page's id rules to sui.css's `a.sui-resource:link`,
+  // so a panel's visibility is read off the page's own display:none rules.
+  const hidden = (id) => {
+    const node = w.document.getElementById(id);
+    if (w.getComputedStyle(node).display === 'none') return true;
+    for (const sheet of w.document.styleSheets) {
+      let rules; try { rules = sheet.cssRules; } catch { continue; }
+      for (const r of rules) {
+        if (r.style && r.style.display === 'none' && r.selectorText && r.selectorText.split(',').some((sel) => sel.includes('#' + id) && node.matches(sel.trim()))) return true;
+      }
+    }
+    return false;
+  };
+  const shown = (id) => !hidden(id);
   check('…sim mode hides Comms and the planet panel', w.document.documentElement.hasAttribute('data-sim')
-    && w.getComputedStyle(w.document.getElementById('rv-chat')).display === 'none');
+    && !shown('rv-chat') && !shown('rv-shield-res') && !shown('rv-ore-res') && !shown('rv-energy-res'));
+  // The standing: each side's structs as the game's deployed-structs resource,
+  // yours beside the clock, the enemy's in the enemy status bar.
+  const standing = () => w.document.getElementById('rv-sim-you-n').textContent + ' ' + w.document.getElementById('rv-sim-them-n').textContent;
+  check('…each side\'s structs standing in the HUD status bars', standing() === '3/3 3/3' && shown('rv-hud-tr') && shown('rv-sim-you') && shown('rv-sim-them')
+    && w.document.querySelector('#rv-hud-tl #rv-sim-you i.sui-icon-deployed-structs') && w.document.querySelector('#rv-hud-tr #rv-sim-them i.sui-icon-enemy-deployed-structs'), standing());
   check('…you control your own fleet only', RV._state.controlled['1-1'] === true && !RV._state.controlled['1-2']);
   check('…charge comes from the chain clock', RV._chargeOfPlayer('1-1') === host.displayCharge('1-1') && RV._state.height === 7000);
 
@@ -361,6 +380,19 @@ check('…with the production cheatsheet copy merged in', byName.Battleship.prim
   const refusedCmd = await Promise.resolve().then(() => realInvoke('mcp_inventory', {})).then(() => null, (e) => String(e));
   w.__TAURI__ = prev;
   check('only the sound reads reach the app; everything else is refused locally', asked.join() === 'sound_config_get' && /not part of the simulator/.test(refusedCmd || ''), asked.join() + ' / ' + refusedCmd);
+  // A destroy drops the side's standing at once (the struct_status frame),
+  // and the count survives the sweep that takes the wreck off the map.
+  await until(() => !RV._playing() && !RV._queue().length, 8000);
+  const hostCount = () => { const st = host.standing(); return st['1-1'] + '/' + host.fielded['1-1'] + ' ' + st['1-2'] + '/' + host.fielded['1-2']; };
+  const cruiser = host.chain.get('5-2003');
+  const was = cruiser.status;
+  cruiser.status |= 32;
+  host.emit('raid-delta', { category: 'struct_status', subject: 'structs.planet.2-1.1-2', detail: { struct_id: '5-2003', status: cruiser.status, status_old: was } });
+  check('a destroyed struct drops its side\'s standing', standing() === hostCount() && /^\d\/3 [0-2]\/3$/.test(standing()), standing() + ' vs host ' + hostCount());
+  delete host.chain.structs['5-2003'];
+  host.emit('raid-snapshot', { generation: host.generation, snapshot: host.snapshot() });
+  await until(() => !RV._state.structsById['5-2003']);
+  check('…and the swept wreck still counts as fielded', !RV._state.structsById['5-2003'] && standing() === hostCount(), standing() + ' vs host ' + hostCount());
   host.destroy();
   dom.window.close();
 

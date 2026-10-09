@@ -145,6 +145,7 @@
     this.label = opts.label || 'sim';
     this.blockMs = opts.blockMs || BLOCK_MS;
     this.frame = opts.frame;             // () => the iframe's window
+    this.comms = opts.comms || null;     // (cmd, args) => the Comms rail's answers, or undefined
     this.onChange = opts.onChange || function () {};
     this.generation = 1;
     this.logRows = [];
@@ -230,8 +231,13 @@
         if (!T || !T.core) throw new Error('no sound runtime');
         return T.core.invoke(cmd, args);
       }
-      default:
+      default: {
+        // The Comms rail beside the map talks to whatever room the simulator
+        // gives it; the simulator answers for that room and nothing else.
+        var said = this.comms ? this.comms(cmd, args) : undefined;
+        if (said !== undefined) return said;
         throw new Error(cmd + ' is not part of the simulator');
+      }
     }
   };
 

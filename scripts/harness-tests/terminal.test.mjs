@@ -1475,7 +1475,11 @@ const tick = (ms) => new Promise((r) => setTimeout(r, ms));
       [...new Set(framed)].forEach((f) => {
         for (const m of read('frontend/' + f).matchAll(/invoke\(\s*'([a-zA-Z_0-9]+)'/g)) called.add(m[1]);
       });
-      const refused = [...called].filter((c) => !may(c));
+      // Asked only of the Battle Simulator that frames the Map Viewer in sim
+      // mode (raidview-comms.js isSim), never of a Terminal card: the simulator
+      // answers it itself (simulator.js commsInvoke). Named, like contract.test.
+      const SIM_HOST_ONLY = new Set(['sim_comms_room']);
+      const refused = [...called].filter((c) => !may(c) && !SIM_HOST_ONLY.has(c));
       check('…and every command those pages actually invoke is on the list',
         refused.length === 0, refused.join(', '));
       check('…which is a real restriction, not a list of everything', called.size < 20 && !may('terminal_layout_set'),

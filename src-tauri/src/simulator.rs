@@ -123,12 +123,12 @@ pub async fn sim_live_join_open(
         return Err("a live battle runs at 2, 4 or 6 s blocks".into());
     }
     crate::matrix::live_join(&guild_id, &room_id, &match_room, &host).await?;
-    let (host_name, host_pfp, _) = crate::matrix::person_of(&host);
+    let (host_name, host_pfp, host_player_id) = crate::matrix::person_of(&host);
     let me = crate::matrix::store::get(&guild_id).map(|s| s.user_id).unwrap_or_default();
     set_pending(serde_json::json!({
         "kind": "live", "role": role, "guild_id": guild_id, "room_id": room_id, "invite_event": event_id,
         "match_room": match_room, "battle": battle, "block_ms": block_ms,
-        "host": host, "host_name": host_name, "host_pfp": host_pfp, "me": me,
+        "host": host, "host_name": host_name, "host_pfp": host_pfp, "host_player_id": host_player_id, "me": me,
     }));
     take_in(&app, Some(&battle))
 }

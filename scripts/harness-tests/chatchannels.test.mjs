@@ -8,11 +8,14 @@ import assert from 'node:assert/strict';
 // Values built inside jsdom's realm never deepEqual ours: compare by JSON.
 
 const src = fs.readFileSync(new URL('../../frontend/chat-channels.js', import.meta.url), 'utf8');
+// A room's portrait and sub-line are StructsChatRow.roomMark / roomSub.
+const rowSrc = fs.readFileSync(new URL('../../frontend/chatrow.js', import.meta.url), 'utf8');
 const tick = (ms = 0) => new Promise((r) => setTimeout(r, ms));
 
 function boot(rooms, fixtures = {}, tweak = null) {
   const dom = new JSDOM('<!doctype html><html><body></body></html>', { runScripts: 'outside-only' });
   const w = dom.window;
+  w.eval(rowSrc);
   w.eval(src);
   const calls = [];
   const S = { rooms, guildId: '0-1', profile: { user_id: '@1-194:matrix.oh.energy' }, roomFilter: '' };
@@ -152,6 +155,23 @@ const R = (o) => Object.assign({ room_id: '!' + o.name + ':matrix.oh.energy', jo
     'matrix_room_pin_move:{"guildId":"0-1","roomId":"!a","up":false}',
   ]));
   assert.ok(!calls.some((c) => c[0] === 'openRoom'), 'arranging the list does not open a room');
+}
+
+// 7b. The room helpers other lists of rooms share (the simulator's Post to…),
+// with no window helpers handed in.
+{
+  const { w } = boot([]);
+  const RowK = w.StructsChatRow;
+  assert.equal(RowK.roomSub({ player_id: '1-61', tag: 'OH', section: 'direct' }), '[OH] PID #1-61', 'a DM is who it is with');
+  assert.equal(RowK.roomSub({ section: 'galaxy', members: 25 }), '25 Players', 'a channel is how many are in it');
+  assert.equal(RowK.roomSub({ section: 'galaxy', members: 1 }), '1 Player', '…singular for one');
+  assert.equal(RowK.roomSub({ section: 'direct' }), '', 'a DM with no player says nothing');
+  assert.equal(RowK.roomSub({ section: 'galaxy' }), '', 'and a count the server never gave is no line');
+  assert.ok(RowK.roomMark({ section: 'direct' }).classList.contains('pfp-frame'), 'a DM wears a portrait');
+  assert.equal(RowK.roomMark({ section: 'galaxy', home_rank: 0, default_pin: true }).getAttribute('src'), 'img/logo-snc.gif', 'SN Corp\'s channels wear its mark');
+  const glyph = RowK.roomMark({ section: 'local', icon: 'icon-raid' });
+  assert.ok(glyph.classList.contains('sui-result-row-portrait-icon') && glyph.querySelector('i.sui-icon.sui-icon-md.icon-raid'), 'any other room its glyph');
+  assert.ok(RowK.roomMark({ section: 'galaxy' }).querySelector('i.icon-beacon'), '…the beacon by default');
 }
 
 console.log('chat-channels: all checks passed');

@@ -931,10 +931,14 @@ async fn sim_thread_view(
         .map(|f| {
             let mut v = f["frame"].clone();
             v["ts"] = f["ts"].clone();
-            // Names from the chain directory, never from the frame.
+            // Names, faces and player ids from the chain directory, never
+            // from the frame: the invite row draws both players as faces.
             for key in ["guest", "winner"] {
                 if let Some(u) = v.get(key).and_then(|u| u.as_str()).map(String::from) {
-                    v[format!("{key}_name")] = json!(person_of(&u).0);
+                    let (name, pfp, pid) = person_of(&u);
+                    v[format!("{key}_name")] = json!(name);
+                    v[format!("{key}_pfp")] = json!(pfp);
+                    v[format!("{key}_id")] = json!(pid);
                 }
             }
             v
@@ -1269,10 +1273,16 @@ pub fn matrix_sim_rooms() -> Result<Value, String> {
     let rooms: Vec<Value> = client::rooms_of(&guild_id)
         .into_iter()
         .filter(|r| r.joined && !r.system && !r.superseded && !r.encrypted)
-        .map(|r| json!({
-            "room_id": r.room_id, "name": r.name, "section": r.section, "icon": r.icon,
-            "pfp_attrs": r.pfp_attrs, "player_id": r.player_id, "home_rank": r.home_rank,
-        }))
+        .map(|r| {
+            // Everything the channel list reads to draw a room's mark and
+            // sub-line, so the simulator's Post to… list draws it the same way.
+            let tag = r.player_id.as_deref().and_then(directory::get).map(|i| i.tag).filter(|t| !t.is_empty());
+            json!({
+                "room_id": r.room_id, "name": r.name, "section": r.section, "icon": r.icon,
+                "pfp_attrs": r.pfp_attrs, "player_id": r.player_id, "home_rank": r.home_rank,
+                "default_pin": r.default_pin, "members": r.members, "tag": tag,
+            })
+        })
         .collect();
     Ok(json!({ "guild_id": guild_id, "rooms": rooms }))
 }

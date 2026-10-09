@@ -90,8 +90,10 @@ const entry = (rank, sender, name, o) => ({ rank, sender, name, player_id: sende
   check('…one verb (Play) and the menu', [...row.querySelectorAll('.pc-act')].map((a) => a.title).join(',') === 'Play Spearpoint,More');
 
   const forYou = Card.row({ frame: Object.assign({}, frame, { to: [me], outcome: outcome('Victory', 'player', '02:55', 2) }), me, author: { name: 'Marklifer', self: false } });
-  check('addressed to you: For you, from whom, the time to beat', Card.state({ frame: Object.assign({}, frame, { to: [me] }), me, author: { self: false } }) === 'for-you'
-    && text(forYou.querySelector('.sui-badge')) === 'For you' && /from Marklifer · to beat 02:55/.test(text(forYou.querySelector('.pc-id'))) && forYou.classList.contains('sc-warn'));
+  check('addressed to you: For you and the time to beat — who sent it is the message header, not said again', Card.state({ frame: Object.assign({}, frame, { to: [me] }), me, author: { self: false } }) === 'for-you'
+    && text(forYou.querySelector('.sui-badge')) === 'For you' && /^9 v 9 · to beat 02:55$/.test(text(forYou.querySelector('.pc-id'))) && !/Marklifer/.test(text(forYou)) && forYou.classList.contains('sc-warn'));
+  check('…a challenge wears the battle glyph, toned by its state — not a fleet\'s Command Ship', forYou.querySelector('.gc-emblem i.icon-raid.sc-tone-warning') && !forYou.querySelector('.gc-emblem img')
+    && open.querySelector('.gc-emblem i.icon-raid.sc-tone-player'));
 
   const mine = { frame, me, ladder: [entry(1, me, 'Marklifer', outcome('Victory', 'player', '02:31', 1)), entry(2, '@1-9:h', 'T.Xue', outcome('Victory', 'player', '02:41', 1))] };
   check('holding first: Your best, "1st of 2"', Card.state(mine) === 'best' && /1st of 2/.test(text(Card.row(mine).querySelector('.pc-id')))
@@ -100,8 +102,19 @@ const entry = (rank, sender, name, o) => ({ rank, sender, name, player_id: sende
   check('knocked off: Beaten, theirs against yours, red stripe', Card.state(beaten) === 'beaten' && /T.Xue 02:41 · you 03:30/.test(text(Card.row(beaten).querySelector('.pc-id'))) && Card.row(beaten).classList.contains('sc-bad'));
 
   const shared = Card.resultRow({ frame: Object.assign({}, frame, { kind: 'result', outcome: outcome('Defeat', 'computer', '05:02', 9) }), author: { name: 'Korrin' } });
-  check('a shared result leads with the verdict, the battle as its badge', text(shared.querySelector('.pc-nm')) === 'Defeat' && text(shared.querySelector('.sui-badge')) === 'Spearpoint'
-    && /05:02 · lost 9 of 9 · 76 blocks · Korrin/.test(text(shared.querySelector('.pc-id'))) && shared.classList.contains('sc-bad'));
+  check('a shared result: the battle by name, the verdict as its badge, the figures as readings', text(shared.querySelector('.pc-nm')) === 'Spearpoint'
+    && text(shared.querySelector('.sui-badge')) === 'Defeat' && shared.querySelector('.sui-badge').classList.contains('sui-mod-destructive')
+    && text(shared.querySelector('.pc-id')) === '9 v 9 · 76 blocks' && !/Korrin/.test(text(shared)) && shared.classList.contains('sc-bad'),
+    text(shared.querySelector('.pc-id')));
+  const sharedReads = [...shared.querySelectorAll('.pc-res')];
+  check('…its time behind the defeat glyph in the enemy tone, its losses behind the destroyed sprite', sharedReads.length === 2
+    && text(sharedReads[0]) === '05:02' && sharedReads[0].querySelector('i.icon-alert') && sharedReads[0].classList.contains('sc-bad-text') && !shared.querySelector('.icon-close')
+    && text(sharedReads[1]) === '9/9' && sharedReads[1].querySelector('i.sui-icon-md.sui-icon-destroyed'));
+  check('…its emblem is the verdict glyph; the row carries no outcome class of its own', shared.querySelector('.gc-emblem i.icon-alert.sc-tone-enemy')
+    && !shared.classList.contains('chl-lost') && shared.classList.contains('chl-row'));
+  check('the verdict vocabulary: tick, subtract, alert — each in its tone', Card.verdictGlyph({ winner: 'player' }) === 'icon-success' && Card.verdictGlyph({ winner: 'draw' }) === 'icon-subtract'
+    && Card.verdictGlyph({ winner: 'computer' }) === 'icon-alert' && Card.verdictTone({ winner: 'player' }) === 'sc-ok' && Card.verdictTone({ winner: 'draw' }) === 'sc-tone-warning'
+    && Card.verdictTone({ winner: 'computer' }) === 'sc-bad-text');
 }
 
 {
@@ -110,12 +123,26 @@ const entry = (rank, sender, name, o) => ({ rank, sender, name, player_id: sende
   const view = { frame, me, author: { name: 'JPEG', self: false }, reply_count: 3, replies: [{ name: 'Netlag', body: 'the cruiser block on 49 is the whole fight' }],
     ladder: [entry(1, '@1-9:h', 'T.Xue', outcome('Victory', 'player', '02:41', 1)), entry(2, me, 'Marklifer', outcome('Victory', 'player', '02:55', 2)), entry(3, '@1-1031:h', 'Korrin', outcome('Defeat', 'computer', '05:02', 9))] };
   const c = Card.card(view, { onPlay: () => played++, onReplies: () => replies++, onCopy: () => {}, onMore: () => {}, onCollapse: () => {} });
-  check('the planet-card frame: name, who and how, no battle code', c.classList.contains('sui-planet-card') && text(c.querySelector('.pc-nm')) === 'Spearpoint'
-    && /JPEG · 9 v 9 · 2 s blocks/.test(text(c.querySelector('.pc-id'))) && !text(c).includes(battle));
-  const stats = [...c.querySelectorAll('.chl-stat')].map((n) => text(n.querySelector('.chl-stat-v')) + ' ' + text(n.querySelector('.chl-stat-l'))).join(' · ');
-  check('…the miniature, the tallies, the ladder', c.querySelector('.chl-board') && stats === '3 Played · 2 Won · 02:41 Best' && c.querySelectorAll('.chl-run').length === 3, stats);
+  check('the planet-card frame: the battle glyph and name, its size, no battle code', c.classList.contains('sui-planet-card') && text(c.querySelector('.pc-nm')) === 'Spearpoint'
+    && c.querySelector('.sui-planet-card-header-label > i.sui-icon.sui-icon-md.icon-raid')
+    && text(c.querySelector('.sui-planet-card-header .pc-id')) === '9 v 9' && !text(c).includes(battle), text(c.querySelector('.pc-id')));
+  check('…block time a quiet mark beside the doors', /^2 s$/.test(text(c.querySelector('.pc-foot .pc-mark'))) && c.querySelector('.pc-foot .pc-mark i.icon-in-progress'));
+  const stats = [...c.querySelectorAll('.chl-stats.pc-record .pc-rec')].map((n) => text(n.querySelector('.pc-rec-v')) + ' ' + text(n.querySelector('.pc-rec-l'))).join(' · ');
+  check('…the miniature, the tallies (the player card\'s record), the ladder', c.querySelector('.chl-board') && stats === '3 Played · 2 Won · 02:41 Best' && c.querySelectorAll('.chl-run').length === 3, stats);
+  check('…Best in its run\'s verdict tone', c.querySelectorAll('.pc-rec-v')[2].classList.contains('sc-ok'));
+  check('…the ambits are the game\'s sprites, not letters', [...c.querySelectorAll('.chl-amb')].map((a) => a.querySelector('i.sui-icon.sui-icon-sm') && a.querySelector('i').className.split(' ').pop()).join() === 'sui-icon-space,sui-icon-air,sui-icon-land,sui-icon-water');
   check('…you are marked on the ladder', c.querySelector('.chl-run.chl-me') && /Marklifer/.test(text(c.querySelector('.chl-run.chl-me'))));
-  check('…the thread in one line', text(c.querySelector('.chl-replies')) === '3 replies' && /^Netlag the cruiser block/.test(text(c.querySelector('.chl-said'))));
+  const runs = [...c.querySelectorAll('.chl-run')];
+  check('…each run: rank as a label, then its time behind the verdict glyph and what it lost, as readings', runs.every((r) => r.querySelector('.chl-rank.sui-text-label') && r.querySelectorAll('.pc-reads .pc-res').length === 2)
+    && runs[0].querySelector('.pc-res i.icon-success') && runs[2].querySelector('.pc-res.sc-bad-text i.icon-alert') && text(runs[2].querySelectorAll('.pc-res')[1]) === '9'
+    && !/Victory|Defeat/.test(text(c.querySelector('.chl-ladder'))));
+  const compact = Card.ladderList(view, { compact: true });
+  check('…and compact, the losses are left out', [...compact.querySelectorAll('.chl-run')].every((r) => r.querySelectorAll('.pc-res').length === 1));
+  check('…the thread as Comms\' own thread pointer', c.querySelector('a.chat-reply-quote.chat-mod-thread.chl-thread') && text(c.querySelector('.chl-thread .chat-reply-who')) === 'Netlag'
+    && /^the cruiser block/.test(text(c.querySelector('.chl-said'))) && text(c.querySelector('.chl-replies')) === '3 replies' && c.querySelector('.chl-replies.sui-text-label'));
+  const cta = c.querySelector('.sui-planet-card-body > .sui-screen-btn-flex-wrapper');
+  check('…Play last in the body, across it; the foot holds only the quiet doors', cta && cta.querySelector('.chl-play')
+    && (!cta.nextElementSibling || cta.nextElementSibling.classList.contains('pc-foot')) && !c.querySelector('.pc-foot .chl-play'));
   c.querySelector('.chl-play').dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
   c.querySelector('.chl-replies').dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
   check('…Play and the replies are wired', played === 1 && replies === 1);
@@ -157,6 +184,36 @@ const entry = (rank, sender, name, o) => ({ rank, sender, name, player_id: sende
   node.querySelector('.pc-act').dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
   const play = asked.filter((a) => a[0] === 'sim_challenge_open')[0];
   check('Play hands the simulator the room, the thread and the battle — nothing else', play && play[1].roomId === '!r:h' && play[1].eventId === '$root' && play[1].battle === battle && Object.keys(play[1]).sort().join() === 'battle,eventId,guildId,roomId');
+  const lost = Object.assign({}, best, { event_id: '$lost', sim: Object.assign({}, best.sim, { outcome: outcome('Defeat', 'computer', '05:02', 9) }) });
+  const lostLine = sim.simLine(lost);
+  check('a best that is a defeat opens on the defeat glyph, never a tick', lostLine.querySelector('i.icon-alert.sc-bad-text') && !lostLine.querySelector('.icon-success'));
+}
+
+{
+  console.log('\n— rows open to their card');
+  const S = { view: 'room', roomId: '!r:h', guildId: '0-1', profile: { user_id: me }, messages: [] };
+  const host = w.document.createElement('div');
+  let draw = () => {};
+  const sim = w.ChatSim({
+    el: (tag, cls, t) => { const e = w.document.createElement(tag); if (cls) e.className = cls; if (t != null) e.textContent = t; return e; },
+    icon: (name, size) => { const i = w.document.createElement('i'); i.className = 'sui-icon ' + (size || 'sui-icon-md') + ' ' + name; return i; },
+    invoke: () => Promise.resolve(null), render: () => draw(), serverIdOf: (m) => m.event_id, S, Chat: {},
+  });
+  const pasted = { event_id: '$paste', sender: '@1-9:h', sender_name: 'Korrin', body: frame.link, ts: 9,
+    sim: Object.assign({}, frame, { kind: 'result', pasted: true, outcome: outcome('Defeat', 'computer', '05:02', 9) }) };
+  S.messages = [pasted];
+  draw = () => { host.textContent = ''; host.appendChild(sim.simNode(pasted)); };
+  draw();
+  check('a pasted result is a row', host.querySelector('.chat-mod-row [data-kind="challenge-result"]') && !host.querySelector('.chl-card'));
+  host.querySelector('.pc-act[title="More"]').dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
+  const items = [...host.querySelectorAll('.chat-ref-menu-item')].map((a) => text(a));
+  check('…its menu opens on "Open the card", and the More door lights while it is open', items[0] === 'Open the card' && host.querySelector('.pc-act[title="More"].sc-on'), items.join(','));
+  host.querySelector('.chat-ref-menu').dispatchEvent(new w.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+  check('…Escape closes it and the door goes quiet', !host.querySelector('.chat-ref-menu') && !host.querySelector('.pc-act.sc-on'));
+  host.querySelector('.pc-row').dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
+  check('clicking the row opens the battle\'s card, not a challenge row', host.querySelector('.chl-card') && !host.querySelector('.chat-mod-row'));
+  host.querySelector('.pc-act[title="Collapse"]').dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
+  check('…and its collapse door gives the row back', host.querySelector('.chat-mod-row [data-kind="challenge-result"]') && !host.querySelector('.chl-card'));
 }
 
 /* ── 4. The simulator ──────────────────────────────────────────────────── */
@@ -204,25 +261,48 @@ async function simulator(context, answers = {}) {
     charge: sw.Simulator.getSettings().charge, units: sw.Simulator.getLayout() }) === battle);
   check('the Challenge panel takes the Round card\'s place', !$('challenge').classList.contains('hidden') && $('round').classList.contains('hidden'));
   check('…with the battle, who posted it, where, its settings', /Spearpoint/.test(text($('challenge'))) && /JPEG/.test(text($('challenge'))) && /SN\.Corporation/.test(text($('challenge')))
-    && /Difficult/.test(text($('challenge'))) && /Charge 9 · 9/.test(text($('challenge'))));
-  check('…the ladder, you marked as You', $('challenge').querySelectorAll('.sim-run').length === 2 && /You/.test(text($('challenge').querySelector('.sim-run-me'))));
-  check('…and the thread, in the rows Comms draws, with the game\'s own composer', /guard the command ship/.test(text($('challenge').querySelector('.sim-thread')))
-    && $('challenge').querySelectorAll('.sim-thread .chat-msg').length === 1
-    && $('challenge').querySelector('.sim-reply .chat-composer-panel textarea') && $('challenge').querySelector('.sim-reply .sui-panel-btn'));
+    && /Difficult/.test(text($('challenge'))) && /charge 9 · 9/.test(text($('challenge'))));
+  {
+    // P8: the panel is the game's data card; its state is a badge and its settings one hint line.
+    const ch = $('challenge');
+    const head = ch.querySelector('.sim-card-head');
+    check('…a data card: its tag names it, a frameless close leaves it', ch.classList.contains('sui-data-card') && !ch.classList.contains('sim-card')
+      && head && /^Challenge$/.test(text(head.querySelector('.sui-data-card-header'))) && head.querySelector('a.sui-screen-nav-close[title="Leave"] i.sui-icon.sui-icon-sm.icon-close')
+      && ch.querySelector('.sui-data-card-body.sui-mod-spacing-xl'));
+    const set = ch.querySelector('.sim-settings');
+    check('…difficulty is the game\'s badge, the rest one hint line — no invented chips', set && /^Difficult$/.test(text(set.querySelector('.sui-badge.sui-mod-default')))
+      && /^\d+ v \d+ · 2 s blocks · charge 9 · 9$/.test(text(set.querySelector('.sui-text-hint'))) && !ch.querySelector('.sim-chip, .sim-pfp'), set && text(set));
+    check('…who posted it is the shared person line', /JPEG/.test(text(ch.querySelector('.sim-by .pc-person'))) && /SN\.Corporation/.test(text(ch.querySelector('.sim-by .sim-by-where'))));
+  }
+  check('…the ladder is the Comms card\'s own, you marked', $('challenge').querySelectorAll('.chl-ladder .chl-run').length === 2
+    && /Marklifer/.test(text($('challenge').querySelector('.chl-run.chl-me'))) && $('challenge').querySelectorAll('.chl-run .pc-person').length === 2
+    && $('challenge').querySelectorAll('.chl-run .sc-ok .icon-success, .chl-run .sc-ok.icon-success').length === 2 && !$('challenge').querySelector('.chl-run .sui-icon-destroyed'),
+    $('challenge').querySelector('.chl-ladder') && $('challenge').querySelector('.chl-ladder').outerHTML.slice(0, 600));
+  check('…and the thread, read-only, in the rows Comms draws — talking is the Map Viewer\'s rail and Comms', /guard the command ship/.test(text($('challenge').querySelector('.sim-thread')))
+    && !$('challenge').querySelector('textarea, .sim-reply'));
   check('the fleets are locked: tagged, Mirror and Swap gone, empty slots dead', !$('locked-chip').classList.contains('hidden') && /Spearpoint fleets/.test(text($('locked-chip')))
     && $('mirror').classList.contains('hidden') && $('swap').classList.contains('hidden')
     && [...sw.document.querySelectorAll('#arena .slot')].filter((b) => !b.dataset.unit).every((b) => b.disabled));
   const bs = sw.document.querySelector('#arena .slot[data-unit="player-space-0"]');
   bs.click();
-  check('…a struct can be looked at but not changed or removed', /Battleship/.test(text($('inspector'))) && !/Change|Remove/.test(text($('inspector'))) && $('inspector').querySelector('select').disabled);
+  check('…a struct can be looked at but not changed or removed', /Battleship/i.test(text($('inspector'))) && !/Change|Remove/.test(text($('inspector'))) && $('inspector').querySelector('select').disabled
+    && !$('inspector').querySelector('.sui-panel-btn, .sui-action-bar-btn-group'));
+  check('…and its empty slots draw no add glyph', !sw.document.querySelector('#arena .icon-add'));
 
-  const input = $('challenge').querySelector('.sim-reply textarea');
-  input.value = 'running it back';
-  input.dispatchEvent(new sw.Event('input'));
-  $('challenge').querySelector('.sim-reply .sui-panel-btn').click();
+  // The Map Viewer's rail asks the simulator for its room and talks through it.
+  const C = sw.Simulator.comms;
+  const room = C('sim_comms_room', {});
+  check('the rail beside the battle is given the challenge\'s thread', room && room.room_id === 'sim-thread:$root' && /Spearpoint · thread/.test(room.topic) && room.guild_id === '0-1');
+  const tl = await C('matrix_timeline', { guildId: '0-1', roomId: room.room_id, limit: 40 });
+  check('…reads its replies as chat rows', tl.messages.length === 1 && tl.messages[0].sender_name === 'Netlag' && tl.messages[0].kind === 'text');
+  let refusedRoom = null;
+  try { C('matrix_timeline', { guildId: '0-1', roomId: '!other:h' }); } catch (e) { refusedRoom = String(e.message || e); }
+  check('…and no other room: the rail cannot be pointed elsewhere', /not this battle/.test(refusedRoom || ''));
+  check('…nor any other command', C('matrix_leave', { roomId: room.room_id }) === undefined);
+  await C('matrix_send', { guildId: '0-1', roomId: room.room_id, body: 'running it back', msgtype: null });
   await tick(20);
   const reply = s.calls.filter((c) => c[0] === 'matrix_sim_reply')[0];
-  check('a reply goes into this battle\'s thread and nowhere else', reply && reply[1].roomId === '!r:h' && reply[1].eventId === '$root' && reply[1].body === 'running it back');
+  check('a message from the rail goes into this battle\'s thread and nowhere else', reply && reply[1].roomId === '!r:h' && reply[1].eventId === '$root' && reply[1].body === 'running it back');
 
   // A finished run, debriefed: as showDebrief hands it over.
   const mine = result('player', 1, 76, 151);
@@ -272,13 +352,266 @@ async function simulator(context, answers = {}) {
   });
   await tick(50);
   const { $ } = s;
-  check('who it is for, above the round', !$('addressed').classList.contains('hidden') && /For JPEG/.test(text($('addressed'))));
+  check('who it is for, in the Round card\'s head beside its tag: For, then the name alone', !$('addressed').classList.contains('hidden')
+    && text($('for-l')) === 'For' && text($('addressed-name')) === 'JPEG' && $('addressed').parentNode.matches('#round > .sim-card-head'));
+  check('…and Send / Play live sit in the foot beside Start (the page\'s actions)', $('sim-go').contains($('send-to')) && $('sim-go').contains($('live-to'))
+    && $('send-to').parentNode === $('start').parentNode);
   check('…and the Send button names them', !$('send-to').classList.contains('hidden') && /Send to JPEG/.test(text($('send-to'))));
+  check('…Send the setup\'s one primary, Start battle stepping back to secondary', $('send-to').classList.contains('sui-mod-primary')
+    && $('start').classList.contains('sui-mod-secondary') && !$('start').classList.contains('sui-mod-primary')
+    && s.sw.document.querySelectorAll('#setup-screen .sui-screen-btn.sui-mod-primary:not(.hidden), #sim-go .sui-screen-btn.sui-mod-primary').length === 1);
   $('send-to').click();
   await tick(20);
   check('Send posts the battle to them by player id, not by room', posts.length === 1 && posts[0].toPlayer === '1-61' && posts[0].battle && !posts[0].roomId && !posts[0].result);
+  // P7: a run addressed to them ends on ONE primary — the strip's Send.
+  s.sw.document.body.dataset.screen = 'debrief';
+  s.sw.Simulator.social.debrief(JSON.parse(JSON.stringify(config)), result('player', 1, 76, 151));
+  await tick(20);
+  const go = $('db-post').querySelector('.sui-message-system-alert-close-container button.sui-mod-primary');
+  check('the debrief offers the send as the game\'s system alert, Send its one primary', $('db-post').matches('.sui-message-system-alert.sui-mod-secondary')
+    && go && /^Send to JPEG$/.test(text(go)) && go.querySelector('span') && $('db-rematch').classList.contains('sui-mod-secondary') && !$('db-rematch').classList.contains('sui-mod-primary'),
+    $('db-post').outerHTML.slice(0, 300));
+  s.sw.document.body.dataset.screen = 'setup';
   $('addressed-clear').click();
-  check('× makes it a sandbox again', $('addressed').classList.contains('hidden') && $('send-to').classList.contains('hidden'));
+  check('× makes it a sandbox again', $('addressed').classList.contains('hidden') && $('send-to').classList.contains('hidden')
+    && $('start').classList.contains('sui-mod-primary') && !$('start').classList.contains('sui-mod-secondary'));
+  s.close();
+}
+
+{
+  console.log('\n— the Round and Share cards (P5)');
+  const s = await simulator(null);
+  await tick(50);
+  const { sw, $ } = s;
+  const st = () => sw.Simulator.getSettings();
+  const round = $('round');
+  check('Round is the game\'s form card, its fields two up; Share is the foot\'s group', round.classList.contains('sui-data-card')
+    && text(round.querySelector(':scope > .sim-card-head > .sui-data-card-header')) === 'Round'
+    && round.querySelector(':scope > .sui-data-card-body.sim-round-b')
+    && $('sim-go').contains($('share-card')) && $('share-card').getAttribute('aria-label') === 'Share');
+  const enc = () => [...$('encounters').querySelectorAll('input.sui-radio')];
+  check('Encounter is four radio rows, Difficult checked, each led by the game\'s radio', enc().length === 4
+    && $('encounters').querySelector('input.sui-radio:checked').value === 'difficult'
+    && $('encounters').querySelectorAll('label.sui-result-row .sui-radio-container > .sui-radio-display').length === 4
+    && $('encounters').querySelector('[role=radiogroup]').getAttribute('aria-labelledby') === 'enc-l');
+  const counts = [...$('encounters').querySelectorAll('.sui-resource')];
+  check('…its enemy count a struct resource (no size class on the sprite)', counts.length === 4 && counts.map(text).join(' ') === '4 8 12 6-16'
+    && counts.every((r) => r.title === 'Enemy structs' && r.querySelector('i.sui-icon.sui-icon-enemy-deployed-structs') && !/sui-icon-(sm|md)/.test(r.querySelector('i').className)));
+  check('no invented option buttons or header glyph left on the card', !round.querySelector('.sim-opt, .sim-field-h, .icon-enemy-tile, #ai-down, #ai-up'));
+  enc()[3].click();
+  const seed1 = $('seed').value;
+  enc()[3].click();
+  check('Random rolls again on every click, checked or not', st().preset === 'random' && $('seed').value !== seed1 && enc()[3].checked);
+  enc()[2].click();
+  check('…Hard sets the Opponent with it', st().difficulty === 'hard' && $('ai-level').value === 'hard');
+  const sel = $('ai-level');
+  check('Opponent is a bare select inside the game\'s field', sel.tagName === 'SELECT' && !sel.className && sel.closest('label.sui-input-text')
+    && [...sel.options].map((o) => o.value).join() === 'easy,difficult,hard');
+  sel.value = 'easy'; sel.dispatchEvent(new sw.Event('change'));
+  check('…and choosing one sets the difficulty', st().difficulty === 'easy');
+  check('Seed is the game\'s text field, the reseed a frameless refresh beside it', $('seed').closest('label.sui-input-text') && !$('seed').className
+    && $('reseed').classList.contains('set-username-pfp-refresh-btn') && $('reseed').querySelector('i.sui-icon.sui-icon-md.icon-refresh-12'));
+  const bt = () => [...$('block-time').querySelectorAll('input.sui-radio')];
+  check('Block time is two radio rows with their note trailing', bt().length === 2 && text($('block-time')).includes('training') && text($('block-time')).includes('chain'));
+  bt()[1].click();
+  check('…picking 6 s sets the block time', st().blockMs === 6000 && bt()[1].checked);
+  check('…and the Paused card\'s copy is its own radio group', $('pause-block-time').querySelector('input.sui-radio')
+    && $('pause-block-time').querySelector('input.sui-radio').name !== bt()[0].name);
+  const field = (id) => $(id).closest('label.sui-input-text');
+  check('Opening charge is two SUI steppers, captioned by side', field('charge-player') && field('charge-cpu')
+    && field('charge-player').querySelector(':scope > span.sim-you') && field('charge-cpu').querySelector(':scope > span.sim-cpu')
+    && $('charge-player').closest('div.sui-input-stepper') && $('charge-player').value === '9');
+  const more = field('charge-player').querySelector('button[aria-label="More opening charge"]');
+  const less = field('charge-player').querySelector('button[aria-label="Less opening charge"]');
+  check('…its buttons are the game\'s secondary − / + glyphs, named for the reader', more && less && more.classList.contains('sui-mod-secondary')
+    && more.querySelector('i.sui-icon.sui-icon-md.icon-add') && less.querySelector('i.sui-icon.sui-icon-md.icon-subtract'));
+  more.click();
+  check('…More raises your charge and keeps the stepper (and its focus) in place', st().charge.player === 10 && $('charge-player').value === '10'
+    && field('charge-player').querySelector('button[aria-label="More opening charge"]') === more);
+  $('charge-cpu').value = '99'; $('charge-cpu').dispatchEvent(new sw.Event('change'));
+  check('…a typed charge is clamped to the maximum and disables More', st().charge.computer === 30 && $('charge-cpu').value === '30'
+    && field('charge-cpu').querySelector('button[aria-label="More opening charge"]').disabled);
+  $('mirror').click();
+  check('…Mirror copies your charge to the computer\'s stepper', st().charge.computer === 10 && $('charge-cpu').value === '10');
+  const share = $('share-card');
+  check('Share holds Post to…, Copy link and Paste as secondary buttons with their icons and titles', ['post-to', 'export', 'import'].every((id) => share.contains($(id))
+    && $(id).classList.contains('sui-mod-secondary') && $(id).querySelector('i.sui-icon.sui-icon-md') && $(id).querySelector('span') && $(id).title)
+    && $('export').querySelector('.icon-copy') && $('import').querySelector('.icon-incoming'));
+  check('the fleets\' tools sit in the foot too, iconed so they can fold — Mirror, with no game glyph, a word that never folds', ['swap', 'unlock', 'live-room'].every((id) => $('sim-go').contains($(id))
+    && $(id).querySelector('i.sui-icon.sui-icon-md') && $(id).title) && $('sim-go').contains($('mirror')) && !$('mirror').querySelector('i') && text($('mirror')) === 'Mirror'
+    && $('fleet-head').querySelectorAll('button').length === 0);
+  check('every icon on the two cards is a sized SUI icon (sprites excepted)', [...round.querySelectorAll('i'), ...share.querySelectorAll('i')]
+    .every((i) => i.classList.contains('sui-icon') && (/sui-icon-(sm|md)\b/.test(i.className) || /sui-icon-enemy-deployed-structs/.test(i.className))));
+  s.close();
+}
+
+{
+  console.log('\n— the fleet board and the inspector (P6)');
+  const s = await simulator(null);
+  await tick(50);
+  const { sw, $ } = s;
+  const doc = sw.document, insp = $('inspector');
+  const info = () => insp.querySelector('.sim-insp-h .sui-screen-info');
+  const lay = (id) => sw.Simulator.getLayout().find((u) => u.id === id);
+  const slot = (id) => doc.querySelector('#arena .slot[data-unit="' + id + '"]');
+  const btn = (title) => insp.querySelector('a.sui-panel-btn[title="' + title + '"]');
+  const esc = () => doc.dispatchEvent(new sw.KeyboardEvent('keydown', { key: 'Escape' }));
+  check('fleet counts are struct resources holding the number alone', /^\d+$/.test(text($('count-you'))) && /^\d+$/.test(text($('count-cpu')))
+    && $('count-you').parentNode.matches('.sui-resource') && $('count-you').parentNode.querySelector('i.sui-icon.sui-icon-deployed-structs')
+    && $('count-cpu').parentNode.querySelector('i.sui-icon.sui-icon-enemy-deployed-structs'));
+  check('no defend banner, no hand-made inspector parts', !$('defend-banner') && !insp.classList.contains('sim-card')
+    && !doc.querySelector('.sim-name, .sim-weapons, .sim-pick, .sim-opt[aria-label="land"], .sim-check'));
+  slot('player-cmd').click();
+  check('the inspector is the Action Bar: a side-themed header screen with the slot', info() && info().closest('.sim-insp-h.sui-theme-player > .sui-screen.sui-screen-full-width')
+    && text(info()) === 'Land · Command' && !info().classList.contains('sui-mod-inverted'));
+  check('…the struct\'s health in the game\'s bar', insp.querySelectorAll('.struct-health-bar > .struct-health-bar-segment.mod-filled').length === 6);
+  const sheet = insp.querySelector('.sui-cheatsheet.sim-sheet.sui-theme-player');
+  check('…and its cheatsheet, titled model and class', sheet && text(sheet.querySelector('.sui-cheatsheet-title-text')) === 'ST-21 COMMAND SHIP');
+  check('…its LOCAL weapon reads as the band it holds, in ambit sprites', sheet && [...sheet.querySelectorAll('.sui-cheatsheet-property')][0].querySelector('i.sui-icon.sui-icon-land')
+    && ![...sheet.querySelectorAll('.sui-cheatsheet-property')][0].querySelector('.sui-icon-space'));
+  check('…no build cost, and each weapon\'s charge as a battery', sheet && !sheet.querySelector('.sui-cheatsheet-costs > *')
+    && sheet.querySelector('.sim-sheet-charge > .sui-battery') && /charge$/.test(sheet.querySelector('.sim-sheet-charge').title));
+  const guard = insp.querySelector('select');
+  check('Defends is a bare select in the game\'s field', guard && !guard.className && guard.getAttribute('aria-label') === 'Defends'
+    && guard.closest('label.sui-input-text') && text(guard.closest('label').querySelector(':scope > span')) === 'Defends');
+  check('the abilities are the game\'s panel buttons: Move and Defend for the command ship', btn('Move') && btn('Defend') && !btn('Change') && !btn('Remove')
+    && btn('Move').closest('.sui-action-bar-bottom-row.sui-theme-player > .sui-action-bar-btn-group') && btn('Move').querySelector('i.sui-icon.sui-icon-md.icon-move'));
+  btn('Move').click();
+  check('Move arms a pick: the header inverts to Select Tile and the empty command posts become targets', text(info()) === 'Select Tile' && info().classList.contains('sui-mod-inverted')
+    && doc.querySelectorAll('#arena .slot.sim-move-target').length === 3 && btn('Move').classList.contains('sui-mod-active-defense')
+    && doc.querySelector('.sim-round-col, #round').inert);
+  btn('Move').click();
+  check('…a second press cancels it', text(info()) === 'Land · Command' && !doc.querySelector('#arena .sim-move-target') && !doc.querySelector('.sim-round-col, #round').inert);
+  btn('Move').click();
+  doc.querySelector('#arena .band.water .slot.sim-move-target').click();
+  check('…and a target moves the command ship there', lay('player-cmd').ambit === 'water' && text(info()) === 'Water · Command' && !doc.querySelector('#arena .sim-move-target'));
+  slot('player-space-1').click();
+  btn('Defend').click();
+  const mine = sw.Simulator.getLayout().filter((u) => u.side === 'player' && u.id !== 'player-space-1').length;
+  check('Defend arms a pick: Select Struct, your other structs the targets, the rest dimmed', text(info()) === 'Select Struct' && info().classList.contains('sui-mod-inverted')
+    && doc.querySelectorAll('#arena .slot.eligible').length === mine && slot('computer-cmd').classList.contains('dim') && btn('Defend').classList.contains('sui-mod-active-defense'));
+  esc();
+  check('…Escape cancels it', !doc.querySelector('#arena .slot.eligible') && text(info()) === 'Space · Slot 2');
+  btn('Defend').click();
+  slot('computer-cmd').click();
+  check('…so does pressing anywhere it cannot land', !doc.querySelector('#arena .slot.eligible') && lay('player-space-1').protects === null);
+  slot('player-space-1').click();
+  btn('Defend').click();
+  slot('player-cmd').click();
+  check('…a target sets the ward; the button stays pressed and now clears it', lay('player-space-1').protects === 'player-cmd' && btn('Clear Defense')
+    && btn('Clear Defense').classList.contains('sui-mod-active-defense') && insp.querySelector('select').value === 'player-cmd');
+  check('…and the board draws the defence web from the selection', doc.querySelector('#arena svg.sim-defweb line') && doc.querySelector('#arena svg.sim-defweb circle'));
+  btn('Clear Defense').click();
+  check('…pressing it clears the guard', lay('player-space-1').protects === null && btn('Defend') && !btn('Defend').classList.contains('sui-mod-active-defense'));
+  btn('Change').click();
+  const tiles = () => [...insp.querySelectorAll('.offcanvas-struct-list-layout > a.offcanvas-struct-container')];
+  check('Change opens the game\'s Deploy list: a still per type, the current one marked', text(info()) === 'Select Struct' && tiles().length === 3
+    && tiles().every((a) => a.querySelector(':scope > .struct-still > img') && a.title && /^Place /.test(a.getAttribute('aria-label')) && !text(a))
+    && tiles().filter((a) => a.classList.contains('sim-current')).length === 1 && btn('Change').classList.contains('sui-mod-pressed'));
+  check('…with the sheet of the type under the pointer', insp.querySelector('.sim-types-sheet .sui-cheatsheet'));
+  esc();
+  check('…Escape backs out of it', !insp.querySelector('.offcanvas-struct-list-layout') && text(info()) === 'Space · Slot 2');
+  btn('Change').click();
+  const other = tiles().find((a) => !a.classList.contains('sim-current'));
+  other.click();
+  check('…a press places that type', sw.SimulatorTypes.types.find((t) => t.id === lay('player-space-1').type).type === other.title && !insp.querySelector('.offcanvas-struct-list-layout'));
+  btn('Remove').click();
+  check('Remove empties the slot and the empty slot asks for a struct', !lay('player-space-1') && text(info()) === 'Select Struct' && tiles().length === 3
+    && doc.querySelector('#arena .band.space .slot.friendly:not([data-unit]) .icon-add.empty-label'));
+  sw.Simulator.getLayout().forEach((u) => { u.protects = null; });
+  slot('player-cmd').click();
+  check('readiness notes are the game\'s inline alerts', $('checks').children.length && [...$('checks').children].every((c) => c.matches('.sui-message-inline-alert.sui-mod-warning, .sui-message-inline-alert.sui-mod-destructive'))
+    && /no defender/.test(text($('checks').querySelector('.sui-mod-warning .sui-message-inline-alert-text'))));
+  s.close();
+}
+
+{
+  console.log('\n— the overlays and the debrief (P7)');
+  const s = await simulator(null);
+  const { sw, $ } = s;
+  const doc = sw.document;
+  const host = () => sw.Simulator.getHost();
+  const esc = () => doc.dispatchEvent(new sw.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+  const open = (id) => !$(id).classList.contains('hidden');
+  const ctas = (ov) => [...ov.querySelectorAll('.sui-message-system-modal-cta .sui-message-system-modal-cta-btn-wrapper > a.sui-screen-btn')];
+  const p = $('paused');
+  check('Paused is the game\'s system modal on the board layer, a labelled dialog', p.matches('.sui-message-system-model-overlay.sp-scrim.sim-scrim.hidden')
+    && p.parentNode === $('sim-layer') && p.getAttribute('role') === 'dialog' && p.getAttribute('aria-modal') === 'true'
+    && text($(p.getAttribute('aria-labelledby'))).startsWith('Paused') && p.querySelector('.sui-message-system-modal-frame-left-middle i.sui-icon.sui-icon-md.icon-in-progress')
+    && p.querySelector('#paused-clock.sui-text-label.sui-text-hint') && p.contains($('pause-block-time')) && !doc.querySelector('.sim-card, .sim-overlay'));
+  check('…its ways out are its CTAs: the forfeit first, Resume last and the one primary, its chevron after the label',
+    ctas(p).map((a) => a.id).join() === 'pause-end,pause-rematch,pause-edit,resume' && $('pause-end').classList.contains('sui-mod-destructive')
+    && ctas(p).filter((a) => a.classList.contains('sui-mod-primary')).length === 1 && $('resume').classList.contains('sui-mod-primary')
+    && $('resume').lastElementChild.matches('i.icon-chevron-right') && $('resume').firstElementChild.matches('span'));
+  const d = $('deploy');
+  check('Deploy is the same modal with no CTA row, titled Engagement', d.matches('.sui-message-system-model-overlay.sp-scrim.sim-scrim.hidden')
+    && d.querySelector('.sui-message-system-modal-frame-left-middle .icon-raid') && /Engagement/.test(text(d.querySelector('h2'))) && !d.querySelector('.sui-message-system-modal-cta'));
+
+  $('start').click();
+  await tick(30);
+  check('starting deploys: each side its structs as the game\'s resource and its charge as the 5-chunk battery', open('deploy') && text($('deploy-you')) === '9' && text($('deploy-cpu')) === '9'
+    && $('deploy-you').closest('.sui-resource').querySelector('i.sui-icon-deployed-structs') && $('deploy-cpu').closest('.sui-resource').querySelector('i.sui-icon-enemy-deployed-structs')
+    && $('deploy-charge-you').matches('.sui-battery.sui-theme-player') && $('deploy-charge-cpu').matches('.sui-battery.sui-theme-enemy')
+    && $('deploy-charge-you').querySelectorAll('.sui-battery-chunk').length === 5 && $('deploy-charge-you').querySelectorAll('.sui-mod-filled').length === 5);
+  check('…and its reach as the cheatsheet draws it: the range glyph, then one sprite per ambit reached', $('deploy-reach-you').firstElementChild.matches('i.sui-icon.sui-icon-md.icon-range')
+    && [...$('deploy-reach-you').children].slice(1).every((i) => /sui-icon-(space|air|land|water)\b/.test(i.className)) && $('deploy-reach-you').children.length > 1);
+  check('…while it counts, Pause and End are disabled in the nav', $('end').classList.contains('sui-mod-disabled') && $('pause').classList.contains('sui-mod-disabled'));
+  for (let i = 0; i < 80 && (open('deploy') || !host().running); i++) await tick(50);
+  check('the countdown ends in the battle', !open('deploy') && host().running);
+
+  $('end').click();
+  await tick(10);
+  const confirm = () => $('end-title') && $('end-title').closest('.sui-message-system-model-overlay');
+  check('End asks first: the system modal, a forfeit and the standing, Cancel then the destructive End battle', confirm() && confirm().getAttribute('role') === 'alertdialog'
+    && /Counts as a forfeit · 9\/9 standing/.test(text(confirm())) && confirm().querySelector('.icon-attention')
+    && ctas(confirm()).map((a) => a.id).join() === 'end-cancel,end-confirm' && $('end-confirm').classList.contains('sui-mod-destructive') && $('end-cancel').classList.contains('sui-mod-secondary'));
+  check('…a solo battle holds still while it asks, with no Paused under it', !host().running && !open('paused') && doc.activeElement === $('end-cancel'));
+  esc();
+  await tick(10);
+  check('…Escape cancels and the battle picks up again', !confirm() && host().running && !open('paused'));
+  $('pause').click();
+  await tick(10);
+  check('Pause opens the Paused modal, Resume focused, the nav\'s Pause hidden', open('paused') && doc.activeElement === $('resume') && doc.body.classList.contains('sim-paused')
+    && /^\d\d:\d\d$/.test(text($('paused-clock'))));
+  $('pause-end').click();
+  await tick(10);
+  check('…its End battle asks too, standing in for it', confirm() && !open('paused'));
+  $('end-cancel').click();
+  await tick(10);
+  check('…Cancel gives the pause back, still paused', !confirm() && open('paused') && !host().running);
+  esc();
+  await tick(10);
+  check('…and Escape resumes', !open('paused') && host().running);
+  $('end').click();
+  await tick(10);
+  $('end-confirm').click();
+  for (let i = 0; i < 40 && doc.body.dataset.screen !== 'debrief'; i++) await tick(25);
+  check('End battle forfeits into the debrief', host().finished && host().finished.forfeit && doc.body.dataset.screen === 'debrief' && !confirm());
+
+  // The debrief.
+  const v = $('verdict');
+  const art = !$('verdict-banner').classList.contains('hidden');
+  check('the verdict: the game\'s banner, or the word led by its glyph — the word always there to be read', text(v) === 'Defeat'
+    && (art ? v.classList.contains('sim-sr') && $('verdict-banner').matches('.raid-end-banner.sim-verdict-banner') : v.querySelector('i.sui-icon.sui-icon-md.icon-alert') && !v.classList.contains('sim-sr')));
+  check('…the meta line in the app\'s words', /^\d\d:\d\d · \d+ blocks? · Difficult · Spearpoint$/.test(text($('debrief-meta'))), text($('debrief-meta')));
+  const tal = $('tallies').closest('.sui-data-card');
+  check('Tallies is a data card: its tag, the side tags, then one row per tally', tal && text(tal.querySelector('.sui-data-card-header')) === 'Tallies'
+    && text(doc.querySelector('.sim-tally-h .sim-you')) === 'You' && text(doc.querySelector('.sim-tally-h .sim-cpu')) === 'Computer'
+    && $('tallies').querySelectorAll(':scope > .sui-data-card-row.sim-tally').length === 6
+    && $('tallies').querySelector('.sim-tally .sim-tally-l i.sui-icon.sui-icon-sm.icon-wreckage')
+    && $('tallies').querySelector('.sim-tally .sim-tally-l i.sui-icon.sui-icon-sm.sui-icon-defender-block'));
+  const mom = $('moments').closest('.sui-data-card');
+  check('Turning points is the same card, with the Full battle log in it', mom && text(mom.querySelector('.sui-data-card-header')) === 'Turning points' && mom.contains($('show-log'))
+    && $('show-log').classList.contains('sui-mod-secondary') && !doc.querySelector('.sim-debrief h2'));
+  check('…its rows say Block, not B', [...$('moments').children].every((r) => !/^B\d/.test(text(r))) && $('moments').children.length > 0);
+  check('the next moves: Rematch the one primary, the rest secondary and iconed, Harder\'s label in its span', $('db-rematch').classList.contains('sui-mod-primary')
+    && ['db-edit', 'db-swap', 'db-harder', 'db-code'].every((id) => $(id).classList.contains('sui-mod-secondary') && $(id).parentNode.matches('.sim-next') && $(id).querySelector('i.sui-icon'))
+    && text($('db-harder')) === 'Harder' && $('db-harder').querySelector('span') && $('db-edit').querySelector('i.icon-edit') && $('db-swap').querySelector('i.icon-transfers') && $('db-code').querySelector('i.icon-outgoing'));
+  check('…New encounter is the game\'s frameless text control', $('db-new').matches('a.sui-nav-btn') && !doc.querySelector('.sim-link'));
+  sw.Simulator.openLink('zzzz');
+  await tick(10);
+  check('the toast is the game\'s system alert, with no action slot', $('message').matches('.sui-message-system-alert.sui-mod-secondary') && /does not hold a battle/.test(text($('message')))
+    && !$('message').querySelector('.sui-message-system-alert-close-container'));
   s.close();
 }
 
@@ -295,15 +628,41 @@ async function simulator(context, answers = {}) {
   const { $ } = s;
   $('post-to').click();
   await tick(30);
-  check('the sheet lists the rooms, and picks none for you', $('post-rooms').querySelectorAll('.sim-room').length === 2 && $('post-send').disabled && !/Post to \S/.test(text($('post-send'))));
+  const off = (n) => !!n && (n.disabled === true || n.getAttribute('aria-disabled') === 'true');
+  check('the sheet lists the rooms, and picks none for you', $('post-rooms').querySelectorAll('.sim-room').length === 2 && off($('post-send')) && !/Post to \S/.test(text($('post-send'))));
+  {
+    const dlg = $('post-dialog');
+    check('…it is the game\'s system modal, in the scaled layout, named by its title', dlg && dlg.classList.contains('sui-message-system-model-overlay') && $('menu-page-layout').contains(dlg)
+      && dlg.getAttribute('role') === 'dialog' && /Share battle/.test(text($(dlg.getAttribute('aria-labelledby'))))
+      && dlg.querySelector('.sui-message-system-modal-frame-left-middle i.sui-icon.sui-icon-md.icon-outgoing'));
+    const ctas = [...dlg.querySelectorAll('.sui-message-system-modal-cta-btn-wrapper > .sui-screen-btn')];
+    check('…Copy link then Post, the one primary last; no close X', ctas.length === 2 && ctas[0].id === 'post-copy' && ctas[0].classList.contains('sui-mod-secondary')
+      && ctas[1].id === 'post-send' && ctas[1].classList.contains('sui-mod-primary') && text(ctas[1]) === 'Post' && !dlg.querySelector('.sui-screen-nav-close'));
+    check('…the find box is a SUI text field', $('post-find').closest('label.sui-input-text') && /Post to/.test(text($('post-find').closest('label.sui-input-text').querySelector('span'))));
+    const rows = [...$('post-rooms').querySelectorAll('.sim-room')];
+    check('…the rooms are radio result rows drawn as Comms draws a room', $('post-rooms').matches('.sui-result-table.sui-result-rows[role="radiogroup"]')
+      && rows.every((r) => r.matches('.sui-result-row') && r.querySelector('.sui-radio-container input.sui-radio[name="post-room"]'))
+      && rows[0].querySelector('.sui-result-row-portrait .chat-room-icon i.icon-guild') && rows[1].querySelector('.sui-result-row-portrait .pfp-frame')
+      && /PID #1-61/.test(text(rows[1])) && !/direct|channel/.test(text($('post-rooms'))));
+  }
   $('post-find').value = 'jp';
   $('post-find').dispatchEvent(new s.sw.Event('input'));
   check('…typing narrows it', $('post-rooms').querySelectorAll('.sim-room').length === 1);
   $('post-rooms').querySelector('.sim-room').click();
+  check('…a click anywhere on the row picks it, and Post wakes', $('post-rooms').querySelector('input.sui-radio').checked && !off($('post-send')) && /^Post to /.test(text($('post-send'))));
   $('post-send').click();
   await tick(20);
   check('…and Post sends the battle code to that room, nothing else', posts.length === 1 && posts[0].roomId === '!b:h' && posts[0].guildId === '0-5' && posts[0].battle && posts[0].result == null);
-  check('…then closes', s.$('post-dialog').classList.contains('hidden'));
+  check('…then closes', !s.$('post-dialog'));
+  $('import').click();
+  check('Paste is the same modal: a Battle link field, Cancel and Load battle', $('code-dialog') && $('layout-code').closest('label.sui-input-text')
+    && /Battle link/.test(text($('layout-code').closest('label'))) && text($('code-load')) === 'Load battle' && $('code-load').classList.contains('sui-mod-primary')
+    && $('code-dialog').querySelector('.icon-incoming'));
+  $('layout-code').value = 'nonsense';
+  $('layout-code').dispatchEvent(new s.sw.KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+  check('…Enter loads, and a bad link says why while the dialog stays', $('code-dialog') && /link|battle/i.test(text($('message'))), text($('message')));
+  s.sw.document.dispatchEvent(new s.sw.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+  check('…Escape closes it', !$('code-dialog'));
   s.close();
 }
 
@@ -411,12 +770,14 @@ async function simulator(context, answers = {}) {
   fire({ v: 1, kind: 'ready', ready: true }, '@1-99:h');
   const hostSeat = () => text($('challenge').querySelector('.sim-run'));
   check('…a frame from anyone but the host is ignored', /JPEG/.test(hostSeat()) && !/Ready/.test(hostSeat()), hostSeat());
+  check('…a seat not ready says so as a warning badge, and the lobby is the phase badge', $('challenge').querySelector('.sim-seat .sui-badge.sui-mod-warning')
+    && /Not ready/.test(text($('challenge').querySelector('.sim-run'))) && /^Lobby$/.test(text($('challenge').querySelector('.sim-settings .sui-badge'))));
   fire({ v: 1, kind: 'ready', ready: true });
   check('…the host\'s own ready shows on its seat', /Ready/.test(hostSeat()), hostSeat());
   fire({ v: 1, kind: 'start', battle, block_ms: 6000 });
   await tick(30);
   check('the host\'s start begins the battle here, the board replaying its ticks', s.sw.document.body.dataset.screen === 'battle' && s.sw.Simulator.getHost() instanceof s.sw.SimLive.RemoteHost);
-  check('…with the Live chip, and no pause for a battle between two', /Live/.test(text($('chips'))) && s.sw.getComputedStyle($('pause')).display === 'none');
+  check('…with the Live chip, and no pause for a battle between two', /Live/.test(text($('sim-status'))) && s.sw.getComputedStyle($('pause')).display === 'none');
   {
     const rh = s.sw.Simulator.getHost();
     let ticks = 0;
@@ -433,6 +794,8 @@ async function simulator(context, answers = {}) {
   await tick(2700);
   check('the host\'s end is the debrief: you beat them', s.sw.document.body.dataset.screen === 'debrief' && /You beat JPEG/.test(text($('db-post'))) && /JPEG/.test(text(s.sw.document.querySelector('.sim-tally-h .sim-cpu'))));
   check('…no rematch, edit or swap for a guest', $('db-rematch').classList.contains('hidden') && $('db-edit').classList.contains('hidden') && $('db-swap').classList.contains('hidden'));
+  check('…so Share is the screen\'s one primary, and the result a primary system alert (P7)', $('db-code').classList.contains('sui-mod-primary') && !$('db-code').classList.contains('sui-mod-secondary')
+    && $('db-post').matches('.sui-message-system-alert.sui-mod-primary') && $('db-post').querySelector('.sui-text-label.sui-text-primary'));
   s.close();
 }
 
@@ -548,6 +911,8 @@ async function simulator(context, answers = {}) {
 {
   console.log('\n— live: the invite in Comms');
   const v = (extra) => Object.assign({ frame: Object.assign({}, frame, { kind: 'invite', match: '!m:h', block_ms: 6000 }), me, author: { name: 'Marklifer', self: false }, ts: Date.now() }, extra);
+  // Who plays whom, one word per part (the parts are spaced by layout, not text).
+  const versus = (row) => [...row.querySelector('.sc-versus-row').children].map((n) => text(n)).join(' ');
   const open = Card.inviteRow(v({}), { onAccept: () => {}, onWatch: () => {} });
   check('an open invite: anyone may Accept', Card.inviteState(v({})) === 'open' && [...open.querySelectorAll('.pc-act')].map((a) => a.title).join(',') === 'Accept');
   check('…addressed to you: For you', Card.inviteState(v({ frame: Object.assign({}, frame, { kind: 'invite', match: '!m:h', block_ms: 6000, to: [me] }) })) === 'for-you');
@@ -555,10 +920,19 @@ async function simulator(context, answers = {}) {
   check('…your own: Waiting', Card.inviteState(v({ author: { name: 'You', self: true } })) === 'waiting');
   check('…untaken for a quarter hour: Lapsed', Card.inviteState(v({ ts: Date.now() - 16 * 60 * 1000 })) === 'lapsed');
   const liveRow = Card.inviteRow(v({ live: { state: 'live', guest_name: 'JPEG' } }), { onAccept: () => {}, onWatch: () => {} });
-  check('playing: Live, who v whom, and Watch', /Marklifer v JPEG/.test(text(liveRow.querySelector('.pc-id'))) && text(liveRow.querySelector('.sui-badge')) === 'Live'
-    && [...liveRow.querySelectorAll('.pc-act')].map((a) => a.title).join(',') === 'Watch');
+  check('playing: Live, the battle by name, who vs whom, and Watch', text(liveRow.querySelector('.pc-nm')) === 'Spearpoint' && versus(liveRow) === 'Marklifer vs JPEG'
+    && text(liveRow.querySelector('.sui-badge')) === 'Live' && [...liveRow.querySelectorAll('.pc-act')].map((a) => a.title).join(',') === 'Watch'
+    && liveRow.querySelector('.pc-act[title="Watch"] .icon-raid') && liveRow.querySelector('.gc-emblem i.icon-raid.sc-tone-enemy'));
+  check('…block time is a reading, not caps prose', text(liveRow.querySelector('.pc-res')) === '6 s' && liveRow.querySelector('.pc-res i.icon-in-progress') && !/6 s/.test(text(liveRow.querySelector('.pc-id'))));
+  const faces = Card.inviteRow(v({ author: { name: 'Marklifer', self: false, player_id: '1-1', pfp_attrs: null }, live: { state: 'live', guest_name: 'JPEG', guest_id: '1-61', guest_pfp: null } }), {});
+  check('…with the chain\'s ids, both players are faces', faces.querySelectorAll('.sc-versus-row .pc-person').length === 2);
+  const waiting = Card.inviteRow(v({ author: { name: 'You', self: true } }), {});
+  check('…your own, untaken: "anyone may take it", the guest "anyone"', text(waiting.querySelector('.pc-id')) === 'anyone may take it' && versus(waiting) === 'You vs anyone');
   const ended = Card.inviteRow(v({ live: { state: 'ended', guest_name: 'JPEG', winner_name: 'JPEG' } }), {});
-  check('over: who won', /JPEG won · Marklifer v JPEG/.test(text(ended.querySelector('.pc-id'))) && !ended.querySelector('.pc-act[title="Accept"]'));
+  check('over: who won, as a mark under who played', versus(ended) === 'Marklifer vs JPEG' && text(ended.querySelector('.pc-marks')) === 'JPEG'
+    && ended.querySelector('.pc-marks i.icon-success') && !ended.querySelector('.pc-act[title="Accept"]'));
+  const drawn = Card.inviteRow(v({ live: { state: 'ended', guest_name: 'JPEG' } }), {});
+  check('…or a draw', text(drawn.querySelector('.pc-id')) === 'a draw' && drawn.querySelector('.pc-marks i.icon-subtract'));
 }
 
 console.log(failures ? failures + ' failing check(s)' : 'all checks passed');

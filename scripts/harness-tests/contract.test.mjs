@@ -134,7 +134,13 @@ check('the window makes calls to check', calls.length > 40, String(calls.length)
 const unknown = [];
 const unregistered = [];
 const badArgs = [];
+/* Commands an EMBEDDED page asks its host frame for, never Rust: the Map
+ * Viewer in the Battle Simulator (raidview.html?sim=1) reaches its parent
+ * through bridge.js, and the simulator answers these itself
+ * (simulator.js commsInvoke). Named, so a typo in a real command still fails. */
+const FRAME_HOST = new Set(['sim_comms_room']);
 for (const c of calls) {
+  if (FRAME_HOST.has(c.cmd)) continue;
   const def = commands.get(c.cmd);
   if (!def) { unknown.push(c.cmd + ' (' + c.file + ')'); continue; }
   if (!registered.has(c.cmd)) unregistered.push(c.cmd);

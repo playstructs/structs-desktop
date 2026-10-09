@@ -716,11 +716,18 @@
        cards of their own — so an embedded raid view is the STAGE alone: the
        live map with the game's own HUD over it, edge to edge. */
     html[data-embed] #rv-chat, html[data-embed] #rv-log { display: none; }
-    /* The Battle Simulator: two fleets away from home. Nothing to talk about
-       and no planet of either side, so no Comms rail and no shield/ore panel;
-       the "feed" is local, so no freshness dot. */
-    html[data-sim] #rv-chat, html[data-sim] #rv-hud-tr, html[data-sim] #rv-where-chip { display: none; }
+    /* The Battle Simulator: two fleets away from home. No planet of either
+       side, so no shield/ore panel, and the "feed" is local, so no freshness
+       dot. The Comms rail shows only when the simulator gives it a room — a
+       live battle's, or a challenge's thread (raidview-comms.js). */
+    html[data-sim]:not([data-sim-talk]) #rv-chat, html[data-sim] #rv-where-chip { display: none; }
     html:not([data-sim]) #rv-sim-clock, html[data-sim] #rv-energy-res { display: none; }
+    /* P3 (Map Viewer standing): in the simulator the two status bars carry
+       each side's structs standing, the way the game's planet card counts a
+       side's structs — the enemy's in the enemy panel, the viewer's beside
+       the battle clock. The planet's shield and ore make way. */
+    html:not([data-sim]) #rv-sim-you, html:not([data-sim]) #rv-sim-them,
+    html[data-sim] #rv-shield-res, html[data-sim] #rv-ore-res { display: none; }
     /* `only=log` / `only=comms`: one rail, full height, no map. Two of these
        can live side by side because each is its own document — the rails own
        fixed element ids, which is why they could not be duplicated in one. */
@@ -786,7 +793,12 @@
       <a class="sui-resource" href="javascript: void(0)" id="rv-sim-clock"
          data-sui-tooltip="Battle time" data-sui-mod-placement="bottom">
         <span id="rv-clock">00:00</span>
-        <i class="icon-in-progress"></i>
+        <i class="sui-icon sui-icon-sm icon-in-progress"></i>
+      </a>
+      <a class="sui-resource" href="javascript: void(0)" id="rv-sim-you"
+         data-sui-tooltip="Fleet structs standing" data-sui-mod-placement="bottom">
+        <span id="rv-sim-you-n"></span>
+        <i class="sui-icon sui-icon-deployed-structs"></i>
       </a>
     </div>
 
@@ -796,11 +808,16 @@
         <div id="rv-shield-icon" class="planetary-shield-symbol-wrapper"></div>
         <span id="rv-shield" class="sui-text-warning">—</span>
       </a>
-      <a class="sui-resource" href="javascript: void(0)"
+      <a class="sui-resource" href="javascript: void(0)" id="rv-ore-res"
          data-sui-tooltip="Alpha Ore stored on this planet"
          data-sui-mod-placement="bottom">
         <i class="sui-icon sui-icon-alpha-ore"></i>
         <span id="rv-ore">—</span>
+      </a>
+      <a class="sui-resource" href="javascript: void(0)" id="rv-sim-them"
+         data-sui-tooltip="Fleet structs standing" data-sui-mod-placement="bottom">
+        <i class="sui-icon sui-icon-enemy-deployed-structs"></i>
+        <span id="rv-sim-them-n"></span>
       </a>
     </div>
 

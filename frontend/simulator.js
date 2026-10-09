@@ -19,7 +19,7 @@
   var LEVELS = ['easy', 'difficult', 'hard'];
   var PRESETS = [
     { id: 'easy', name: 'Easy', enemy: 4 }, { id: 'difficult', name: 'Difficult', enemy: 8 },
-    { id: 'hard', name: 'Hard', enemy: 12 }, { id: 'random', name: 'Random', enemy: '6–16' },
+    { id: 'hard', name: 'Hard', enemy: 12 }, { id: 'random', name: 'Random', enemy: '6-16' },
   ];
   var BLOCK_TIMES = [{ ms: 2000, name: '2 s', note: 'training' }, { ms: 6000, name: '6 s', note: 'chain' }];
   var MAX_CHARGE = 30;
@@ -33,11 +33,21 @@
   var social = null;   // simulator-social.js, built once the functions below exist
 
   function el(tag, text, cls) { var e = document.createElement(tag); if (text != null) e.textContent = text; if (cls) e.className = cls; return e; }
-  function icon(name, size) { var i = el('i', null, 'sui-icon-' + (size || 'md') + ' icon-' + name); i.setAttribute('aria-hidden', 'true'); return i; }
+  function icon(name, size) { var i = el('i', null, 'sui-icon sui-icon-' + (size || 'md') + ' icon-' + name); i.setAttribute('aria-hidden', 'true'); return i; }
   function button(text, cls, onClick) { var b = el('button', text, cls); b.type = 'button'; if (onClick) b.addEventListener('click', onClick); return b; }
   function cap(s) { return s.charAt(0).toUpperCase() + s.slice(1); }
   function format(ms) { var sec = Math.floor(ms / 1000); return String(Math.floor(sec / 60)).padStart(2, '0') + ':' + String(sec % 60).padStart(2, '0'); }
-  function message(text) { $('message').textContent = text; clearTimeout(toastTimer); toastTimer = setTimeout(function () { $('message').textContent = ''; }, 4500); }
+  /* The toast: the game's system alert (P7), with no action slot. Empty is
+   * hidden (simulator.css #message:empty). */
+  function message(text) {
+    var box = $('message');
+    var a = window.SUIParts.systemAlert('secondary', 'icon-info', null, null);
+    a.querySelector('.sui-message-system-alert-text-container').appendChild(el('span', String(text)));
+    box.className = a.className;
+    box.replaceChildren.apply(box, Array.prototype.slice.call(a.childNodes));
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(function () { box.replaceChildren(); box.className = ''; }, 4500);
+  }
   function rng(seed) {
     var n = 2166136261;
     String(seed).split('').forEach(function (c) { n = Math.imul(n ^ c.charCodeAt(0), 16777619); });
@@ -145,19 +155,7 @@
     });
     return out;
   }
-  function weaponInfo(t, ws) {
-    var primary = ws === 'primaryWeapon';
-    var control = Chain.weaponField(t, ws, 'Control');
-    var label = primary ? t.primary_weapon_label : t.secondary_weapon_label;
-    var shots = Chain.weaponField(t, ws, 'Shots') || 1;
-    return {
-      icon: control === 'guided' ? 'smart-weapon' : 'ballistic-weapon',
-      name: label || (primary ? 'Primary weapon' : (control === 'guided' ? 'Guided' : 'Ballistic') + ' secondary'),
-      stats: (Chain.weaponField(t, ws, 'Damage') || 0) + ' dmg' + (shots > 1 ? ' × ' + shots : '') + ' · ' + (Chain.weaponField(t, ws, 'Charge') || 0) + ' charge',
-      charge: Chain.weaponField(t, ws, 'Charge') || 0,
-    };
-  }
-  function traitOf(t) { return t.unitDefenses && t.unitDefenses !== 'noUnitDefenses' ? (t.unit_defenses_label || t.unitDefenses) : ''; }
+  function weaponInfo(t, ws) { return { charge: Chain.weaponField(t, ws, 'Charge') || 0 }; }
 
   /** Readiness: what stops a start, and what is only worth knowing. */
   function readiness(units) {
@@ -180,65 +178,129 @@
 
   /* ── Art ───────────────────────────────────────────────────────────────── */
 
-  function hullLayers(typeId) {
-    var art = A.ART[Host.typeSlug(TYPES[typeId].type)];
-    if (!art) return [];
-    return (art.bottom || []).concat(['struct-base'], art.top || []).map(function (layer) { return A.artPath(art.dir, layer); });
-  }
+  /* A type's layers, bottom to top, tagged the way the game's struct still
+   * tags them, so main.css's .struct-still z-indexes order them too. */
   function drawHull(into, typeId, cls) {
-    hullLayers(typeId).forEach(function (src) {
-      var img = el('img', null, cls || ''); img.src = src; img.alt = ''; img.draggable = false; into.appendChild(img);
-    });
+    var art = A.ART[Host.typeSlug(TYPES[typeId].type)];
+    if (!art) return;
+    function add(layer, tag) {
+      var img = el('img', null, [cls, tag].filter(Boolean).join(' '));
+      img.src = A.artPath(art.dir, layer); img.alt = ''; img.draggable = false; into.appendChild(img);
+    }
+    (art.bottom || []).forEach(function (layer) { add(layer, 'struct-bottom-detail'); });
+    add('struct-base', null);
+    (art.top || []).forEach(function (layer) { add(layer, 'struct-top-detail'); });
   }
   function tileStyle(node, ambit) { node.style.backgroundImage = "url('img/tiles/" + ambit + '/' + ambit + "-1-2-top-middle.png')"; }
+  function ambitIcon(a) { var i = el('i', null, 'sui-icon sui-icon-md sui-icon-' + a); i.title = cap(a); i.setAttribute('aria-label', a); return i; }
+  function side2theme(side) { return side === 'player' ? 'player' : 'enemy'; }
+
+  /* The game's struct cheatsheet (raidview-sheet.js, the Map Viewer's port of
+   * CheatsheetContentBuilder), fed from the simulator's own type records. */
+  var Sheet = window.RaidSheet({
+    el: function (t, c, x) { return el(t, x, c); },
+    equipped: function (v) { return !!v && !/^no[A-Z]/.test(v); },
+    typeOf: function (s) { return s && s.st; },
+    state: function () { return { structsById: {} }; },
+    icons: function () { return A.EQUIP_ICON; },
+  });
+  var AMBIT_BIT = { water: 2, land: 4, air: 8, space: 16 };
+  /** The sheet of a type standing in `ambit`: its reach resolved against that
+   * band (the Command Ship's LOCAL weapon reads as the band it holds), with no
+   * build cost — nothing is built here — and each weapon's charge, in the
+   * game's battery, under its damage. */
+  function typeSheet(typeId, ambit, side) {
+    var t = TYPES[typeId], st = Host.spectatorType(t);
+    var mask = function (ws) { return reachFrom(t, ws, ambit).reduce(function (m, a) { return m | AMBIT_BIT[a]; }, 0); };
+    st.primary_weapon_ambits = mask('primaryWeapon');
+    st.secondary_weapon_ambits = mask('secondaryWeapon');
+    st.build_charge = 0; st.build_draw = 0;
+    var card = el('div', null, 'sui-cheatsheet sim-sheet sui-theme-' + side2theme(side));
+    card.appendChild(Sheet.structSheet(st));
+    var rows = card.querySelectorAll('.sui-cheatsheet-property');
+    weapons(t).filter(function (ws) { return A.EQUIP_ICON[Chain.weaponField(t, ws, '')]; }).forEach(function (ws, i) {
+      var info = rows[i] && rows[i].querySelector('.sui-cheatsheet-property-info');
+      if (!info) return;
+      var charge = weaponInfo(t, ws).charge;
+      var line = el('div', null, 'sim-sheet-charge');
+      line.title = charge + ' charge'; line.setAttribute('aria-label', charge + ' charge');
+      line.appendChild(Sheet.batteryCost(charge));
+      info.appendChild(line);
+    });
+    return card;
+  }
 
   /* ── Round card ────────────────────────────────────────────────────────── */
 
-  function choice(list, current, onPick, render) {
-    return list.map(function (item) {
-      var b = el('button', null, 'sim-opt');
-      b.type = 'button';
-      b.setAttribute('role', 'radio');
-      b.setAttribute('aria-checked', String(item.id === current || item.ms === current));
-      render(b, item);
-      b.addEventListener('click', function () { onPick(item); });
-      return b;
-    });
+  /* A pick-one list: the game's radio leading each SUI result row
+   * (SUIParts.radioRows). The box names the group (data-labelledby, or
+   * data-label) and the radios (its id, so the Round card's and the Paused
+   * card's Block time are two groups, not one). A pick fires on every click,
+   * the checked row's included — Random rolls again. Rebuilt in place, so a
+   * keyboard pick keeps its focus on the radio it moved to. */
+  function choice(box, list, current, onPick, trail) {
+    var had = box.contains(document.activeElement);
+    var rows = window.SUIParts.radioRows(box.id, list.map(function (item) {
+      var value = item.id != null ? item.id : item.ms;
+      return { value: value, label: item.name, trail: trail(item), checked: value === current, item: item };
+    }), function (v, o) { onPick(o.item); });
+    // The box may ask for SUIParts' compact rows (data-rows): one line beside
+    // the sprite, or two-up tiles.
+    (box.getAttribute('data-rows') || '').split(' ').filter(Boolean).forEach(function (c) { rows.classList.add(c); });
+    var by = box.getAttribute('data-labelledby');
+    if (by) rows.setAttribute('aria-labelledby', by); else rows.setAttribute('aria-label', box.getAttribute('data-label') || '');
+    box.replaceChildren(rows);
+    if (had) { var on = rows.querySelector('input.sui-radio:checked'); if (on) on.focus(); }
   }
   function renderBlockTime(box) {
-    box.replaceChildren.apply(box, choice(BLOCK_TIMES, settings.blockMs, function (bt) {
+    choice(box, BLOCK_TIMES, settings.blockMs, function (bt) {
       settings.blockMs = bt.ms;
       if (host) host.setBlockMs(bt.ms);
       renderRound(); renderBlockTime($('pause-block-time')); renderBattleBar();
-    }, function (b, bt) { b.appendChild(el('span', bt.name, 'sui-text-label')); b.appendChild(el('span', bt.note, 'sui-text-hint')); }));
+    }, function (bt) { return el('span', bt.note, 'sui-text-hint'); });
+  }
+  // The enemy's count the way the game counts structs: a resource.
+  function enemyCount(p) {
+    var r = el('span', null, 'sui-resource');
+    r.title = 'Enemy structs';
+    r.append(el('span', String(p.enemy)), el('i', null, 'sui-icon sui-icon-enemy-deployed-structs'));
+    return r;
+  }
+  /* Opening charge: one SUI stepper per side, captioned by the side. A
+   * stepper is rebuilt only when its value changed elsewhere (Mirror, Swap, a
+   * loaded link), so the one being stepped keeps its focus. */
+  function renderCharges() {
+    var box = $('charges');
+    SIDES.forEach(function (side) {
+      var id = side === 'player' ? 'charge-player' : 'charge-cpu';
+      var input = $(id);
+      if (input && Number(input.value) === settings.charge[side]) return;
+      var step = window.SUIParts.stepper(settings.charge[side], { min: 0, max: MAX_CHARGE, step: 1 }, function (n) {
+        settings.charge[side] = n; renderChecks();
+      });
+      var btns = step.querySelectorAll('button');
+      btns[0].setAttribute('aria-label', 'Less opening charge');
+      btns[btns.length - 1].setAttribute('aria-label', 'More opening charge');
+      step.querySelector('input').id = id;
+      var f = window.SUIParts.field(side === 'player' ? 'You' : 'Computer', step, null, { className: 'sui-text-label' });
+      // The caption names the number, not the first button inside the label.
+      f.htmlFor = id;
+      f.firstChild.classList.add(side === 'player' ? 'sim-you' : 'sim-cpu');
+      var old = input && input.closest('label');
+      if (old) old.replaceWith(f); else box.appendChild(f);
+    });
   }
   function renderRound() {
-    var enc = $('encounters');
-    enc.replaceChildren.apply(enc, choice(PRESETS, settings.preset, function (p) {
+    choice($('encounters'), PRESETS, settings.preset, function (p) {
       settings.preset = p.id;
       // Random rolls a fresh battle on every click, selected or not.
       if (p.id === 'random') $('seed').value = Math.random().toString(36).slice(2, 10);
       if (p.id !== 'random') settings.difficulty = p.id;
       loadLayout();
-    }, function (b, p) { b.appendChild(el('span', p.name, 'sui-text-label')); b.appendChild(el('span', String(p.enemy), 'sui-text-label sui-text-hint')); }));
-    var lvl = LEVELS.indexOf(settings.difficulty);
-    $('ai-level').textContent = cap(settings.difficulty);
-    $('ai-down').disabled = lvl <= 0;
-    $('ai-up').disabled = lvl >= LEVELS.length - 1;
+    }, enemyCount);
+    $('ai-level').value = settings.difficulty;
     renderBlockTime($('block-time'));
-    var charges = $('charges'); charges.replaceChildren();
-    SIDES.forEach(function (side) {
-      var row = el('div', null, 'sim-charge ' + (side === 'player' ? 'sim-you-box' : 'sim-cpu-box'));
-      row.appendChild(el('span', side === 'player' ? 'You' : 'Computer', 'sui-text-label ' + (side === 'player' ? 'sim-you' : 'sim-cpu')));
-      var step = el('span', null, 'sim-stepper');
-      var less = button(null, 'sui-screen-btn sim-tiny', function () { settings.charge[side] = Math.max(0, settings.charge[side] - 1); renderRound(); renderChecks(); });
-      less.textContent = '−'; less.setAttribute('aria-label', 'Less opening charge'); less.disabled = settings.charge[side] <= 0;
-      var more = button('+', 'sui-screen-btn sim-tiny', function () { settings.charge[side] = Math.min(MAX_CHARGE, settings.charge[side] + 1); renderRound(); renderChecks(); });
-      more.setAttribute('aria-label', 'More opening charge'); more.disabled = settings.charge[side] >= MAX_CHARGE;
-      step.append(less, el('span', String(settings.charge[side]), 'sui-text-label'), more);
-      row.appendChild(step);
-      charges.appendChild(row);
-    });
+    renderCharges();
   }
 
   /* ── Setup board ───────────────────────────────────────────────────────── */
@@ -247,10 +309,25 @@
   function select(sel) { selection = sel; changing = false; renderSetup(); }
   function selectUnit(u) { select({ side: u.side, ambit: u.ambit, slot: u.slot, command: u.type === COMMAND_ID, id: u.id }); }
 
+  /* An armed board pick — the Map Viewer's Move ('Select Tile') and Defend
+   * ('Select Struct') — is `picking = { action: 'move' | 'defend', id }`. A
+   * second press, Escape, or a click anywhere the pick cannot land cancels. */
+  function arm(action, u) { picking = { action: action, id: u.id }; changing = false; renderSetup(); }
+  function disarm() { picking = null; renderSetup(); }
+  function moveTo(u, ambit) {
+    u.ambit = ambit;
+    if (selection && selection.id === u.id) selection.ambit = ambit;
+    picking = null;
+    renderSetup();
+  }
+
   function renderSetup() {
     if (selection && selection.id && !selected()) selection.id = null;
     var arena = $('arena'); arena.replaceChildren();
-    var pickerUnit = picking && draft.find(function (u) { return u.id === picking; });
+    var pickerUnit = picking && draft.find(function (u) { return u.id === picking.id; });
+    if (picking && !pickerUnit) picking = null;
+    var moving = !!pickerUnit && picking.action === 'move';
+    var fixed = social.locked();
     AMBITS.forEach(function (ambit) {
       var band = el('div', null, 'band ' + ambit);
       band.appendChild(el('span', ambit, 'ambit-label sui-text-label'));
@@ -258,25 +335,32 @@
         for (var i = -1; i < 4; i++) {
           var command = i === -1, slot = command ? 0 : i;
           var u = draft.find(function (v) { return v.side === side && v.ambit === ambit && (command ? v.type === COMMAND_ID : v.type !== COMMAND_ID && v.slot === slot); });
-          if (command && !u) continue;
+          // An empty command post is drawn only as a Move's landing tile.
+          var post = command && !u && moving && side === pickerUnit.side && fits(TYPES[pickerUnit.type], ambit);
+          if (command && !u && !post) continue;
           var b = el('button', null, 'slot ' + (side === 'player' ? 'friendly' : 'enemy') + (command ? ' command' : ''));
           b.type = 'button';
           b.style.gridColumn = command ? (side === 'player' ? '1' : '7') : String((side === 'player' ? 2 : 5) + Math.floor(slot / 2));
           if (!command) b.style.gridRow = String(slot % 2 + 1);
-          b.setAttribute('aria-label', (side === 'player' ? 'Your ' : 'Computer ') + (u ? TYPES[u.type].type : 'empty slot ' + (slot + 1)) + ', ' + ambit);
+          b.setAttribute('aria-label', post ? 'Move the command ship to ' + ambit
+            : (side === 'player' ? 'Your ' : 'Computer ') + (u ? TYPES[u.type].type : 'empty slot ' + (slot + 1)) + ', ' + ambit);
           var isSel = u ? selection && selection.id === u.id
             : selection && !selection.id && selection.side === side && selection.ambit === ambit && !selection.command && selection.slot === slot;
           if (pickerUnit) {
-            var eligible = u && u.side === pickerUnit.side && u !== pickerUnit;
-            b.classList.add(u === pickerUnit ? 'selected' : eligible ? 'eligible' : 'dim');
-            b.addEventListener('click', function (u, eligible) { if (eligible) setWard(pickerUnit, u.id); }.bind(null, u, eligible));
+            var target = moving ? post : !!u && u.side === pickerUnit.side && u !== pickerUnit;
+            b.classList.add(u === pickerUnit ? 'selected' : target ? (moving ? 'sim-move-target' : 'eligible') : 'dim');
+            b.addEventListener('click', function (u, ambit, target) {
+              if (!target) disarm();
+              else if (moving) moveTo(pickerUnit, ambit);
+              else setWard(pickerUnit, u.id);
+            }.bind(null, u, ambit, target));
           } else {
             if (isSel) b.classList.add('selected');
             b.addEventListener('click', function (side, ambit, slot, command, u) {
               if (u) selectUnit(u); else select({ side: side, ambit: ambit, slot: slot, command: command, id: null });
             }.bind(null, side, ambit, slot, command, u));
             // A challenge's fleets are its identity: looked at, not changed.
-            if (!u && social.locked()) b.disabled = true;
+            if (!u && fixed) b.disabled = true;
           }
           if (u) {
             b.dataset.unit = u.id;
@@ -285,8 +369,8 @@
             if (u.protects) marks.appendChild(el('i', null, 'sui-icon sui-icon-sm sui-icon-defending'));
             if (draft.some(function (v) { return v.protects === u.id; })) marks.appendChild(el('i', null, 'sui-icon sui-icon-sm sui-icon-defended'));
             b.appendChild(marks);
-          } else {
-            b.appendChild(el('i', null, 'sui-icon-md icon-add empty-label'));
+          } else if (!post && !fixed) {
+            b.appendChild(icon('add')).classList.add('empty-label');
           }
           band.appendChild(b);
         }
@@ -294,106 +378,178 @@
       arena.appendChild(band);
     });
     document.body.classList.toggle('sim-picking', !!pickerUnit);
-    $('defend-banner').classList.toggle('hidden', !pickerUnit);
-    if (pickerUnit) $('defend-text').textContent = TYPES[pickerUnit.type].type + ' defends…';
-    var count = function (side) { var n = draft.filter(function (u) { return u.side === side; }).length; return n + (n === 1 ? ' struct' : ' structs'); };
+    // While a pick waits on the board, the round cannot be changed under it.
+    var roundCol = document.querySelector('.sim-round-col') || $('round');
+    if (roundCol) roundCol.inert = !!pickerUnit;
+    var count = function (side) { return String(draft.filter(function (u) { return u.side === side; }).length); };
     $('count-you').textContent = count('player');
     $('count-cpu').textContent = count('computer');
     renderChecks();
     renderInspector();
+    drawDefWeb();
     social.renderSetup();
+    markSheetMore();
+  }
+  /* A sheet cut by the column's foot fades there, until it is read to the end. */
+  function markSheetMore() {
+    var sh = document.querySelector('#inspector > .sim-sheet');
+    if (!sh) return;
+    var more = function () { sh.classList.toggle('sim-more', sh.scrollTop + sh.clientHeight < sh.scrollHeight - 1); };
+    if (!sh.dataset.watch) { sh.dataset.watch = '1'; sh.addEventListener('scroll', more, { passive: true }); }
+    more();
   }
 
+  /* The defence web: for the selected struct, dashed lines from each of its
+   * defenders to it and from it to its ward, a dot at the defending end — the
+   * Map Viewer's .rv-defweb, on the setup board. */
+  var SVG_NS = 'http://www.w3.org/2000/svg';
+  function drawDefWeb() {
+    var arena = $('arena');
+    var old = arena.querySelector('.sim-defweb');
+    if (old) old.remove();
+    var u = selected();
+    if (!u) return;
+    var links = draft.filter(function (v) { return v.protects === u.id; }).map(function (v) { return [v, u]; });
+    var ward = u.protects && draft.find(function (v) { return v.id === u.protects; });
+    if (ward) links.push([u, ward]);
+    if (!links.length) return;
+    // Offsets, not client rects: the window is drawn at the game's 2x or 4x,
+    // and the web lives inside that scale.
+    function centre(v) {
+      var n = arena.querySelector('.slot[data-unit="' + v.id + '"]');
+      if (!n) return null;
+      var x = n.offsetWidth / 2, y = n.offsetHeight / 2;
+      for (var p = n; p && p !== arena; p = p.offsetParent) { x += p.offsetLeft; y += p.offsetTop; }
+      return { x: x, y: y };
+    }
+    var svg = document.createElementNS(SVG_NS, 'svg');
+    svg.setAttribute('class', 'sim-defweb' + (u.side === 'computer' ? ' sim-enemy' : ''));
+    svg.setAttribute('aria-hidden', 'true');
+    links.forEach(function (l) {
+      var a = centre(l[0]), b = centre(l[1]);
+      if (!a || !b) return;
+      var line = document.createElementNS(SVG_NS, 'line');
+      line.setAttribute('x1', a.x); line.setAttribute('y1', a.y);
+      line.setAttribute('x2', b.x); line.setAttribute('y2', b.y);
+      svg.appendChild(line);
+      var dot = document.createElementNS(SVG_NS, 'circle');
+      dot.setAttribute('cx', a.x); dot.setAttribute('cy', a.y); dot.setAttribute('r', 3);
+      svg.appendChild(dot);
+    });
+    if (svg.childNodes.length) arena.appendChild(svg);
+  }
+
+  /* A fleet's reach: the ambits its weapons reach, as the game's ambit sprites. */
   function renderReach(box, side, units) {
     var reach = reachOf(side, units);
-    var chips = AMBITS.map(function (a) {
-      var c = el('span', a.charAt(0).toUpperCase(), 'sim-chip sui-text-label' + (reach[a] ? (side === 'player' ? ' lit-you' : ' lit-cpu') : ''));
-      c.title = (reach[a] ? 'Reaches ' : 'Does not reach ') + a;
-      c.setAttribute('aria-label', c.title);
-      return c;
-    });
-    box.replaceChildren();
-    chips.forEach(function (c) { box.appendChild(c); });
+    var list = AMBITS.filter(function (a) { return reach[a]; });
+    // As the game's cheatsheet draws a weapon's reach: the range glyph, then
+    // one sprite per ambit reached (P7).
+    box.replaceChildren.apply(box, [icon('range', 'md')].concat(list.map(function (a) { return ambitIcon(a); })));
+    box.title = list.length ? 'Reaches ' + list.join(', ') : 'Reaches nothing';
+    box.setAttribute('aria-label', box.title);
   }
 
   function renderChecks() {
     var list = readiness(draft);
-    var box = $('checks'); box.replaceChildren();
-    list.forEach(function (c) {
-      var row = el('div', null, 'sim-check' + (c.blocking ? ' sim-blocking' : ''));
-      row.appendChild(icon(c.blocking ? 'alert' : 'attention'));
-      row.appendChild(el('span', c.text));
-      box.appendChild(row);
-    });
+    var box = $('checks');
+    box.replaceChildren.apply(box, list.map(function (c) { return window.SUIParts.inlineAlert(c.blocking ? 'destructive' : 'warning', c.text); }));
     $('start').disabled = list.some(function (c) { return c.blocking; });
   }
 
   /* ── Inspector ─────────────────────────────────────────────────────────── */
+  /* The game's Action Bar for the selected slot, as the Map Viewer draws it:
+   * a side-themed header screen (inverted while a pick waits on the board),
+   * the struct on its tile with its health, the ability row, the Defends
+   * select (the keyboard path to the same choice), then the struct's
+   * cheatsheet. An empty slot, or Change, is the game's Deploy list. */
+
+  function inspectorHead(side, text, prompt) {
+    var h = el('div', null, 'sim-insp-h sui-theme-' + side2theme(side));
+    var screen = h.appendChild(el('div', null, 'sui-screen sui-screen-full-width'));
+    screen.appendChild(el('div', text, 'sui-screen-info' + (prompt ? ' sui-mod-inverted' : '')));
+    return h;
+  }
+
+  /* One ability: the game's panel button, `mod` its pressed state. */
+  function abilityBtn(name, title, mod, onClick) {
+    var a = el('a', null, 'sui-panel-btn ' + (mod || 'sui-mod-default'));
+    a.href = 'javascript:void(0)';
+    a.title = title; a.setAttribute('aria-label', title);
+    a.setAttribute('role', 'button'); a.setAttribute('aria-pressed', String(!!mod));
+    a.dataset.ability = name;
+    a.appendChild(icon(name));
+    a.addEventListener('click', function (e) { e.preventDefault(); onClick(); refocus(name); });
+    a.addEventListener('keydown', function (e) { if (e.key === ' ') { e.preventDefault(); a.click(); } });
+    return a;
+  }
+  /* The inspector is rebuilt under the pressed ability: focus goes where the
+   * next step is — a target on the board while a pick waits, else the same
+   * ability, else the selected slot. */
+  function refocus(name) {
+    var t = (picking && document.querySelector('#arena .slot.sim-move-target, #arena .slot.eligible'))
+      || document.querySelector('#inspector [data-ability="' + name + '"]')
+      || document.querySelector('#arena .slot.selected');
+    if (t && t !== document.activeElement) t.focus();
+  }
+
+  function abilities(u, pick) {
+    var t = TYPES[u.type], out = [];
+    if (u.type === COMMAND_ID && AMBITS.filter(function (a) { return fits(t, a); }).length > 1) {
+      out.push(abilityBtn('move', 'Move', pick === 'move' ? 'sui-mod-active-defense' : null, function () {
+        if (pick === 'move') disarm(); else arm('move', u);
+      }));
+    }
+    if (t.canDefend) {
+      out.push(abilityBtn('defend', u.protects && pick !== 'defend' ? 'Clear Defense' : 'Defend',
+        pick === 'defend' || u.protects ? 'sui-mod-active-defense' : null, function () {
+          if (pick === 'defend') disarm();
+          else if (u.protects) setWard(u, null);
+          else arm('defend', u);
+        }));
+    }
+    if (u.type !== COMMAND_ID) {
+      out.push(abilityBtn('deploy', 'Change', changing ? 'sui-mod-pressed' : null, function () { changing = !changing; picking = null; renderSetup(); }));
+      out.push(abilityBtn('close', 'Remove', null, function () { place(null); }));
+    }
+    if (!out.length) return null;
+    var row = el('div', null, 'sui-action-bar-bottom-row sim-abilities sui-theme-' + side2theme(u.side));
+    var group = row.appendChild(el('div', null, 'sui-action-bar-btn-group'));
+    out.forEach(function (b) { group.appendChild(b); });
+    return row;
+  }
 
   function renderInspector() {
     var box = $('inspector'); box.replaceChildren();
-    if (!selection) { box.appendChild(el('div', null, 'sim-card-h')).appendChild(el('span', 'Slot', 'sui-text-label')); return; }
-    var u = selected();
-    var head = el('div', null, 'sim-card-h');
-    head.appendChild(el('span', cap(selection.ambit) + (selection.command ? ' · command' : ' · slot ' + (selection.slot + 1)), 'sui-text-label ' + (selection.side === 'player' ? 'sim-you' : 'sim-cpu')));
-    box.appendChild(head);
-    var fixed = social.locked();
-    if (!u && fixed) return;
-    if (!u || changing) { box.appendChild(picker(u)); if (u) box.appendChild(actions([button('Cancel', 'sui-screen-btn', function () { changing = false; renderInspector(); })])); return; }
+    if (!selection) { box.appendChild(inspectorHead('player', 'Select Tile')); return; }
+    var u = selected(), side = selection.side, fixed = social.locked();
+    var pick = picking && u && picking.id === u.id ? picking.action : null;
+    var where = cap(selection.ambit) + (selection.command ? ' · Command' : ' · Slot ' + (selection.slot + 1));
+    var choosing = !fixed && (!u || changing);
+    box.appendChild(inspectorHead(side, pick === 'move' ? 'Select Tile' : pick === 'defend' || choosing ? 'Select Struct' : where, !!pick));
+    if (!u) { if (choosing) box.appendChild(typePicker(null)); return; }
 
     var t = TYPES[u.type];
+    var row = fixed ? null : abilities(u, pick);
+    if (choosing) {
+      if (row) box.appendChild(row);
+      box.appendChild(typePicker(u));
+      return;
+    }
     var hero = el('div', null, 'sim-hero' + (u.side === 'computer' ? ' enemy' : ''));
     tileStyle(hero, u.ambit);
     drawHull(hero, u.type);
     box.appendChild(hero);
-    var name = el('div', null, 'sim-name');
-    name.appendChild(el('span', t.type, 'sui-text-display'));
-    name.appendChild(el('span', t.maxHealth + ' health · counter ' + (t.counterAttack || 0), 'sui-text-hint'));
-    if (traitOf(t)) name.appendChild(el('span', traitOf(t), 'sui-text-hint'));
-    box.appendChild(name);
-
-    var ws = weapons(t);
-    if (ws.length) {
-      var list = el('div', null, 'sim-weapons');
-      ws.forEach(function (w) {
-        var info = weaponInfo(t, w);
-        var row = el('div', null, 'sim-weapon');
-        row.appendChild(icon(info.icon));
-        var text = el('div');
-        text.appendChild(el('span', info.name));
-        text.appendChild(el('span', info.stats, 'sui-text-hint'));
-        var chips = el('span', null, 'sim-chips');
-        reachFrom(t, w, u.ambit).forEach(function (a) { chips.appendChild(el('span', a, 'sim-chip sui-text-label')); });
-        text.appendChild(chips);
-        row.appendChild(text);
-        list.appendChild(row);
-      });
-      box.appendChild(list);
-    }
-
-    if (u.type === COMMAND_ID) {
-      var amb = el('div', null, 'sim-section');
-      amb.appendChild(el('span', 'Ambit', 'sui-text-label sui-text-hint'));
-      var seg = el('div', null, 'sim-seg');
-      seg.setAttribute('role', 'radiogroup'); seg.setAttribute('aria-label', 'Command ship ambit');
-      AMBITS.filter(function (a) { return fits(t, a); }).forEach(function (a) {
-        var b = button(null, 'sim-opt', function () { u.ambit = a; selection.ambit = a; renderSetup(); });
-        b.disabled = fixed;
-        b.setAttribute('role', 'radio'); b.setAttribute('aria-checked', String(u.ambit === a));
-        b.appendChild(el('span', a.charAt(0).toUpperCase(), 'sui-text-label'));
-        b.setAttribute('aria-label', a);
-        seg.appendChild(b);
-      });
-      amb.appendChild(seg);
-      box.appendChild(amb);
-      return;
-    }
+    var health = el('div', null, 'struct-health-bar sim-health');
+    health.title = t.maxHealth + ' health'; health.setAttribute('aria-label', health.title);
+    for (var i = 0; i < t.maxHealth; i++) health.appendChild(el('div', null, 'struct-health-bar-segment mod-filled'));
+    box.appendChild(health);
+    // A challenge's fleets are looked at, not changed: no actions at all, as
+    // the Map Viewer shows a spectator; the select stays as the read-out.
+    if (row) box.appendChild(row);
 
     if (t.canDefend) {
-      var def = el('div', null, 'sim-section');
-      def.appendChild(el('span', 'Defends', 'sui-text-label sui-text-hint'));
-      var row = el('div', null, 'sim-row');
-      var guard = el('select', null, 'sim-input'); guard.setAttribute('aria-label', 'Defends');
+      var guard = el('select'); guard.setAttribute('aria-label', 'Defends');
       var off = el('option', 'Nothing'); off.value = ''; guard.appendChild(off);
       draft.filter(function (v) { return v.side === u.side && v !== u; }).forEach(function (v) {
         var o = el('option', TYPES[v.type].type + (v.type === COMMAND_ID ? '' : ' · ' + v.ambit + ' ' + (v.slot + 1))); o.value = v.id; guard.appendChild(o);
@@ -401,43 +557,46 @@
       guard.value = u.protects || '';
       guard.addEventListener('change', function () { setWard(u, guard.value || null); });
       guard.disabled = fixed;
-      var pick = button(null, 'sui-screen-btn sim-square', function () { picking = u.id; renderSetup(); });
-      pick.appendChild(icon('defend')); pick.setAttribute('aria-label', 'Pick on the board'); pick.title = 'Pick on the board';
-      row.append(guard);
-      if (!fixed) row.append(pick);
-      def.appendChild(row);
-      box.appendChild(def);
+      var f = el('div', null, 'sim-insp-field sp-narrow');
+      f.appendChild(window.SUIParts.field('Defends', guard, null, { className: 'sui-text-label' }));
+      box.appendChild(f);
     }
-    if (fixed) return;
-    box.appendChild(actions([
-      button('Change', 'sui-screen-btn sui-mod-secondary', function () { changing = true; renderInspector(); }),
-      button('Remove', 'sui-screen-btn sui-mod-destructive', function () { place(null); }),
-    ]));
+    box.appendChild(typeSheet(u.type, u.ambit, u.side));
   }
-  function actions(buttons) { var a = el('div', null, 'sim-actions'); buttons.forEach(function (b) { a.appendChild(b); }); return a; }
 
-  function picker(current) {
-    var list = el('div', null, 'sim-picks');
-    Object.keys(TYPES).map(Number).filter(function (id) { return id !== COMMAND_ID && fits(TYPES[id], selection.ambit); }).forEach(function (id) {
+  /* The game's Deploy list ("Select Struct"): a still of every type the band
+   * takes; a press places it. The sheet under the list follows the pointer
+   * and focus, and rests on the slot's current type (or the first). */
+  function typePicker(current) {
+    var wrap = el('div', null, 'sim-types' + (selection.side === 'computer' ? ' enemy' : ''));
+    var grid = wrap.appendChild(el('div', null, 'offcanvas-struct-list-layout'));
+    var sheetBox = el('div', null, 'sim-types-sheet');
+    var ids = Object.keys(TYPES).map(Number).filter(function (id) { return id !== COMMAND_ID && fits(TYPES[id], selection.ambit); });
+    var rest = current ? current.type : ids[0], shown = null;
+    function show(id) {
+      if (id == null || id === shown) return;
+      shown = id;
+      sheetBox.replaceChildren(typeSheet(id, selection.ambit, selection.side));
+    }
+    ids.forEach(function (id) {
       var t = TYPES[id];
-      var b = button(null, 'sim-pick', function () { place(id); });
-      if (current && current.type === id) b.setAttribute('aria-current', 'true');
-      var thumb = el('span', null, 'sim-thumb'); tileStyle(thumb, selection.ambit); drawHull(thumb, id);
-      var text = el('span');
-      text.appendChild(el('span', t.type, 'sui-text-label'));
-      var main = weapons(t)[0];
-      if (main) text.appendChild(el('span', weaponInfo(t, main).name, 'sui-text-hint'));
-      var chips = el('span', null, 'sim-chips');
-      var reach = {};
-      weapons(t).forEach(function (w) { reachFrom(t, w, selection.ambit).forEach(function (a) { reach[a] = true; }); });
-      AMBITS.filter(function (a) { return reach[a]; }).forEach(function (a) { chips.appendChild(el('span', a, 'sim-chip sui-text-label')); });
-      text.appendChild(chips);
-      if (traitOf(t)) text.appendChild(el('span', traitOf(t), 'sui-text-hint'));
-      b.append(thumb, text);
-      b.setAttribute('aria-label', 'Place ' + t.type);
-      list.appendChild(b);
+      var a = el('a', null, 'offcanvas-struct-container' + (current && current.type === id ? ' sim-current' : ''));
+      a.href = 'javascript:void(0)';
+      a.title = t.type; a.setAttribute('aria-label', 'Place ' + t.type);
+      if (current && current.type === id) a.setAttribute('aria-current', 'true');
+      var still = a.appendChild(el('div', null, 'struct-still'));
+      tileStyle(still, selection.ambit);
+      drawHull(still, id);
+      a.addEventListener('click', function (e) { e.preventDefault(); place(id); });
+      a.addEventListener('mouseenter', function () { show(id); });
+      a.addEventListener('focus', function () { show(id); });
+      grid.appendChild(a);
     });
-    return list;
+    grid.addEventListener('mouseleave', function () { if (!grid.contains(document.activeElement)) show(rest); });
+    grid.addEventListener('focusout', function (e) { if (!grid.contains(e.relatedTarget)) show(rest); });
+    show(rest);
+    wrap.appendChild(sheetBox);
+    return wrap;
   }
 
   /* Put a type in the selected slot (null empties it). The slot's id does not
@@ -491,7 +650,48 @@
     $('setup-screen').classList.toggle('hidden', name !== 'setup');
     $('battle-screen').classList.toggle('hidden', name !== 'battle');
     $('debrief-screen').classList.toggle('hidden', name !== 'debrief');
+    if (name !== 'battle') { document.body.classList.remove('sim-paused', 'sim-watch'); closeEndConfirm(); }
+    if (name !== 'debrief') dropBanner();
+    renderSteps();
     if (social) social.renderPanels();
+    placeBattle();
+    if (name === 'battle' && host) fitStatus();
+    if (name === 'setup') fitFoot();
+  }
+
+  /* The nav's steps: where you are, and the moves the round allows from
+   * here — back to the battle's log, on to a finished battle's debrief, back
+   * to setup to edit the fleets. Battle is never a step from setup: a battle
+   * starts through Start and its deploy. */
+  var STEP_GO = {
+    setup: function () { toSetup(false); },
+    battle: function () { setScreen('battle'); },
+    debrief: function () { showDebrief(); },
+  };
+  function stepOpen(step) {
+    var screen = document.body.dataset.screen;
+    if (step === 'setup') return screen === 'debrief' && !$('db-edit').classList.contains('hidden');
+    if (step === 'battle') return screen === 'debrief' && !!host;
+    if (step === 'debrief') return screen === 'battle' && !!host && !!host.finished;
+    return false;
+  }
+  function renderSteps() {
+    var screen = document.body.dataset.screen;
+    document.querySelectorAll('#sim-steps [data-step]').forEach(function (a) {
+      var here = a.dataset.step === screen, open = !here && stepOpen(a.dataset.step);
+      a.classList.toggle('sui-mod-active', here);
+      a.classList.toggle('sim-step-off', !here && !open);
+      if (here) a.setAttribute('aria-current', 'step'); else a.removeAttribute('aria-current');
+      if (!here && !open) a.setAttribute('aria-disabled', 'true'); else a.removeAttribute('aria-disabled');
+    });
+  }
+
+  /* The battle sits under the window's panel, which keeps its nav on every
+   * screen: the board starts where the panel ends, at whatever scale. */
+  function placeBattle() {
+    if (document.body.dataset.screen !== 'battle') return;
+    var bottom = $('menu-page-panel').getBoundingClientRect().bottom;
+    $('battle-screen').style.top = Math.round(bottom) + 'px';
   }
 
   function stopBattle() {
@@ -499,7 +699,12 @@
     if (host) { host.destroy(); host = null; }
     clearInterval(clockTimer); clearInterval(countdownTimer); clearTimeout(debriefTimer);
     deploying = false;
-    document.body.classList.remove('sim-deploying');
+    closeEndConfirm();
+    $('deploy').classList.add('hidden');
+    $('paused').classList.add('hidden');
+    pausedShown = false;
+    document.body.classList.remove('sim-deploying', 'sim-paused');
+    renderTools();
   }
 
   /* `live` (simulator-social.js): { role: 'host'|'guest'|'watch', host, guest,
@@ -526,7 +731,7 @@
         window.SimulatorTypes.types.forEach(function (t) { types[t.id] = Host.spectatorType(t); });
         host = new window.SimLive.RemoteHost({
           frame: frame, label: 'sim', role: live.role, initial: opening, types: types,
-          players: { host: live.host, guest: live.guest }, send: live.send, onChange: onChange,
+          players: { host: live.host, guest: live.guest }, send: live.send, onChange: onChange, comms: commsInvoke,
         });
         live.remote(host);
       } else {
@@ -535,7 +740,7 @@
         host = new Host({
           chain: chain, you: YOU, cpu: cpu, label: 'sim', blockMs: config.blockMs,
           ai: live ? null : new Ai(CPU.id, config.difficulty, config.seed),
-          frame: frame, onChange: onChange,
+          frame: frame, onChange: onChange, comms: commsInvoke,
         });
         if (live) live.attach(host);
       }
@@ -551,15 +756,137 @@
     } catch (e) { message(e.message); }
   }
 
+  /* ── P7 overlays: the game's system modal over the board ───────────────── */
+  /* Paused and Deploy stay in the page: SUIParts.modal frames each once
+   * around its body from simulator.html, and the hidden class opens and
+   * closes it. Neither belongs to SUIParts' Escape stack (the modal is closed
+   * and put back on the layer): the page's own Escape handler resumes a
+   * pause, and nothing dismisses a deploy. A click on the scrim does nothing.
+   * The End confirm is an ordinary SUIParts modal, built when it opens. */
+  function keptModal(id, o) {
+    var layer = $('sim-layer'), body = $(id + '-body');
+    var m = window.SUIParts.modal({
+      icon: o.icon, title: o.title, ctas: o.ctas, body: Array.prototype.slice.call(body.children),
+      variant: 'scrim', className: 'sim-scrim', parent: layer, onCancel: function () {},
+    });
+    m.close();
+    body.parentNode.removeChild(body);
+    m.overlay.id = id;
+    m.overlay.classList.add('hidden');
+    layer.appendChild(m.overlay);
+    return m;
+  }
+  /* A modal's title with a reading beside it (the Paused clock). */
+  function titleWith(text, id) {
+    var f = document.createDocumentFragment();
+    var r = el('span', null, 'sui-text-label sui-text-hint');
+    r.id = id;
+    f.append(el('span', text), r);
+    return f;
+  }
+  function labelModal(m, titleId, role) {
+    var h = m.overlay.querySelector('.sp-modal-body > h2');
+    if (h) { h.id = titleId; h.classList.add('sim-modal-title'); }
+    m.overlay.setAttribute('role', role);
+    m.overlay.setAttribute('aria-modal', 'true');
+    m.overlay.setAttribute('aria-labelledby', titleId);
+  }
+
+  var pausedModal = keptModal('paused', {
+    icon: 'icon-in-progress', title: titleWith('Paused', 'paused-clock'),
+    // Every way out of the pause is a CTA, as the game's modal lays them out:
+    // the forfeit first, the round's alternatives, Resume last. In the CTA
+    // row the modal stays short enough for the board at 4x.
+    ctas: [
+      { id: 'pause-end', text: 'End battle', mod: 'destructive', onClick: function () { confirmEnd(); } },
+      { id: 'pause-rematch', text: 'Rematch', mod: 'secondary', icon: 'icon-refresh-12', onClick: function () { if (initial) start(initial); } },
+      { id: 'pause-edit', text: 'Edit fleets', mod: 'secondary', icon: 'icon-edit', onClick: function () { toSetup(false); } },
+      { id: 'resume', text: 'Resume', mod: 'primary', icon: 'icon-chevron-right', onClick: function () { resume(); } },
+    ],
+  });
+  labelModal(pausedModal, 'paused-title', 'dialog');
+  // Resume reads like Start battle: the label, then the chevron.
+  $('resume').appendChild($('resume').querySelector('i'));
+
+  var deployModal = keptModal('deploy', { icon: 'icon-raid', title: 'Engagement' });
+  labelModal(deployModal, 'deploy-title', 'status');
+  deployModal.overlay.removeAttribute('aria-modal');
+
+  function resume() {
+    autoPaused = false;
+    if (host && !host.finished) host.start();
+    var p = $('pause');
+    if (p && p.offsetParent) p.focus(); else if ($('board')) $('board').focus();
+  }
+
+  /* End battle: a forfeit, so it asks first. A solo battle holds still while
+   * it asks, and picks up again on Cancel unless it was already paused; a
+   * live one runs on the host's clock for two people and does not stop. A
+   * watcher only leaves, which costs nothing, so it never asks. */
+  var endConfirm = null, endWasRunning = false;
+  function closeEndConfirm() { if (endConfirm) { endConfirm.close(); endConfirm = null; } }
+  function confirmEnd() {
+    if (!host || host.finished || deploying || endConfirm) return;
+    var live = social.isLive();
+    var s = host.summary() || {};
+    var standing = (s.standing || {})[YOU.id], fielded = (s.fielded || {})[YOU.id];
+    var fact = ['Counts as a forfeit'];
+    if (fielded) fact.push((standing || 0) + '/' + fielded + ' standing');
+    endWasRunning = !live && host.running;
+    endConfirm = window.SUIParts.modal({
+      icon: 'icon-attention', title: 'End battle', body: [el('span', fact.join(' · '))],
+      ctas: [
+        { id: 'end-cancel', text: 'Cancel', mod: 'secondary' },
+        { id: 'end-confirm', text: 'End battle', mod: 'destructive', onClick: function () {
+          closeEndConfirm();
+          if (host && !host.finished) host.forfeit();
+          renderPaused();
+        } },
+      ],
+      variant: 'scrim', className: 'sim-scrim', parent: $('sim-layer'),
+      onCancel: function () {
+        closeEndConfirm();
+        if (endWasRunning && host && !host.finished) host.start();
+        renderPaused();
+      },
+    });
+    labelModal(endConfirm, 'end-title', 'alertdialog');
+    if (endWasRunning) host.stop();
+    renderPaused();
+    $('end-cancel').focus({ preventScroll: true });
+  }
+
+  /* The battle's charge as the game draws it: five chunks lit by the game's
+   * ChargeCalculator thresholds (StructsPlayerCard.chargeLevel when loaded). */
+  var CHARGE_STEPS = [0, 1, 2, 3, 5, 8];
+  function chargeLevel(charge) {
+    var P = window.StructsPlayerCard;
+    if (P && P.chargeLevel) return P.chargeLevel(charge);
+    var c = Number(charge);
+    if (!isFinite(c)) return 0;
+    for (var i = 0; i < CHARGE_STEPS.length; i++) if (c <= CHARGE_STEPS[i]) return i;
+    return CHARGE_STEPS.length - 1;
+  }
+  function paintBattery(box, charge) {
+    var lvl = chargeLevel(charge), chunks = [];
+    for (var i = 1; i < CHARGE_STEPS.length; i++) chunks.push(el('div', null, 'sui-battery-chunk' + (i <= lvl ? ' sui-mod-filled' : '')));
+    box.replaceChildren.apply(box, chunks);
+    box.title = charge + ' charge';
+    box.setAttribute('aria-label', box.title);
+  }
+
   /* Deploy: the matchup, a 3·2·1, then the first block. */
   function deploy(config) {
     deploying = true;
     document.body.classList.add('sim-deploying');
+    renderTools();
     var mine = config.units.filter(function (u) { return u.side === 'player'; }).length;
     var theirs = config.units.length - mine;
-    $('deploy-you').textContent = mine + ' structs · ' + config.charge.player + ' charge';
-    document.querySelector('#deploy .sim-side-cpu .sim-cpu').textContent = social.opponentName() || 'Computer';
-    $('deploy-cpu').textContent = theirs + ' structs · ' + config.charge.computer + ' charge';
+    $('deploy-you').textContent = String(mine);
+    $('deploy-cpu-name').textContent = social.opponentName() || 'Computer';
+    $('deploy-cpu').textContent = String(theirs);
+    paintBattery($('deploy-charge-you'), config.charge.player);
+    paintBattery($('deploy-charge-cpu'), config.charge.computer);
     renderReach($('deploy-reach-you'), 'player', config.units);
     renderReach($('deploy-reach-cpu'), 'computer', config.units);
     var left = COUNTDOWN;
@@ -573,52 +900,104 @@
       $('deploy').classList.add('hidden');
       deploying = false;
       document.body.classList.remove('sim-deploying');
+      renderTools();
       if (host) host.start();
     }, 1000);
   }
 
+  /* The battle's status, in the nav: its states as badges (live, the
+   * challenge, the line to the other side, the computer's level), then the
+   * settings as hint text. The row never wraps; what does not fit is left
+   * out from the end, least important first. */
+  function badge(text, mod) { var b = window.SUIParts.badge(text, mod); b.title = text; return b; }
+  function hint(text) { var h = el('span', text, 'sui-text-label sui-text-hint'); h.title = text; return h; }
   function renderBattleBar() {
     if (!host) return;
     var cfg = initial;
-    var chips = $('chips'); chips.replaceChildren();
-    [cap(cfg.difficulty), BLOCK_TIMES.filter(function (b) { return b.ms === settings.blockMs; }).map(function (b) { return b.name; })[0] || (settings.blockMs / 1000 + ' s')]
-      .forEach(function (text) { chips.appendChild(el('span', text, 'sim-chip sui-text-label')); });
-    if (social.matches(cfg)) {
-      chips.insertBefore(el('span', social.battleName(), 'sim-chip sim-tag sui-text-label'), chips.firstChild);
-      var lad = (social.view() && social.view().ladder) || [];
-      if (lad[0]) chips.appendChild(el('span', 'best ' + lad[0].outcome.time, 'sui-text-label sui-text-hint'));
-    }
-    if (social.isLive()) {
-      chips.insertBefore(el('span', 'Live', 'sim-chip sim-live-chip sui-text-label'), chips.firstChild);
+    var live = social.isLive();
+    var items = [];
+    if (live) items.push(badge('Live', 'destructive'));
+    if (social.matches(cfg)) items.push(badge(social.battleName(), 'default'));
+    if (live) {
       var conn = social.connection();
-      if (conn) chips.appendChild(el('span', conn.text, 'sui-text-label sim-conn sim-conn-' + conn.state));
+      if (conn) items.push(badge(conn.text, conn.state === 'bad' ? 'destructive' : conn.state === 'warn' ? 'warning' : 'default'));
     }
-    var standing = host.standing(), fielded = host.fielded;
-    var st = $('standing'); st.replaceChildren(
-      el('span', standing[YOU.id] + '/' + fielded[YOU.id], 'sim-you'), el('span', ' · ', 'sui-text-hint'),
-      el('span', standing[CPU.id] + '/' + fielded[CPU.id], 'sim-cpu'));
-    st.title = 'Structs standing';
     var f = host.finished;
     var block = host.chain.height - startHeight;
-    $('phase').textContent = deploying ? 'Deploying' : f ? 'Battle over' : host.running ? 'Block ' + block
-      : social.isLive() ? 'Waiting · block ' + block : 'Paused · block ' + block;
-    $('pause').querySelector('span').textContent = host.running || deploying ? 'Pause' : 'Resume';
-    $('pause').classList.toggle('hidden', !!f);
-    $('end').classList.toggle('hidden', !!f);
-    $('to-debrief').classList.toggle('hidden', !f);
+    var phase = badge(deploying ? 'Deploying' : f ? 'Battle over' : host.running ? 'Block ' + block
+      : live ? 'Waiting · block ' + block : 'Paused · block ' + block, 'default');
+    phase.id = 'sim-phase';
+    items.push(phase);
+    // The computer's level means nothing with a person on the other side.
+    if (!live) items.push(badge(cap(cfg.difficulty), cfg.difficulty === 'hard' ? 'warning' : 'default'));
+    items.push(hint(BLOCK_TIMES.filter(function (b) { return b.ms === settings.blockMs; }).map(function (b) { return b.name; })[0] || (settings.blockMs / 1000 + ' s')));
+    if (social.matches(cfg)) {
+      var lad = (social.view() && social.view().ladder) || [];
+      if (lad[0]) items.push(hint('best ' + lad[0].outcome.time));
+    }
+    var box = $('sim-status');
+    box.replaceChildren.apply(box, items);
+    fitStatus();
+    renderTools();
+    renderSteps();
     if (f && !debriefShown && !debriefTimer) {
       clearInterval(clockTimer);
       debriefTimer = setTimeout(function () { debriefTimer = null; showDebrief(); }, f.forfeit ? 0 : DEBRIEF_DELAY_MS);
     }
   }
+  /* Whole items or none: one cut in half reads as a different word. */
+  function fitStatus() {
+    var box = $('sim-status'), full = false;
+    Array.prototype.forEach.call(box.children, function (c) { c.style.display = ''; });
+    var room = box.clientWidth;
+    Array.prototype.forEach.call(box.children, function (c) {
+      if (full || c.offsetLeft - box.offsetLeft + c.offsetWidth > room) { full = true; c.style.display = 'none'; }
+    });
+  }
+
+  /* The foot holds every page action on one line. When it is short of room
+   * the iconed buttons fold to their icon (the stepper's square), the Share
+   * group first, then the fleets' tools; the label stays for a reader and in
+   * the button's title. Start and Send keep their words. */
+  var FOLDS = ['sim-fold-1', 'sim-fold-2'];
+  function fitFoot() {
+    var go = $('sim-go');
+    if (!go || !go.offsetWidth) return;
+    // Measured with Send at its full width, so it gives way only after the
+    // folds have.
+    go.classList.add('sim-go-measure');
+    FOLDS.forEach(function (c) { go.classList.remove(c); });
+    for (var i = 0; i < FOLDS.length && go.scrollWidth > go.clientWidth; i++) go.classList.add(FOLDS[i]);
+    go.classList.remove('sim-go-measure');
+  }
+
+  /* Pause and End/Leave, at the nav's right. A watcher only leaves; while
+   * the fleets deploy neither is open yet; a finished battle has neither. */
+  function renderTools() {
+    var f = host && host.finished;
+    var watch = social && social.liveRole() === 'watch';
+    document.body.classList.toggle('sim-watch', !!watch && document.body.dataset.screen === 'battle');
+    var end = $('end'), pause = $('pause');
+    var leave = watch ? 'Leave' : 'End battle';
+    end.title = leave; end.setAttribute('aria-label', leave);
+    pause.classList.toggle('hidden', !!f);
+    end.classList.toggle('hidden', !!f);
+    [pause, end].forEach(function (a) {
+      a.classList.toggle('sui-mod-disabled', deploying);
+      if (deploying) a.setAttribute('aria-disabled', 'true'); else a.removeAttribute('aria-disabled');
+    });
+  }
 
   var pausedShown = false;
   function renderPaused() {
-    var show = !!host && !host.running && !host.finished && !deploying && !social.isLive();
+    var held = !!host && !host.running && !host.finished && !deploying && !social.isLive();
+    // One modal at a time: the End confirm stands in for Paused while it asks.
+    var show = held && !endConfirm;
     $('paused').classList.toggle('hidden', !show);
+    document.body.classList.toggle('sim-paused', held);
     // The choices are rebuilt only as the menu opens: the clock ticks every
     // 250 ms and a rebuild under the pointer would swallow the click.
-    if (show && !pausedShown) renderBlockTime($('pause-block-time'));
+    if (show && !pausedShown) { renderBlockTime($('pause-block-time')); $('resume').focus({ preventScroll: true }); }
     pausedShown = show;
     if (show) $('paused-clock').textContent = format(host.elapsedMs());
   }
@@ -640,13 +1019,67 @@
 
   /* ── Debrief ───────────────────────────────────────────────────────────── */
 
+  /* The verdict as the game marks the end of a battle: its own VICTORY /
+   * DEFEAT banner (the webapp's Victory/DefeatBannerViewModel — an intro,
+   * then a loop), the one the Map Viewer has just played. A draw has no
+   * banner in the game, so it is the word led by the verdict glyph; so is
+   * every verdict when lottie is missing. #verdict stays the accessible text. */
+  var banner = null;
+  var VERDICT_GLYPH = { victory: 'icon-success', draw: 'icon-subtract', defeat: 'icon-alert' };
+  function dropBanner() {
+    if (banner) { try { banner.destroy(); } catch (e) { /* already gone */ } banner = null; }
+    var box = $('verdict-banner');
+    box.replaceChildren();
+    box.classList.add('hidden');
+  }
+  function verdictWord(verdict, hidden) {
+    var v = $('verdict');
+    var C = window.StructsSimCard;
+    var glyph = C && C.verdictGlyph ? C.verdictGlyph({ winner: verdict === 'victory' ? 'player' : verdict === 'draw' ? 'draw' : 'computer' }) : VERDICT_GLYPH[verdict];
+    var i = el('i', null, 'sui-icon sui-icon-md ' + glyph);
+    i.setAttribute('aria-hidden', 'true');
+    v.replaceChildren(i, document.createTextNode(cap(verdict)));
+    v.className = 'sui-text-display sim-huge sim-verdict-word ' + verdict + (hidden ? ' sim-sr' : '');
+  }
+  function showVerdict(verdict) {
+    dropBanner();
+    var L = window.lottie;
+    var art = verdict !== 'draw' && L && typeof L.loadAnimation === 'function';
+    verdictWord(verdict, art);
+    if (!art) return;
+    var box = $('verdict-banner');
+    box.classList.remove('hidden');
+    try {
+      var b = banner = L.loadAnimation({ container: box, renderer: 'svg', loop: false, autoplay: false, path: 'lottie/' + verdict + '-banner/data.json' });
+      b.addEventListener('DOMLoaded', function () {
+        if (banner !== b) return;
+        b.playSegments([0, 45], true);
+        b.loop = true;
+        b.playSegments([45, 96], false);
+      });
+      b.addEventListener('data_failed', function () { if (banner === b) { dropBanner(); verdictWord(verdict, false); } });
+    } catch (e) { dropBanner(); verdictWord(verdict, false); }
+  }
+
+  /* One primary on the debrief: Rematch; Share when there is no Rematch (a
+   * live guest or a watcher); the post strip's Send when the run is
+   * addressed to someone (simulator-social.js says so through sendPrimary). */
+  var sendIsPrimary = false;
+  function rankDebrief() {
+    var noRematch = $('db-rematch').classList.contains('hidden');
+    var rematch = !noRematch && !sendIsPrimary, share = noRematch && !sendIsPrimary;
+    $('db-rematch').classList.toggle('sui-mod-primary', rematch);
+    $('db-rematch').classList.toggle('sui-mod-secondary', !rematch);
+    $('db-code').classList.toggle('sui-mod-primary', share);
+    $('db-code').classList.toggle('sui-mod-secondary', !share);
+  }
+
   function showDebrief() {
     if (!host || !host.finished) return;
     debriefShown = true;
     var s = host.summary(), f = s.finished;
     var verdict = f.winner === 'you' ? 'victory' : f.winner === 'cpu' ? 'defeat' : 'draw';
-    $('verdict').textContent = cap(verdict);
-    $('verdict').className = 'sui-text-display sim-huge ' + verdict;
+    showVerdict(verdict);
     var them = social.opponentName();
     var themTitle = them ? them : 'Computer';
     document.querySelector('.sim-tally-h .sim-cpu').textContent = themTitle;
@@ -659,40 +1092,53 @@
       : f.stalemate === 'moves' ? 'Stalemate · ' + Host.QUIET_MOVES + ' command ship moves without a hit'
       : 'Both command ships destroyed';
     var blocks = Math.max(0, f.height - startHeight);
-    $('debrief-meta').textContent = [format(s.elapsedMs), blocks + (blocks === 1 ? ' block' : ' blocks'), initial.difficulty, initial.seed].join(' · ');
+    var liveRole = social.liveRole();
+    // The round as the rest of the app names it: the computer's level (not
+    // with a person on the other side), then the challenge or the seed.
+    $('debrief-meta').textContent = [format(s.elapsedMs), blocks + (blocks === 1 ? ' block' : ' blocks'),
+      liveRole ? null : cap(initial.difficulty), social.isChallenge() ? social.battleName() : cap(initial.seed)]
+      .filter(Boolean).join(' · ');
 
+    // Each tally led by the app's stat glyph (structs-achievements.js).
     var rows = [
-      ['Structs lost', s.lost[YOU.id], s.lost[CPU.id]],
-      ['Attacks', s.stats[YOU.id].attacks, s.stats[CPU.id].attacks],
-      ['Damage dealt', s.stats[YOU.id].damage, s.stats[CPU.id].damage],
-      ['Shots evaded', s.stats[YOU.id].evaded, s.stats[CPU.id].evaded],
-      ['Blocked by defenders', s.stats[YOU.id].blocked, s.stats[CPU.id].blocked],
-      ['Counter damage', s.stats[YOU.id].countered, s.stats[CPU.id].countered],
+      ['Structs lost', 'icon-wreckage', s.lost[YOU.id], s.lost[CPU.id]],
+      ['Attacks', 'sui-icon-attacker', s.stats[YOU.id].attacks, s.stats[CPU.id].attacks],
+      ['Damage dealt', 'icon-dmg', s.stats[YOU.id].damage, s.stats[CPU.id].damage],
+      ['Shots evaded', 'sui-icon-deflector-shield', s.stats[YOU.id].evaded, s.stats[CPU.id].evaded],
+      ['Blocked by defenders', 'sui-icon-defender-block', s.stats[YOU.id].blocked, s.stats[CPU.id].blocked],
+      ['Counter damage', 'icon-counter', s.stats[YOU.id].countered, s.stats[CPU.id].countered],
     ];
     $('tallies').replaceChildren.apply($('tallies'), rows.map(function (r) {
-      var row = el('div', null, 'sim-tally');
-      row.append(el('span', r[0]), el('span', String(r[1]), 'sui-text-label'), el('span', String(r[2]), 'sui-text-label'));
+      var row = el('div', null, 'sui-data-card-row sim-tally');
+      var label = el('span', null, 'sim-tally-l');
+      var glyph = el('i', null, r[1] ? 'sui-icon sui-icon-sm ' + r[1] : 'sim-tally-i');
+      glyph.setAttribute('aria-hidden', 'true');
+      label.append(glyph, el('span', r[0]));
+      row.append(label, el('span', String(r[2]), 'sui-text-label'), el('span', String(r[3]), 'sui-text-label'));
       return row;
     }));
 
+    // The Map Viewer log's row language: the block in hint, the side's glyph
+    // and name in its colour, then what happened.
     var moments = $('moments'); moments.replaceChildren();
     turningPoints(s.kills).forEach(function (m) {
+      var side = m.mine ? 'sim-you' : 'sim-cpu';
       var row = el('div', null, 'sim-moment');
-      row.appendChild(el('span', 'B' + m.block, 'sui-text-label'));
-      var text = el('span');
-      text.append(el('span', m.who, m.mine ? 'sim-you' : 'sim-cpu'), el('span', m.what, 'sui-text-hint'));
-      row.appendChild(text);
+      var glyph = icon(m.countered ? 'counter' : 'wreckage', 'sm');
+      glyph.classList.add(side);
+      row.append(el('span', 'Block ' + m.block, 'sui-text-hint sim-moment-t'), glyph, el('span', m.who, side), el('span', m.what, 'sui-text-hint'));
       moments.appendChild(row);
     });
-    if (!moments.children.length) moments.appendChild(el('div', 'No structs destroyed', 'sim-moment sui-text-hint'));
+    if (!moments.children.length) moments.appendChild(el('div', 'No structs destroyed', 'sim-moment sim-moment-none sui-text-hint'));
 
     var next = LEVELS[LEVELS.indexOf(initial.difficulty) + 1];
-    var liveRole = social.liveRole();
     $('db-edit').classList.toggle('hidden', !!liveRole);
     $('db-swap').classList.toggle('hidden', !!liveRole);
     $('db-rematch').classList.toggle('hidden', liveRole === 'guest' || liveRole === 'watch');
     $('db-harder').classList.toggle('hidden', !next || !!liveRole);
-    if (next) { $('db-harder').textContent = 'Harder'; $('db-harder').title = 'Rematch against a ' + cap(next) + ' opponent'; }
+    if (next) { $('db-harder').querySelector('span').textContent = 'Harder'; $('db-harder').title = 'Rematch against a ' + cap(next) + ' opponent'; }
+    sendIsPrimary = false;
+    rankDebrief();
     setScreen('debrief');
     var code = resultCode();
     if (code) social.debrief(initial, code);
@@ -735,6 +1181,7 @@
         block: k.height - startHeight,
         who: k.by_type || target.charAt(0).toUpperCase() + target.slice(1),
         mine: k.by_type ? k.by_owner === YOU.id : !lostYours,
+        countered: !!k.countered,
         what: !k.by_type ? 'lost' : (k === kills[0] && !k.command ? 'first kill · ' + verb + target : verb + target),
       };
     });
@@ -777,15 +1224,35 @@
     try { copyText((line ? line + ' — ' : '') + battleLink(config) + '/' + result, 'Result copied.', 'Share result'); }
     catch (e) { message('This battle cannot be shared: ' + e.message + '.'); }
   }
+  /* Paste a battle link, or — when the clipboard refused — the link to copy
+   * by hand: the game's system modal around one SUI text field. The field is
+   * built once; the modal is built when it opens and gone when it closes. */
+  var codeInput = el('input');
+  codeInput.type = 'text'; codeInput.id = 'layout-code';
+  codeInput.autocomplete = 'off'; codeInput.spellcheck = false;
+  var codeField = window.SUIParts.field('Battle link', codeInput);
+  var codeModal = null, codeSharing = false;
+  codeInput.addEventListener('keydown', function (e) { if (e.key === 'Enter' && !codeSharing) { e.preventDefault(); loadCode(); } });
   function openCode(text, title) {
-    $('layout-code').value = text || '';
-    $('code-load').classList.toggle('hidden', !!text);
-    $('code-title').textContent = title || (text ? 'Share' : 'Paste a battle link');
-    $('code-dialog').classList.remove('hidden');
-    $('layout-code').focus();
-    if (text) $('layout-code').select();
+    closeCode();
+    codeSharing = !!text;
+    codeInput.value = text || '';
+    codeModal = window.SUIParts.modal({
+      icon: text ? 'icon-link-out' : 'icon-incoming',
+      title: title || (text ? 'Share' : 'Paste a battle link'),
+      body: [codeField],
+      ctas: text ? [{ text: 'Close', mod: 'secondary' }]
+        : [{ text: 'Cancel', mod: 'secondary' }, { id: 'code-load', text: 'Load battle', mod: 'primary', onClick: loadCode }],
+      className: 'sim-dialog', parent: $('menu-page-layout'), onCancel: closeCode,
+    });
+    var ov = codeModal.overlay, h = ov.querySelector('.sp-modal-body > h2');
+    ov.id = 'code-dialog';
+    ov.setAttribute('role', 'dialog'); ov.setAttribute('aria-modal', 'true');
+    if (h) { h.id = 'code-title'; ov.setAttribute('aria-labelledby', 'code-title'); }
+    codeInput.focus();
+    if (text) codeInput.select();
   }
-  function closeCode() { $('code-dialog').classList.add('hidden'); }
+  function closeCode() { var m = codeModal; codeModal = null; if (m) m.close(); }
   /* Whatever was pasted → a version-3 config, or an error saying why not. */
   function parsePasted(text) {
     if (text.length > 20000) throw Error('That is too long to be a battle.');
@@ -802,7 +1269,7 @@
   }
   function loadCode() {
     try {
-      applyConfig(parsePasted($('layout-code').value.trim()));
+      applyConfig(parsePasted(codeInput.value.trim()));
       closeCode();
       message('Battle loaded.');
     } catch (e) { message(e.message); }
@@ -839,6 +1306,30 @@
     } catch (e) { message(e.message); return false; }
   }
 
+  /* The Map Viewer's own Comms rail, beside the battle (raidview-comms.js in
+   * sim mode): the room the simulator gives it — a live battle's, or the
+   * challenge's thread (simulator-social.js `talk`) — and its reads and sends
+   * for that room alone. `undefined` is "not a Comms command". */
+  function commsInvoke(cmd, args) {
+    var T = window.__TAURI__;
+    if (cmd === 'matrix_state' || cmd === 'mcp_inventory') {
+      if (!T || !T.core) throw new Error('Comms is not reachable from here');
+      return T.core.invoke(cmd, cmd === 'mcp_inventory' ? { player: 'primary' } : {});
+    }
+    if (cmd !== 'sim_comms_room' && cmd !== 'matrix_timeline' && cmd !== 'matrix_send') return undefined;
+    var t = social.talk();
+    if (cmd === 'sim_comms_room') return t ? t.room : null;
+    if (!t || !args || args.roomId !== t.room.room_id) throw new Error('That is not this battle\u2019s room.');
+    return cmd === 'matrix_timeline' ? t.timeline() : t.send(String(args.body || ''), args.msgtype || null);
+  }
+  function toFrame(name, payload) {
+    if (host && host.post) host.post({ structs: 'bridge', kind: 'event', name: name, payload: payload });
+  }
+  (function () {
+    var T = window.__TAURI__;
+    if (T && T.event && T.event.listen) T.event.listen('matrix::state', function (e) { toFrame('matrix::state', e && e.payload); });
+  })();
+
   /* ── Wiring ────────────────────────────────────────────────────────────── */
 
   social = window.SimSocial({
@@ -854,6 +1345,10 @@
       return c;
     },
     summary: function () { return host ? host.summary() : {}; },
+    /* The post strip's Send is the debrief's one primary while it waits (P7). */
+    sendPrimary: function (on) { sendIsPrimary = !!on; rankDebrief(); },
+    /* Something new was said where the rail is listening: it re-reads. */
+    talkChanged: function (roomId, messages) { toFrame('matrix::timeline', { room_id: roomId, messages: messages || [{ self: false }] }); },
     /* The guest is gone or gave up: the host's side wins. */
     concede: function (gone) {
       if (!host || host.finished) return;
@@ -876,8 +1371,7 @@
   function loadLayout() { draft = layout(settings.preset, $('seed').value); selectDefault(); renderRound(); renderSetup(); }
 
   $('start').addEventListener('click', function () { if (social.onStart()) return; start(); });
-  $('ai-down').addEventListener('click', function () { settings.difficulty = LEVELS[Math.max(0, LEVELS.indexOf(settings.difficulty) - 1)]; renderRound(); });
-  $('ai-up').addEventListener('click', function () { settings.difficulty = LEVELS[Math.min(LEVELS.length - 1, LEVELS.indexOf(settings.difficulty) + 1)]; renderRound(); });
+  $('ai-level').addEventListener('change', function () { settings.difficulty = $('ai-level').value; renderRound(); });
   $('reseed').addEventListener('click', function () {
     $('seed').value = Math.random().toString(36).slice(2, 10);
     if (settings.preset === 'random') loadLayout();
@@ -893,20 +1387,27 @@
     settings.charge = { player: settings.charge.computer, computer: settings.charge.player };
     selectDefault(); renderRound(); renderSetup();
   });
-  $('defend-cancel').addEventListener('click', function () { picking = null; renderSetup(); });
   $('export').addEventListener('click', function () { copyLink(currentConfig()); });
   $('import').addEventListener('click', function () { openCode(''); });
-  $('code-close').addEventListener('click', closeCode);
-  $('code-load').addEventListener('click', loadCode);
 
-  $('pause').addEventListener('click', function () { if (!host || host.finished || deploying) return; autoPaused = false; if (host.running) host.stop(); else host.start(); });
-  $('resume').addEventListener('click', function () { autoPaused = false; if (host && !host.finished) host.start(); });
-  $('restart').addEventListener('click', function () { if (initial) start(initial); });
-  $('pause-rematch').addEventListener('click', function () { if (initial) start(initial); });
-  $('pause-edit').addEventListener('click', function () { toSetup(false); });
-  $('end').addEventListener('click', function () { if (host) host.forfeit(); });
-  $('pause-end').addEventListener('click', function () { if (host) host.forfeit(); });
-  $('to-debrief').addEventListener('click', showDebrief);
+  $('pause').addEventListener('click', function () { if (!host || host.finished || deploying || !host.running) return; autoPaused = false; host.stop(); });
+  // Resume and the Paused card's End battle are the modal's own CTAs (P7).
+  $('end').addEventListener('click', function () {
+    if (deploying) return;
+    if (social.liveRole() === 'watch') { social.leave(); toSetup(true); return; }
+    confirmEnd();
+  });
+  document.querySelectorAll('#sim-steps [data-step]').forEach(function (a) {
+    a.addEventListener('click', function () { if (stepOpen(a.dataset.step)) STEP_GO[a.dataset.step](); });
+  });
+  if (window.ResizeObserver) new ResizeObserver(function () { placeBattle(); if (host) fitStatus(); fitFoot(); }).observe($('menu-page-panel'));
+  // What the foot holds changes with the round (checks, a challenge, a DM).
+  if (window.MutationObserver) new MutationObserver(function (recs) {
+    if (recs.some(function (r) { return r.target !== $('sim-go'); })) fitFoot();
+  }).observe($('sim-go'), { subtree: true, childList: true, characterData: true, attributes: true, attributeFilter: ['class'] });
+  // The defence web follows the board's tiles as the column resizes.
+  if (window.ResizeObserver) new ResizeObserver(function () { drawDefWeb(); }).observe($('arena'));
+  window.addEventListener('resize', function () { placeBattle(); if (host) fitStatus(); });
 
   $('db-rematch').addEventListener('click', function () { if (social.rematch()) return; start(initial); });
   $('db-edit').addEventListener('click', function () { toSetup(false); });
@@ -929,9 +1430,11 @@
 
   document.addEventListener('keydown', function (e) {
     if (e.key !== 'Escape') return;
-    if (!$('code-dialog').classList.contains('hidden')) closeCode();
-    else if (!$('post-dialog').classList.contains('hidden')) social.closePost();
-    else if (picking) { picking = null; renderSetup(); }
+    // An open dialog takes its own Escape (SUIParts.modal). Paused is kept
+    // in the page outside that stack: Escape resumes (P7).
+    if (!$('paused').classList.contains('hidden')) resume();
+    else if (picking) disarm();
+    else if (changing && document.body.dataset.screen === 'setup') { changing = false; renderSetup(); }
   });
   /* A hidden window holds the battle; coming back picks it up again. macOS
    * reports a window as hidden when another one covers it, not only when it
@@ -954,7 +1457,7 @@
   window.Simulator = {
     getHost: function () { return host; }, getLayout: function () { return draft; }, getSettings: function () { return settings; },
     layout: layout, validate: validate, readiness: readiness, start: start, toSetup: toSetup, showDebrief: showDebrief, openLink: openLink,
-    takeContext: function () { return social.take(); }, social: social, runResult: runResult,
+    takeContext: function () { return social.take(); }, social: social, runResult: runResult, comms: commsInvoke,
   };
   setScreen('setup');
   loadLayout();

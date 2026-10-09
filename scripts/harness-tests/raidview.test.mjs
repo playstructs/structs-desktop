@@ -115,6 +115,19 @@ const S = RV._state;
   check('…and releasing hides it', !tip.parentElement);
 }
 
+// ── The HUD outside the simulator ───────────────────────────────────────────
+// The simulator's standing resources live in the same status bars; a real
+// planet keeps its shield and ore there and never sees them.
+{
+  const d = w.document;
+  const id = (x) => d.getElementById(x);
+  check('outside the simulator the enemy status bar keeps the planet\'s shield and ore',
+    !hidesElement(id('rv-hud-tr')) && !hidesElement(id('rv-shield-res')) && !hidesElement(id('rv-ore-res')));
+  check('…and the standing resources stay hidden and empty',
+    hidesElement(id('rv-sim-you')) && hidesElement(id('rv-sim-them'))
+      && id('rv-sim-you-n').textContent === '' && id('rv-sim-them-n').textContent === '');
+}
+
 // ── Badges ──────────────────────────────────────────────────────────────────
 check('offline struct wears the game\'s energy-deactivated badge',
   RV._badgesFor(S.structsById['5-4']).includes('sui-icon-energy-deactivated'));

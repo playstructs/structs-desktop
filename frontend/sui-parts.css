@@ -1,0 +1,73 @@
+/* SUI parts (sui-parts.js) — the few rules SUI's own markup needs to work
+   outside the game's page shell. Tokens only. */
+
+/* Radio result rows: radio | label | trailing node, on SUI's result row.
+   A grid rather than SUI's wrapping flex, so a long caption wraps inside its
+   own column instead of dropping the trailing node to a second line. */
+.sp-choice {
+  display: grid;
+  grid-template-columns: var(--form-input-height-total) minmax(0, 1fr) auto;
+  align-items: center;
+  gap: var(--spacing-md);
+  text-align: left;
+  cursor: pointer;
+}
+.sp-choice .sui-radio-container { width: var(--form-input-height-total); }
+.sp-choice[aria-disabled="true"] { cursor: default; }
+/* SUI's `.sui-radio:disabled ~ label`, for a caption that is not the radio's
+   sibling. */
+.sp-choice[aria-disabled="true"] .sui-text-label { color: var(--accent-disabled); }
+/* The radio itself is an invisible input over the sprite, so its focus has to
+   be drawn on the sprite. */
+.sui-radio:focus-visible ~ .sui-radio-display {
+  outline: var(--spacing-xs) solid var(--accent-primary-active);
+  outline-offset: var(--spacing-xs);
+}
+
+/* Compact radio rows (opt-in: `.sp-compact` on the list radioRows returns).
+   The sprite keeps its native 40px; only its transparent 4px margin is let
+   out of the row, so the row is the 32px octagon plus the row's rule. For a
+   dense card column (the simulator's Round card) — SUI's own rows, trimmed. */
+.sp-compact > .sp-choice {
+  grid-template-columns: var(--icon-lg) minmax(0, 1fr) auto;
+  gap: var(--spacing-sm);
+  padding: 0 var(--spacing-sm) 0 var(--spacing-xs);
+}
+.sp-compact .sui-radio-container { width: var(--icon-lg); height: var(--icon-lg); }
+.sp-compact .sui-radio { width: 100%; height: 100%; }
+.sp-compact .sui-radio-display { top: calc(-1 * var(--spacing-sm)); left: calc(-1 * var(--spacing-sm)); }
+.sp-compact .sui-resource { min-height: 0; }
+/* ...two up (`.sp-tiles`): the trailing node goes under the caption, and the
+   rows share their rules as SUI's result table does. */
+.sp-compact.sp-tiles { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.sp-tiles > .sp-choice { grid-template-columns: var(--icon-lg) minmax(0, 1fr); row-gap: 0; align-content: center; }
+.sp-tiles > .sp-choice > .sui-radio-container { grid-row: 1 / span 2; }
+.sp-tiles > .sp-choice > :nth-child(3) { grid-column: 2; justify-self: start; }
+.sp-tiles > .sp-choice:nth-child(2n) { border-left: 0 none; }
+
+/* System modal body: the title and the body nodes, stacked. */
+.sp-modal-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-xl);
+  width: 100%;
+  min-width: 0;
+  text-align: left;
+}
+.sp-modal-body > h2 { margin: 0; }
+/* The modal inside a positioned parent rather than over the viewport. */
+.sp-scrim { position: absolute; }
+
+/* SUI's inline-alert text hard-sets the body colour, so a severity modifier
+   tinted only the icon (SUI-DESIGN-SYSTEM-GUIDE §9.1). */
+.sui-message-inline-alert.sui-mod-warning .sui-message-inline-alert-text { color: var(--text-warning); }
+.sui-message-inline-alert.sui-mod-destructive .sui-message-inline-alert-text { color: var(--accent-destructive); }
+
+/* The stepper's number input is drawn to a FIXED content width (25px plus
+   SUI's side padding), like .sui-screen-battery: under a window's border-box
+   reset the padding eats the content box and the digits vanish. The game has
+   no reset, so the input gets the box model it was drawn in. */
+.sui-input-stepper input[type="number"] { box-sizing: content-box; }
+
+/* A field in a narrow column: SUI's field wrapper has a full-page min-width. */
+.sp-narrow label.sui-input-text { min-width: 0; }

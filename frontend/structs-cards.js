@@ -223,7 +223,7 @@
 
   /* d: { kind, title, tag, prefix, id, sub, subTitle, badge, state, theme,
    *      emblem (Node), emblemTitle, readings, extra:[Node], marks, chips:[Node],
-   *      foot (Node), attn, err }
+   *      foot (Node), attn, err, headIcon ('icon-…', before the title) }
    * opts: { doors, onClick, onEmblem, selectable, selected, onSelect } */
   function card(d, opts) {
     opts = opts || {};
@@ -248,6 +248,9 @@
     if (d.subTitle) idl.title = d.subTitle;
     title.appendChild(idl);
     lab.appendChild(title);
+    // Opt-in: the kind as a glyph before the title, as the game's raid card
+    // heads itself (PlanetCardComponent: icon-raid in the header label).
+    if (d.headIcon) lab.insertBefore(icon('sui-icon-md ' + d.headIcon), title);
     head.appendChild(lab);
     var bd = badge(d.badge);
     if (bd) head.appendChild(bd);

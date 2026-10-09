@@ -87,39 +87,13 @@
       var row = el('div', 'sui-result-row chat-room-row');
 
       var left = el('div', 'sui-result-row-left-section');
-      // Whether this is a PERSON is the server's classification, not something
-      // to infer from having a player id.
-      //
-      // `player_id` is only set when the other side's Matrix id parses as a
-      // player — so a direct message with a bot or a service account has none,
-      // and reading DM-ness off it rendered that room as a channel, complete
-      // with a member count, while Rust classified it 'direct' and notified it
-      // as a DM. `section` is what `dm_with` actually produces.
-      var isDm = r.section === 'direct';
+      // A person's portrait, SN Corp's mark or the room's glyph: drawn by
+      // StructsChatRow so every list of rooms draws a room one way. Whether
+      // this is a PERSON is the server's classification (`section`, what
+      // `dm_with` produces), not something to infer from having a player id —
+      // a direct message with a bot or a service account has none.
       var portrait = el('div', 'sui-result-row-portrait');
-      if (r.pfp_attrs || r.player_id || isDm) {
-        // A direct message IS a person — the same portrait the roster shows.
-        portrait.appendChild(pfpPortrait(r.pfp_attrs));
-      } else if (r.home_rank != null && r.default_pin) {
-        /* The Structs-wide channels carry SN Corp's own mark instead of the
-         * generic glyph: they are SN Corp's channels, on its homeserver, for
-         * every player. `img/logo-snc.gif` is the game's asset — the same one
-         * the signup flow shows while connecting to the corp. A room the
-         * PLAYER pinned keeps its own glyph: it is theirs, not the corp's.
-         *
-         * Straight into the portrait, which is exactly how the webapp's own
-         * Guild Directory renders a guild logo: `.sui-result-row-portrait img`
-         * is `width: 100%`, so it fills the 44px slot. */
-        var mark = document.createElement('img');
-        mark.className = 'chat-room-mark';
-        mark.src = 'img/logo-snc.gif';
-        mark.alt = '';
-        portrait.appendChild(mark);
-      } else {
-        var well = el('div', 'chat-room-icon');
-        well.appendChild(icon(r.system ? 'icon-computer' : (r.icon || 'icon-beacon'), 'sui-icon-md'));
-        portrait.appendChild(well);
-      }
+      portrait.appendChild(window.StructsChatRow.roomMark(r, { pfpPortrait: pfpPortrait, icon: icon }));
       left.appendChild(portrait);
 
       var info = el('div', 'sui-result-row-player-info');
@@ -134,25 +108,11 @@
       // Browsing adds where it lives and what it is for: the directory spans
       // every guild's homeserver, so "which server" is part of choosing.
       var sub;
+      var said = window.StructsChatRow.roomSub(r, { fmtCount: fmtCount });
       if (r.player_id) {
-        sub = el('span', 'sui-text-hint',
-          (r.tag ? '[' + r.tag + '] ' : '') + 'PID #' + r.player_id);
+        sub = el('span', 'sui-text-hint', said);
       } else {
-        var parts = r.invited
-          // An invitation has no member count worth showing — you cannot see
-          // the room yet. Who asked is the whole basis for deciding.
-          ? [r.invited_by ? 'Invited by ' + r.invited_by : 'You have been invited']
-          // "2 Players" under a direct message is a count of a conversation,
-          // which is not a fact anybody wants. A DM with no player behind it
-          // simply says nothing rather than pretending to be a channel.
-          : isDm
-            ? []
-            /* A count the server has not given reads as 0 — and "0 Players"
-             * under a room with people in it is a false fact. Absence is not
-             * zero: no count, no line. */
-            : Number(r.members) > 0
-              ? [fmtCount(r.members) + (Number(r.members) === 1 ? ' Player' : ' Players')]
-              : [];
+        var parts = said ? [said] : [];
         if (browsing) {
           // The ADDRESS — the one thing about a room that cannot be taken.
           // Anyone may publish a public room under any name, so two rows here

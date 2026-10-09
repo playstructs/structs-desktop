@@ -528,125 +528,12 @@
     });
   }
   // ── Native SUI form controls ─────────────────────────────────────────────
-  // The game's own checkbox/stepper/select markup, so config surfaces look like
-  // the rest of the client instead of raw browser widgets. Each returns a node
-  // and calls `onChange(value)`; none of them hold state.
-  function checkbox(checked, labelText, onChange) {
-    // A DIV, matching SUI's documented markup. It must not be a <span>:
-    // `label.sui-input-text span` (sui.css:1974) styles *any* span inside the
-    // field wrapper as the field's label — a span container was inheriting
-    // display:flex and a 32px min-height and blowing the control out to ~106px.
-    var c = el('div', 'sui-checkbox-container');
-    var box = el('input', 'sui-checkbox');
-    box.type = 'checkbox';
-    box.checked = !!checked;
-    var disp = el('span', 'sui-checkbox-display');
-    var lab = el('label');
-    if (labelText != null) lab.appendChild(document.createTextNode(String(labelText)));
-    if (labelText != null) c.classList.add('has-label');
-    box.addEventListener('change', function () { onChange(box.checked); });
-    // These often sit inside a row that opens an editor on click; toggling the
-    // switch must not also open it.
-    c.addEventListener('click', function (e) { e.stopPropagation(); });
-    // The display is a sibling styled by `:checked ~ .sui-checkbox-display`, so
-    // the input must come first and the label last.
-    c.appendChild(box); c.appendChild(disp); c.appendChild(lab);
-    return c;
-  }
-  // Numeric stepper. `opts`: {min,max,step,width}.
-  //
-  // Markup follows SUI's contract exactly — `sui-screen-btn sui-mod-secondary`
-  // buttons carrying icon-subtract / icon-add, and the buttons as the input's
-  // literal previous/next siblings, because that is how SUIInputStepper finds
-  // them. We wire the behaviour ourselves rather than using that module: it
-  // binds each input once during autoInitAll, and every stepper on this board
-  // is created long after page load. Disabling the buttons at min/max is the
-  // one thing it does that we'd otherwise lose, so it's reproduced here.
-  function stepper(value, opts, onChange) {
-    opts = opts || {};
-    var w = el('span', 'sui-input-stepper');
-    var input = el('input');
-    input.type = 'number';
-    input.value = value == null ? '' : value;
-    if (opts.min != null) input.min = opts.min;
-    if (opts.max != null) input.max = opts.max;
-    input.step = opts.step == null ? 1 : opts.step;
-    if (opts.width) input.style.width = opts.width;
-
-    function stepBtn(iconName) {
-      var b = el('button', 'sui-screen-btn sui-mod-secondary');
-      b.type = 'button';
-      b.appendChild(el('i', 'sui-icon sui-icon-md ' + iconName));
-      return b;
-    }
-    var down = stepBtn('icon-subtract');
-    var up = stepBtn('icon-add');
-
-    function syncDisabled() {
-      var n = Number(input.value);
-      down.disabled = opts.min != null && !isNaN(n) && n <= Number(opts.min);
-      up.disabled = opts.max != null && !isNaN(n) && n >= Number(opts.max);
-    }
-    function commit(v) {
-      var n = Number(v);
-      if (isNaN(n)) return;
-      if (opts.min != null) n = Math.max(opts.min, n);
-      if (opts.max != null) n = Math.min(opts.max, n);
-      // Float steps accumulate noise (0.1+0.2); round to the step's precision.
-      var dp = String(input.step).indexOf('.') >= 0 ? String(input.step).split('.')[1].length : 0;
-      n = Number(n.toFixed(dp));
-      input.value = n;
-      syncDisabled();
-      onChange(n);
-    }
-    down.addEventListener('click', function () { commit((Number(input.value) || 0) - Number(input.step || 1)); });
-    up.addEventListener('click', function () { commit((Number(input.value) || 0) + Number(input.step || 1)); });
-    input.addEventListener('change', function () { commit(input.value); });
-
-    w.appendChild(down); w.appendChild(input); w.appendChild(up);
-    syncDisabled();
-    return w;
-  }
-  // SUI styles the BARE `select` element (sui.css:1937) — no class. A
-  // `.sui-input-text` class here would style nothing; the label wrapper from
-  // field() is what carries that class.
-  function selectBox(value, options, onChange) {
-    var s = el('select');
-    // An entry may be a GROUP — `{ group: 'War', options: [...] }` — which
-    // becomes an <optgroup>. A list long enough to need one (the Terminal's
-    // card menu is forty-odd entries) is unreadable as a flat scroll.
-    function put(into, list) {
-      (list || []).forEach(function (o) {
-        if (o && o.group) {
-          var g = el('optgroup');
-          g.label = String(o.group);
-          put(g, o.options);
-          if (g.childNodes.length) into.appendChild(g);
-          return;
-        }
-        var val = (o && o.value != null) ? o.value : o;
-        var lbl = (o && o.label != null) ? o.label : o;
-        var op = el('option', null, String(lbl));
-        op.value = val;
-        if (val === value) op.selected = true;
-        into.appendChild(op);
-      });
-    }
-    put(s, options);
-    s.addEventListener('change', function () { onChange(s.value); });
-    return s;
-  }
-  // Likewise: SUI styles `label.sui-input-text input[type=text]`, a DESCENDANT
-  // selector, so the input must sit inside field()'s label wrapper and carries
-  // no class of its own.
-  function textBox(value, placeholder, onChange) {
-    var i = el('input');
-    i.type = 'text';
-    i.value = value == null ? '' : value;
-    if (placeholder) i.placeholder = placeholder;
-    i.addEventListener('change', function () { onChange(i.value); });
-    return i;
-  }
+  // The game's own checkbox/stepper/select/text markup, so config surfaces
+  // look like the rest of the client instead of raw browser widgets. The
+  // builders live in sui-parts.js (window.SUIParts), shared with the Battle
+  // Simulator; these names are kept because every page already calls them.
+  var SP = window.SUIParts;
+  var checkbox = SP.checkbox, stepper = SP.stepper, selectBox = SP.selectBox, textBox = SP.textBox;
   // A secondary nav strip — the same component as the board's own tab bar, so
   // a page that needs sub-sections reads as native rather than bespoke.
   // `items`: [{key,label}]. Returns a node; `onPick(key)` fires on click.
@@ -667,36 +554,10 @@
     wrap.appendChild(bar);
     return wrap;
   }
-  // One labelled control, built the way the game builds them: `label.sui-input-text`
-  // is SUI's universal field wrapper — its <span> labels a stepper, a select or
-  // even a nested checkbox, not just a text input (see the webapp's ScanViewModel).
-  //
-  // `hint` becomes a press-and-hold tooltip on a small secondary tip icon
-  // rather than a permanent grey line under the label — SUITooltip delegates
-  // from document.body, so this works on content rendered at any time. Each
-  // trigger needs its own id and a positioned parent, which the <span> provides.
-  var fieldSeq = 0;
-  // An empty `label` draws NO caption: a control whose own choices name it
-  // (the card picker reads "Commands", "Watch a player") does not need a word
-  // above it saying so. The caller gives the control an `aria-label` instead,
-  // so it is still named for anyone not looking at it.
+  // One labelled control: SUIParts.field, with this board's `cfg-field` layout
+  // (label beside its control in a settings list).
   function field(label, controlNode, hint) {
-    var wrap = el('label', 'sui-input-text cfg-field');
-    if (!label && !hint) { wrap.appendChild(controlNode); return wrap; }
-    var cap = el('span');
-    cap.appendChild(document.createTextNode(label));
-    if (hint) {
-      cap.appendChild(document.createTextNode(' '));
-      var tip = el('a', 'sui-text-secondary');
-      tip.id = 'cfg-tip-' + (++fieldSeq);
-      tip.href = 'javascript:void(0)';
-      tip.setAttribute('data-sui-tooltip', hint);
-      tip.appendChild(el('i', 'sui-icon icon-tip'));
-      cap.appendChild(tip);
-    }
-    wrap.appendChild(cap);
-    wrap.appendChild(controlNode);
-    return wrap;
+    return SP.field(label, controlNode, hint, { className: 'cfg-field' });
   }
 
   // ── Amount field ─────────────────────────────────────────────────────────
@@ -1146,49 +1007,19 @@
   }
 
   // ── Confirm dialog ──────────────────────────────────────────────────────
-  // SUI's system modal. Used for anything irreversible; `bodyNode` should
-  // spell out exactly what is about to happen, not just ask "are you sure".
+  // SUI's system modal (SUIParts.modal). Used for anything irreversible;
+  // `bodyNode` should spell out exactly what is about to happen, not just ask
+  // "are you sure". Returns the close function.
   function confirmModal(title, bodyNode, ctaLabel, onConfirm) {
-    var ov = el('div', 'sui-message-system-model-overlay ops-modal-overlay');
-    var modal = el('div', 'sui-message-system-modal');
-    var frame = el('div', 'sui-message-system-modal-frame');
-    var left = el('div', 'sui-message-system-modal-frame-left');
-    left.appendChild(el('div', 'sui-message-system-modal-frame-left-top'));
-    var mid = el('div', 'sui-message-system-modal-frame-left-middle');
-    mid.appendChild(el('i', iconClass('icon-attention', 'sui-icon-md')));
-    left.appendChild(mid);
-    left.appendChild(el('div', 'sui-message-system-modal-frame-left-bottom'));
-    frame.appendChild(left);
-
-    var center = el('div', 'sui-message-system-model-frame-center');
-    var stack = el('div');
-    stack.appendChild(el('div', 'sui-text-header', title));
-    if (bodyNode) stack.appendChild(bodyNode);
-    center.appendChild(stack);
-    frame.appendChild(center);
-    modal.appendChild(frame);
-
-    var cta = el('div', 'sui-message-system-modal-cta');
-    function close() { if (ov.parentNode) ov.parentNode.removeChild(ov); }
-    var cancelW = el('div', 'sui-message-system-modal-cta-btn-wrapper');
-    var cancel = el('a', 'sui-screen-btn sui-mod-secondary');
-    cancel.href = 'javascript:void(0)';
-    cancel.appendChild(el('span', null, 'Cancel'));
-    cancel.addEventListener('click', close);
-    cancelW.appendChild(cancel);
-    var goW = el('div', 'sui-message-system-modal-cta-btn-wrapper');
-    var go = el('a', 'sui-screen-btn sui-mod-destructive');
-    go.href = 'javascript:void(0)';
-    go.appendChild(el('span', null, ctaLabel || 'Confirm'));
-    go.addEventListener('click', function () { close(); onConfirm(); });
-    goW.appendChild(go);
-    cta.appendChild(cancelW); cta.appendChild(goW);
-    modal.appendChild(cta);
-
-    ov.appendChild(modal);
-    ov.addEventListener('click', function (e) { if (e.target === ov) close(); });
-    document.body.appendChild(ov);
-    return close;
+    var m = SP.modal({
+      icon: 'icon-attention', title: title, body: bodyNode ? [bodyNode] : [],
+      className: 'ops-modal-overlay',
+      ctas: [
+        { text: 'Cancel', mod: 'secondary', onClick: function () { m.close(); } },
+        { text: ctaLabel || 'Confirm', mod: 'destructive', onClick: function () { m.close(); onConfirm(); } },
+      ],
+    });
+    return m.close;
   }
 
   // ── Router ────────────────────────────────────────────────────────────────
