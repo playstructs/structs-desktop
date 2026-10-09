@@ -47,12 +47,21 @@ const BUDGET = {
   // +5 2026-10-08 SUI review: field values and the thread clock in SUI's content
   // face (DirectiveZero 8/12, the .sui-text-tiny metrics) where the parts default
   // to the chrome face, and the debrief Challenge panel's fixed basis.
-  'simulator.css': [0, 35],
+  // Lowered 2026-10-09 Command Deck (35 → 11): components moved to simdeck.css;
+  // what is left is the page's hairlines, its focus ring and its breakpoints.
+  // +2 2026-10-09 fit pass: container-query thresholds take no tokens — a
+  // narrow page (575), a short board (335) and a narrow side panel (175);
+  // the board's own size is computed from tokens, not queried.
+  'simulator.css': [0, 13],
   // Raised 2026-10-08 with challenges (+9): the thread rail's 340px, the
   // Post-to list's 320px cap and 600px card, and 2px focus/edge lines.
   'simulator-social.js': [0, 0],
   'simulator-rtc.js': [0, 0],
   'simulator-live.js': [0, 0],
+  // 2026-10-09 Command Deck kit: hairlines, cell/pip/chevron geometry and type
+  // line-heights; sizes are tokens or calc of tokens. The builders are DOM only.
+  'simdeck.js': [0, 0],
+  'simdeck.css': [0, 35],
   // Comms: the challenge card (simcard.*) and its timeline wiring. The
   // miniature board's px are the simulator's band geometry at chat scale.
   'simcard.js': [0, 0],
@@ -525,9 +534,11 @@ console.log('\n— type sizes are SUI roles');
 // twice the DirectiveZero face so the pixels stay whole (.gs-hero-v).
 // 32px is also the Battle Simulator's VICTORY/DEFEAT verdict and its deploy
 // countdown: the simulator is laid out at the game's 1x under the game's own
-// scaler (#menu-page-layout), so its titles are SUI's display face as is, and
-// the verdict is that face at exactly 4x ExtremeHazard's 8px design size.
-const TYPE_DEBT = { 'structs-config.js': ['15'], 'board.html': ['32'], 'simulator.css': ['32'] };
+// scaler (#menu-page-layout), so the verdict is exactly 4x ExtremeHazard's 8px
+// design size. Since 2026-10-09 (Command Deck) that 32 lives in simdeck.css —
+// the deck's d96 verdict/countdown and d64 numbers — and simulator.css has
+// none, so its own entry is struck.
+const TYPE_DEBT = { 'structs-config.js': ['15'], 'board.html': ['32'], 'simdeck.css': ['32'] };
 for (const file of windowFiles) {
   const src = readFileSync(root + '/frontend/' + file, 'utf8');
   const sizes = [

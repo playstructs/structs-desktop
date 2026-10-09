@@ -297,6 +297,25 @@ check('…with the production cheatsheet copy merged in', byName.Battleship.prim
   d.chain.submit('1-1', attack('5-3', '5-2'));
   d.block();
   check('…a landed hit restarts the clock', !d.finished && d.lastHurt === d.chain.height, 'lastHurt=' + d.lastHurt + ' height=' + d.chain.height);
+
+  // The debrief's top struct: a finished battle's per-struct tally adds up
+  // to each player's damage, and every credited kill is a struct destroyed.
+  const t = host([S('5-1', 'Command Ship', '1-1', 'space'), S('5-3', 'Starfighter', '1-1', 'space'), S('5-4', 'Battleship', '1-1', 'space', 1),
+    S('5-2', 'Command Ship', '1-2', 'space'), S('5-5', 'Starfighter', '1-2', 'space')]);
+  const alive = (id) => { const x = t.chain.structs[id]; return x && !(x.status & 32) && x.health > 0; };
+  for (let i = 0; i < 300 && !t.finished; i++) {
+    const foe = alive('5-5') ? '5-5' : '5-2';
+    ['5-3', '5-4'].forEach((a) => { if (alive(a)) t.chain.submit('1-1', attack(a, foe)); });
+    if (alive('5-5')) t.chain.submit('1-2', attack('5-5', alive('5-3') ? '5-3' : '5-1'));
+    t.block();
+  }
+  const ts = t.summary(), bs = ts.byStruct || {};
+  const sum = (pid, k) => Object.keys(bs).filter((id) => bs[id].owner === pid).reduce((n, id) => n + bs[id][k], 0);
+  check('a finished host\'s summary().byStruct sums to each player\'s damage',
+    !!t.finished && ['1-1', '1-2'].every((pid) => sum(pid, 'damage') === ts.stats[pid].damage) && ts.stats['1-1'].damage > 0,
+    JSON.stringify({ finished: t.finished, bs, you: ts.stats['1-1'].damage, cpu: ts.stats['1-2'].damage }));
+  check('…and its kills are the structs destroyed, each with a type', sum('1-1', 'kills') + sum('1-2', 'kills') === ts.kills.filter((k) => k.by_type).length
+    && Object.keys(bs).every((id) => typeof bs[id].type === 'string'), JSON.stringify(bs));
 }
 
 /* ── 3. The real Map Viewer, driven through the host ────────────────────── */

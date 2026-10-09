@@ -1,6 +1,7 @@
 /* Battle Simulator: setup → deploy → battle ⇄ paused → debrief.
- * Panels, buttons, icons, typography and colours are SUI tokens and classes;
- * the battle itself is raidview.html in #board.
+ * COMMAND DECK: the parts are simdeck.css (.d-*); this file is the page's
+ * own arrangement (.s-* setup, .b-* battle, .x-* debrief) in SUI tokens. The
+ * battle itself is raidview.html in #board.
  *
  * Scale: the window is the game's own menu page (#menu-page-layout), so
  * main.css draws it the way the game draws its menus — laid out at 1x, then
@@ -8,87 +9,77 @@
  * spacing therefore keep the game's proportions at every size; nothing here
  * sets a font size to fake a scale. */
 
-/* ── P4 shell, scale, nav, buttons ─────────────────────────────────────── */
+/* ── Deck shell ── (W2-setup) ─────────────────────────────────────────── */
+/* COMMAND DECK: #menu-page-panel is the deck root (.d-root, simdeck.css), a
+   column of the top bar, the scrolling body and the command bar. The ids
+   stay the game's menu page, so main.css still scales it 2x/4x. */
 *, *::before, *::after { box-sizing: border-box; }
-/* ...except SUI parts drawn to a FIXED content box (chat.html has the full
-   story): under a border-box reset their pixel art lands on fractions. */
-.sui-screen-battery,
-.sui-screen-properties,
-.sui-result-row-portrait,
-.sui-result-row-portrait-image { box-sizing: content-box; }
 html, body { height: 100%; margin: 0; overflow: hidden; }
 body { color: var(--text-body); text-align: left; }
 h1, h2 { margin: 0; }
-/* SUI colours a screen button by its modifier and never by the element, so a
-   <button> would otherwise draw the browser's black: inherit, at the lowest
-   specificity there is, so every SUI state rule still wins. */
+/* A <button> would otherwise draw the browser's black: inherit, at the
+   lowest specificity there is, so every component's state rule still wins. */
 button { cursor: pointer; color: inherit; }
-button:focus-visible, a:focus-visible, select:focus-visible, textarea:focus-visible { outline: 2px solid var(--accent-primary-active); outline-offset: 2px; }
+button:focus-visible, a:focus-visible, select:focus-visible, textarea:focus-visible { outline: 1px solid var(--accent-primary-active); outline-offset: 1px; }
 .sim-you { color: var(--text-player-primary); }
 .sim-cpu { color: var(--text-enemy-primary); }
 
-#sim button.sui-screen-btn:disabled { cursor: default; }
-#sim .sui-screen-btn span { white-space: nowrap; }
-.sim-wide { align-self: stretch; }
-
-/* The shell: nav, the scrolling body screen, and the foot. */
-/* A size container (it is height-100 already), so the Round column can be
-   held to the screen's height (P5). */
+.s-shell { display: flex; flex-direction: column; min-height: 0; }
+/* An inline-size container, so the command bar (outside sim-page) can wrap. */
+#menu-page-panel-chunk { display: flex; flex-direction: column; flex: 1 1 auto; min-width: 0; min-height: 0; container: sim-shell / inline-size; }
+#menu-page-nav { flex: none; }
+#sim-body-screen { flex: 1 1 auto; min-height: 0; overflow-x: hidden; overflow-y: auto; }
+/* A size container (it is height-100 already), so every screen lays out
+   against the body's own width and height. */
 #menu-page-screen-body { container: sim-page / size; text-align: left; }
-#sim-go { flex: 0 0 auto; width: 100%; }
-.sim-go { display: flex; align-items: center; gap: var(--spacing-lg); padding: var(--spacing-sm) var(--spacing-md); border-top: 2px solid var(--border-subtle); background: var(--surface-player-body); text-align: left; overflow: hidden; }
-.sim-go .sui-screen-btn-flex-wrapper { flex: none; align-self: center; align-items: center; }
-.sim-go .sui-screen-btn-flex-wrapper > .sui-screen-btn { flex: none; }
-.sim-go .sui-screen-btn-flex-wrapper:not(:has(> :not(.hidden))) { display: none; }
-#checks { display: flex; flex: 1 1 auto; flex-direction: column; gap: var(--spacing-xs); margin-right: auto; min-width: 0; }
-/* What stops a start keeps a reading's room before any label folds. */
-#checks:not(:empty) { min-width: calc(5 * var(--spacing-xxxl)); }
-#checks .sui-message-inline-alert { max-width: 100%; }
-#checks .sui-message-inline-alert-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-body:not([data-screen="setup"]) .sim-go { display: none; }
-/* Share is the round's: a challenge's fixed fleets are its own to share. */
-body:has(#round.hidden) #share-card { display: none; }
-/* A folded button is the icon in the stepper's square (fitFoot). */
-.sim-fold-1 #share-card .sui-screen-btn,
-.sim-fold-2 .sim-head-tools .sui-screen-btn:has(> i),
-.sim-fold-2 #live-to { width: var(--from-input-height-content); padding: 0; }
-/* Send names who it is for: the one label that gives way, cut, not folded. */
-.sim-go .sim-go-main { flex: 0 1 auto; min-width: 0; }
-.sim-go .sim-go-main > #send-to { flex: 0 1 auto; min-width: 0; }
-.sim-go-measure .sim-go-main, .sim-go-measure .sim-go-main > #send-to { flex-shrink: 0; }
-/* ...measured cut to a name's room, so a long name never folds every label. */
-.sim-go-measure .sim-go-main > #send-to { max-width: calc(8 * var(--spacing-xxxl)); }
-/* A challenge's name gives way before Start does; whole while measured. */
-.sim-go .sim-head-tools { flex: 0 1 auto; }
-.sim-go #locked-chip { display: block; flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.sim-go #locked-chip.hidden { display: none; }
-.sim-go-measure .sim-head-tools, .sim-go-measure #locked-chip { flex-shrink: 0; }
-#send-to span { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 
-/* One nav, never two rows: the status in the middle gives way first. */
-#menu-page-nav .sui-screen-nav { overflow: hidden; }
-#sim-steps { flex: none; justify-content: flex-start; }
-#sim-steps > * { flex: none; }
-#sim-steps a.sim-step-off { color: var(--accent-disabled); pointer-events: none; }
-/* The nav's second child: the battle's state, then its tools, right-aligned
-   after the steps (SUI's refresh/timestamp slot). */
-#sim-nav-tools { display: flex; align-items: center; align-self: stretch; justify-content: flex-end; gap: 0; flex: 1 1 auto; min-width: 0; padding-left: var(--spacing-md); }
-#sim-nav-tools > #sim-status { display: flex; align-items: center; gap: var(--spacing-md); flex: 0 1 auto; min-width: 0; overflow: hidden; flex-wrap: nowrap; text-align: left; }
-#sim-nav-tools > :not(#sim-status) { flex: none; }
-#sim-nav-tools > .sui-screen-nav-close { align-self: stretch; }
-#sim-status > * { flex: none; white-space: nowrap; }
-#sim a.sui-nav-btn { color: var(--accent-primary); text-decoration: none; }
-#sim a.sui-nav-btn:hover, #sim a.sui-nav-btn:active { color: var(--accent-primary-active); }
-#sim-nav-tools .sui-mod-disabled { color: var(--accent-disabled); pointer-events: none; }
-body:not([data-screen="battle"]) #sim-steps > #sim-status,
-body:not([data-screen="battle"]) #sim-nav-tools { display: none; }
-/* Nobody pauses a battle for two; the Paused card owns Resume; a watcher
-   only leaves. */
-body.sim-live #pause, body.sim-paused #pause, body.sim-watch #pause { display: none; }
+/* Top bar left: the mode, then the three steps, on one row that never
+   shrinks; the battle's status and tools take what is left (W2-battle). */
+.s-nav { display: flex; align-items: center; align-self: stretch; gap: var(--spacing-md); flex: none; min-width: 0; }
+#sim-steps { flex: none; flex-wrap: nowrap; }
+#sim-steps > li { display: flex; flex: none; }
+
+/* The command bar: readiness, the fleets' tools, the launch. */
+#sim-go { width: 100%; }
+body:not([data-screen="setup"]) #sim-go { display: none; }
+#checks { max-width: 100%; }
+/* Addressed: Send and Start keep their width; the readiness gives way. */
+#sim-go:has(#send-to:not(.hidden)) > .d-command-r { flex: 0 0 auto; }
+/* The launch never gives way; the readiness takes what is left. */
+#sim-go > .d-command-r { min-width: max-content; }
+#send-to > .d-pf { margin-right: calc(-1 * var(--spacing-sm)); }
+/* One row while the launch, the tools and a word of readiness fit (the
+   readiness ellipsizes first); only a very narrow window wraps it. */
+@container sim-shell (max-width: 539px) {
+  #sim-go { flex-wrap: wrap; height: auto; row-gap: var(--spacing-xs); padding: var(--spacing-xs) var(--spacing-md); }
+  #sim-go > .d-command-c { order: 3; flex: 1 1 100%; justify-content: center; }
+}
+/* Top bar right (W2-battle): the status pills on every screen, then the
+   battle's own tools, Pause and End, after a separator. The pills give way
+   first, whole (fitStatus). */
+#sim-nav-tools { flex: 1 1 auto; justify-content: flex-end; align-self: stretch; }
+#sim-status { display: flex; align-items: center; gap: var(--spacing-sm); flex: 0 1 auto; flex-wrap: nowrap; min-width: 0; overflow: hidden; text-align: left; }
+#sim-status > *, #sim-nav-tools > :not(#sim-status) { flex: none; }
+/* The phase is never left out (fitStatus): last of all it ellipsizes. A
+   name in a pill (a DM's person, a challenge) stops at 120. */
+#sim-status > #sim-phase { flex: 0 1 auto; min-width: 0; }
+#sim-status > .d-pill > span:last-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+#sim-status > :is(.d-pill.is-violet, .d-pill.is-amber:not(#sim-phase)) > span:last-child { max-width: calc(3.75 * var(--spacing-xxxl)); }
+/* A tight bar: the finished steps keep their check, the mode its mark. The
+   words stay for a screen reader. */
+#menu-page-nav:is(.s-tight, .s-tighter) .d-step.is-done > span,
+#menu-page-nav.s-tighter #sim-mode > span { position: absolute; clip-path: inset(50%); white-space: nowrap; }
+:where(#sim-nav-tools) button { font: inherit; background: none; border: 0; border-radius: 0; margin: 0; padding: 0; }
+body:not([data-screen="battle"]) #pause,
+body:not([data-screen="battle"]) #end,
+body:not([data-screen="battle"]) .s-tools-sep,
+#sim-nav-tools:has(> #end.hidden) > .s-tools-sep { display: none; }
+/* Nobody pauses a battle for two, and a watcher only leaves. Paused keeps
+   Pause in view, pressed. */
+body.sim-live #pause, body.sim-watch #pause { display: none; }
 
 /* Battle: the window keeps only its nav, and the board fills the rest. */
-body[data-screen="battle"] #sim-body-screen,
-body[data-screen="battle"] .sim-go { display: none; }
+body[data-screen="battle"] #sim-body-screen { display: none; }
 body[data-screen="battle"] #menu-page-layout { height: auto; }
 body[data-screen="battle"] #menu-page-panel { min-height: 0; }
 
@@ -109,188 +100,119 @@ body[data-screen="battle"] #menu-page-panel { min-height: 0; }
   #message { transform: translateX(-50%) scale(4); max-width: 22%; }
 }
 
-/* ── Cards ─────────────────────────────────────────────────────────────── */
-.sim-row { display: flex; align-items: center; gap: var(--spacing-sm); }
-
-.sim-row .sui-screen-btn { flex: none; padding: 0 var(--spacing-xs); }
-
-/* ── P5 Round card ────────────────────────────────────────────────────── */
-/* The round's settings as the game's form card, its fields two up, so the
-   whole card stands beside the board in the window's first 1000px. Share and
-   Start are the foot's (#sim-go). */
-.sim-round-col { grid-area: round; display: flex; flex-direction: column; gap: var(--spacing-md); min-width: 0; }
-/* Beside the board each column keeps to the screen and scrolls on its own, so
-   a long one never scrolls the board away. */
-@container sim-page (min-width: 481px) {
-  .sim-round-col, #challenge, #inspector { position: sticky; top: 0; max-height: calc(100cqh - 2 * var(--spacing-sm)); }
-  .sim-round-col { overflow-y: auto; overscroll-behavior: contain; }
-  #challenge, .sim-debrief-wrap > #db-challenge { display: flex; flex-direction: column; overflow: hidden; }
-  :is(#challenge, #db-challenge) > .sui-data-card-body { flex: 0 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain; }
-}
+/* ── Setup ── (W2-setup) ─────────────────────────────────────────────── */
+/* Mission | fleet board | Inspector, a tight group in a 12 margin: 176 | 320
+   | 176 at the drawn 720x500 (1440x1000 at 2x). The row is the body's height,
+   never more: the board's tiles take their size from the room the column
+   has (36 at most, as drawn), and a long panel body scrolls inside its
+   panel. The side panels give way from 176 to 152 on a narrower window and
+   grow to 240 on a wider one, so the three columns hold together. */
+#setup-screen { --s-side: clamp(calc(4.75 * var(--spacing-xxxl)), 24.5cqw, calc(7.5 * var(--spacing-xxxl)));
+  display: grid; grid-template-columns: var(--s-side) minmax(0, calc(10 * var(--spacing-xxxl))) var(--s-side); justify-content: center;
+  grid-template-rows: minmax(0, 1fr); gap: var(--spacing-md); height: 100%; padding: var(--spacing-lg); text-align: left; }
+.sim-round-col, #challenge { grid-column: 1; grid-row: 1; }
+.sim-round-col { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
 .sim-round-col:has(> #round.hidden) { display: none; }
-#round .sim-card-head > .sui-data-card-header { flex: none; }
-.sim-round-b { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); align-items: start; gap: var(--spacing-md); padding: var(--spacing-md) var(--spacing-sm); text-align: left; }
-.sim-round-b > .sim-span { grid-column: 1 / -1; }
-#round .sui-form-element-label-group { align-items: stretch; gap: var(--spacing-xs); }
-/* SUI stands a caption in a 32px line; in the card it keeps only its own. */
-#round label.sui-form-element-group-label, #round label.sui-input-text > span { min-height: 0; }
-#round label.sui-input-text { gap: var(--spacing-xs); }
-#round label.sui-input-text select { align-self: stretch; min-width: 0; padding-right: var(--spacing-xs); text-overflow: ellipsis; }
-.sim-row-end { align-items: flex-end; }
-.sim-row-end > label.sui-input-text { flex: 1 1 auto; min-width: 0; }
-/* Every field's value in one face: the content face, at the page's tiny
-   size, so a select, the seed and a stepper's number read alike. */
-#sim label.sui-input-text :is(select, input) { font-family: 'DirectiveZero', sans-serif; font-size: 8px; line-height: 12px; text-transform: none; }
-/* Who the round is for, in the card's head: For, the face, the name, DM. */
-.sim-addressed { display: flex; align-items: center; gap: var(--spacing-sm); min-width: 0; }
-.sim-for { display: flex; align-items: center; gap: var(--spacing-sm); min-width: 0; }
-.sim-for-l { flex: none; color: var(--text-hint); }
-.sim-for-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-/* A caption never pushes its count out of a tile. */
-#round .sp-choice > .sui-text-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-/* The two sides' steppers, side by side under one caption. */
-.sim-charges { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--spacing-md); }
-.sim-charges > label.sui-input-text { min-width: 0; }
-/* The stepper, at the game's size: square buttons the height of the field,
-   and the number's side padding cut so two fit the card. */
-#round .sui-input-stepper { align-self: flex-start; gap: var(--spacing-xs); }
-#round .sui-input-stepper input[type="number"] { flex: none; padding: var(--spacing-md) var(--spacing-xs); }
-#round .sui-input-stepper .sui-screen-btn { flex: none; width: var(--from-input-height-content); padding: 0; }
-
-/* ── Setup layout ──────────────────────────────────────────────────────── */
-#setup-screen { display: grid; grid-template-columns: calc(8 * var(--spacing-xxxl) + var(--spacing-md)) minmax(0, 1fr) calc(140px + var(--spacing-md)); grid-template-areas: "round fleets inspector"; justify-content: center; gap: var(--spacing-sm); padding: var(--spacing-sm); align-items: start; }
-#fleets { grid-area: fleets; min-width: 0; container-type: inline-size; }
-#inspector { grid-area: inspector; }
-/* Breakpoints on the page's own (1x) width, so they hold at every scale. */
-/* Narrower: the inspector moves under the board, so the board keeps its
-   place beside the Round column. */
-/* With room to spare the inspector takes its wider column, and the three
-   stand together in the middle of the page rather than at its edges. */
-@container sim-page (min-width: 760px) {
-  #setup-screen { grid-template-columns: calc(8 * var(--spacing-xxxl) + var(--spacing-md)) minmax(0, calc(2 * var(--tile-width) + 3 * var(--spacing-xxxl) + var(--spacing-sm))) 165px; column-gap: var(--spacing-xl); padding: var(--spacing-sm) var(--spacing-md); }
+/* The board column is a size container: the tile is the largest that fits
+   both its height (four bands of two rows under the fleet headers) and its
+   width (four tiles, the spine and the command posts). */
+#fleets { grid-column: 2; grid-row: 1; display: flex; flex-direction: column; gap: var(--spacing-sm); min-width: 0; min-height: 0; container: sim-board / size; }
+#inspector { grid-column: 3; grid-row: 1; }
+/* A short column keeps the tiles whole first: the bands draw closer (their
+   8 padding down to 4, from a 400 column to 368), then the tiles shrink. */
+#arena { --s-pad: clamp(var(--spacing-sm), calc((100cqh - 42 * var(--spacing-md)) / 8), var(--spacing-md));
+  --d-tile: clamp(var(--spacing-xxl), min(calc((100cqh - 6 * var(--spacing-md) - 8 * var(--s-pad)) / 8), calc((100cqw - 7 * var(--spacing-md)) / 6)), calc(var(--icon-lg) + var(--spacing-sm))); }
+#arena > .d-band { padding-top: var(--s-pad); padding-bottom: var(--s-pad); }
+#arena .d-spine { margin: calc(-1 * var(--s-pad)) 0; }
+#arena .d-tile > .d-ship { width: min(var(--spacing-xxxl), calc(var(--d-tile) - var(--spacing-xs))); height: min(var(--spacing-xxxl), calc(var(--d-tile) - var(--spacing-xs))); }
+@container sim-board (max-height: 335px) {
+  #arena .d-spine > .d-ico { display: none; }
 }
-/* A short window (1440x900 at the game's 2x): the card's spacing goes down a
-   step, so the Round card still stands whole beside the board. */
-@container sim-page (max-height: 360px) {
-  .sim-round-b { gap: var(--spacing-xs) var(--spacing-md); padding: var(--spacing-xs) var(--spacing-sm); }
-  #round label.sui-input-text, #round .sui-form-element-label-group { gap: 0; }
+/* Each panel keeps to the row; a long body scrolls inside it, the footer
+   (the seed, Edit fleets) stays in view. */
+#round, #inspector { flex: 1 1 auto; min-width: 0; min-height: 0; overflow: hidden; }
+#round > .d-panel-b, #inspector > .d-panel-b { flex: 1 1 auto; overflow-y: auto; overscroll-behavior: contain; }
+/* Narrower than three columns hold: the Inspector under the board, and the
+   board sized from its width. Narrowest: one column. */
+/* (The debrief's narrowest layout is here too: one threshold, one query.) */
+@container sim-page (max-width: 575px) {
+  .x-hero > .d-verdict, .x-acts { flex: 1 1 100%; width: 100%; max-width: none; }
+  .x-cols, .x-cols:has(> #db-challenge:not(.hidden)) { grid-template-columns: minmax(0, 1fr); }
+  #setup-screen { grid-template-columns: var(--s-side) minmax(0, 1fr); grid-template-rows: auto auto; height: auto; min-height: 100%; }
+  #fleets { container: sim-board / inline-size; }
+  #arena { --s-pad: var(--spacing-md); --d-tile: clamp(var(--spacing-xxl), calc((100cqw - 7 * var(--spacing-md)) / 6), calc(var(--icon-lg) + var(--spacing-sm))); }
+  #inspector { grid-column: 2; grid-row: 2; overflow: visible; }
+  #inspector > .d-panel-b { overflow-y: visible; }
 }
-@container sim-page (max-width: 660px) {
-  #setup-screen { grid-template-columns: calc(8 * var(--spacing-xxxl) + var(--spacing-md)) minmax(0, 1fr); grid-template-areas: "round fleets" "round inspector"; }
-}
-/* One column: the Round card across the top, its fields two to a line. */
 @container sim-page (max-width: 480px) {
-  #setup-screen { grid-template-columns: minmax(0, 1fr); grid-template-areas: "round" "fleets" "inspector"; }
+  #setup-screen { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto; }
+  #round { overflow: visible; }
+  #round > .d-panel-b { overflow-y: visible; }
+  .s-fleets { flex-wrap: wrap; height: auto; row-gap: var(--spacing-sm); }
+  #fleets { grid-column: 1; grid-row: 2; }
+  #inspector { grid-column: 1; grid-row: 3; }
 }
-@container sim-page (max-width: 430px) {
-  #setup-screen { padding: var(--spacing-sm); }
+
+/* Mission: Encounter, Opponent, Block time, Opening charge; the seed below. */
+/* 16 apart at the drawn height, closing to 8 on a shorter page. */
+.d-panel-b.s-mission-b { gap: clamp(var(--spacing-md), calc(100cqh - 51 * var(--spacing-md)), var(--spacing-xl)); }
+/* The body scrolls; its sections keep their height. */
+.d-panel-b.s-mission-b > * { flex: none; }
+/* A side panel narrower than drawn: the Mission puts the opponent's pips
+   and word on a line of their own, under the label.
+   The Inspector's four key captions, likewise, give way to their keys'
+   titles (and stay for a screen reader). */
+#round, #inspector { container: sim-side / inline-size; }
+@container sim-side (max-width: 175px) {
+  .d-rank.s-opp { flex-wrap: wrap; row-gap: var(--spacing-xs); }
+  .d-rank.s-opp > .d-rank-l { flex: 1 1 100%; }
+  .d-rank.s-opp > .d-rank-pips { margin-left: 0; }
+  .d-rank.s-opp > .d-rank-word { margin-left: auto; }
+  .s-keys .d-key-cap { position: absolute; clip-path: inset(50%); white-space: nowrap; }
 }
+.d-rank.s-opp { gap: var(--spacing-xs); }
+/* Opening charge: its header and the two batteries a step apart, so the
+   batteries' own labels do not read as part of the header. */
+.d-sec:has(> .s-batts) { gap: var(--spacing-md); }
+.s-batts { display: flex; flex-direction: column; gap: var(--spacing-md); }
+.d-panel-f.s-seed { gap: var(--spacing-sm); padding: var(--spacing-sm); }
+.s-seed > .d-code { flex: 1 1 auto; }
+/* Who the battle is for: a violet strip under the Mission header. */
+.s-for { display: flex; align-items: center; gap: var(--spacing-xs); flex: none; min-height: var(--spacing-xxxl); padding: var(--spacing-xs) var(--spacing-xs) var(--spacing-xs) var(--spacing-sm);
+  background-color: var(--d-violet-ground); box-shadow: inset 2px 0 0 var(--accent-secondary), inset 0 -1px 0 var(--border-subtle); }
+.s-for-t { display: flex; flex-direction: column; flex: 1 1 auto; min-width: 0; }
+.s-for-name { color: var(--accent-secondary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.s-for > .d-iconbtn { margin-left: auto; }
 
-/* The names over their fleets, each with its count: one line, so the board
-   keeps the column's height. The fleets' tools are the foot's. */
-#fleet-head { display: flex; align-items: center; justify-content: space-between; gap: var(--spacing-md); min-width: 0; }
-#fleet-head .sim-side { flex-direction: row; align-items: center; gap: var(--spacing-sm); }
-/* Each count on the outer side of its name, so the two never meet. */
-#fleet-head .sim-side > .sui-text-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.sim-side { display: flex; flex-direction: column; min-width: 0; }
-.sim-side-cpu { align-items: flex-end; text-align: right; }
-/* A button's label is one line: the row wraps, the buttons never do. */
-.sim-head-tools > * { flex: 0 0 auto; white-space: nowrap; }
+/* Fleet headers: name and count, then the fleet's reach; theirs mirrored. */
+.s-fleets { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--spacing-md); flex: none; height: calc(var(--spacing-xxxl) + var(--spacing-xs)); }
+.s-fleetblock { display: flex; flex-direction: column; align-items: flex-start; gap: var(--spacing-xs); min-width: 0; }
+.s-fleetblock.is-foe { align-items: flex-end; }
+.s-fleetblock .d-fleet-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.s-reachrow { display: flex; align-items: center; gap: var(--spacing-sm); }
+.s-fleetblock.is-foe .s-reachrow { flex-direction: row-reverse; }
 
-/* ── P6 fleet board + inspector ────────────────────────────────────────── */
-/* The board and the names over it are one column, as wide as the board (or
-   the names, when they are wider) and centred in the space between the
-   cards: names stay over their fleets at every width. */
-#fleets { display: grid; grid-template-columns: fit-content(100%); justify-content: center; align-content: start; gap: var(--spacing-xs); }
-.sim-count { min-height: 0; }
+/* The board (simdeck .d-board); a pick's targets take the crosshair. */
+.s-board { flex: none; }
+.s-board .slot.eligible, .s-board .slot.sim-move-target { cursor: crosshair; }
+/* The guard line (SVG; stroke and ends are simdeck's): under the brackets. */
+.sim-defweb { position: absolute; inset: 0; width: 100%; height: 100%; z-index: 1; pointer-events: none; overflow: visible; }
 
-/* The board: four ambit bands, your fleet left, the computer right. Fleet
-   tiles grow to half the game's tile and no further — never letterboxes. */
-#arena { position: relative; box-shadow: 0 0 0 1px var(--border); overflow: hidden; }
-.band { display: grid; grid-template-columns: 40px repeat(2, minmax(28px, calc(var(--tile-width) / 2))) 20px repeat(2, minmax(28px, calc(var(--tile-width) / 2))) 40px; grid-template-rows: 42px 42px; justify-content: center; border-top: 1px solid var(--border-subtle); background-size: calc(var(--tile-width) / 2) calc(var(--tile-height) / 2); }
-.band:first-child { border-top: 0; }
-.band.space { background-color: var(--surface-default); background-image: url('img/tiles/space/space-1-2-top-middle.png'); }
-.band.air { background-color: var(--surface-default); background-image: url('img/tiles/air/air-1-2-top-middle.png'); }
-.band.land { background-color: var(--surface-default); background-image: url('img/tiles/land/land-1-2-top-middle.png'); }
-.band.water { background-color: var(--surface-default); background-image: url('img/tiles/water/water-1-2-top-middle.png'); }
-.ambit-label { grid-column: 4; grid-row: 1/3; writing-mode: vertical-rl; align-self: center; justify-self: center; text-shadow: 0 1px 2px var(--border-neutral-dark); color: var(--text-body); }
-.slot { position: relative; display: flex; align-items: center; justify-content: center; margin: 1px; padding: 0; border: 0; box-shadow: inset 0 0 0 var(--spacing-xs) var(--border-subtle); background: transparent; overflow: hidden; min-width: 0; color: var(--text-body); }
-.slot.friendly { border-bottom: var(--spacing-xs) solid var(--border-focus-friendly-dark); }
-.slot.enemy { border-bottom: var(--spacing-xs) solid var(--border-focus-enemy-dark); }
-.slot.command { grid-row: 1/3; }
-.slot:not(:disabled):hover { box-shadow: inset 0 0 0 var(--spacing-xs) var(--border); }
-.slot:disabled { cursor: default; }
-/* Selected and focused: the game's own focus brackets (img/focus), friendly
-   on your side and enemy on theirs, 9-sliced so the corners keep their
-   pixels on a slot of any shape. */
-.slot:focus-visible { outline: 0; }
-.slot.selected::after, .slot:focus-visible::after { content: ''; position: absolute; inset: 0; z-index: 2; pointer-events: none; border: var(--spacing-xl) solid transparent; border-image: url('img/focus/focus-friendly.png') 32; image-rendering: pixelated; }
-.slot.enemy.selected::after, .slot.enemy:focus-visible::after { border-image-source: url('img/focus/focus-enemy.png'); }
-/* While a pick waits: a valid target takes the accent ring, a tile a Move may
-   land on the game's move cursor, anything else drops to half (the game's
-   mod-invalid-selection) and cancels the pick when pressed. */
-.slot.eligible { box-shadow: inset 0 0 0 var(--spacing-xs) var(--accent-primary-active); cursor: crosshair; }
-.slot.sim-move-target { cursor: crosshair; }
-.slot.sim-move-target::after { content: ''; position: absolute; inset: 0; pointer-events: none; background: url('img/focus/focus-move.gif') no-repeat center; background-size: calc(var(--tile-width) / 2) calc(var(--tile-height) / 2); image-rendering: pixelated; }
-.slot.dim { opacity: .5; }
-.slot .hull { position: absolute; width: calc(var(--tile-width) / 2); height: calc(var(--tile-height) / 2); left: 50%; top: 50%; transform: translate(-50%, -50%); image-rendering: pixelated; pointer-events: none; }
-.slot.enemy .hull { transform: translate(-50%, -50%) scaleX(-1); }
-/* An empty slot is bare board until it can be filled and is pointed at. */
-.slot .empty-label { opacity: 0; }
-.slot:not(:disabled):hover .empty-label, .slot:focus-visible .empty-label { opacity: .5; }
-.status-indicators { display: flex; justify-content: center; gap: var(--spacing-xs); position: absolute; left: 0; right: 0; bottom: var(--spacing-xs); pointer-events: none; }
-/* The defence web (raidview.html .rv-defweb): under the focus brackets. */
-.sim-defweb { position: absolute; left: 0; top: 0; width: 100%; height: 100%; z-index: 1; pointer-events: none; overflow: visible; }
-.sim-defweb line { stroke: var(--text-player-primary); stroke-width: 2; stroke-dasharray: 6 4; opacity: .85; }
-.sim-defweb circle { fill: var(--text-player-primary); opacity: .9; }
-.sim-defweb.sim-enemy line { stroke: var(--text-enemy-primary); }
-.sim-defweb.sim-enemy circle { fill: var(--text-enemy-primary); }
-
-.sim-reach { display: flex; align-items: center; gap: var(--spacing-xs); }
-
-/* ── Inspector: the Action Bar ─────────────────────────────────────────── */
-#inspector { display: flex; flex-direction: column; min-width: 0; isolation: isolate; overflow: hidden; background: var(--surface-default); box-shadow: 0 0 0 1px var(--border-subtle); text-align: left; }
-/* The Action Bar stays; the reference under it scrolls inside the column. */
-#inspector > * { flex: none; }
-#inspector > .sim-sheet, #inspector > .sim-types { flex: 0 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain; }
-#inspector > .sim-sheet > *, .sim-types > * { flex-shrink: 0; }
-.sim-insp-h .sui-screen-info { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
-.sim-hero { position: relative; height: calc(var(--icon-lg) + var(--spacing-xl)); overflow: hidden; background-size: calc(var(--tile-width) / 2) calc(var(--tile-height) / 2); border-bottom: 1px solid var(--border-focus-friendly-dark); }
-.sim-hero.enemy { border-bottom-color: var(--border-focus-enemy-dark); }
-.sim-hero img { position: absolute; width: calc(var(--tile-width) / 2); height: calc(var(--tile-height) / 2); left: 50%; top: 50%; transform: translate(-50%, -50%); image-rendering: pixelated; }
-.sim-hero.enemy img { transform: translate(-50%, -50%) scaleX(-1); }
-.struct-health-bar.sim-health { width: auto; margin: var(--spacing-sm) var(--spacing-md) 0; }
-.sim-abilities { padding: var(--spacing-sm) var(--spacing-md) 0; }
-.sim-insp-field { padding: 0 var(--spacing-md) var(--spacing-sm); }
-.sim-insp-field label.sui-input-text > span { min-height: var(--icon-md); }
-.sim-insp-field select { align-self: stretch; width: 100%; min-width: 0; text-overflow: ellipsis; }
-/* The game's cheatsheet, as a panel section rather than a popover: full
-   width, framed by the inspector, and laid out for its narrow column. */
-.sim-sheet { display: flex; width: 100%; min-width: 0; z-index: auto; justify-content: flex-start; gap: var(--spacing-sm); border-right: 0; border-bottom: 0; }
-.sim-sheet .sui-cheatsheet-title { height: auto; min-height: var(--spacing-xxxl); padding: var(--spacing-xs) var(--spacing-md); }
-.sim-sheet .sui-cheatsheet-title-text { max-width: none; }
-.sim-sheet .sui-cheatsheet-costs:empty { display: none; }
-.sim-sheet .sui-cheatsheet-content { align-self: stretch; padding: var(--spacing-sm) var(--spacing-md) var(--spacing-md); }
-.sim-sheet .sui-cheatsheet-property { align-items: flex-start; gap: var(--spacing-sm); }
-.sim-sheet .sui-cheatsheet-property-info { overflow-wrap: anywhere; }
-/* A sheet longer than the column fades out at its foot: more below. */
-#inspector > .sim-sheet.sim-more { mask-image: linear-gradient(var(--page-background) calc(100% - var(--spacing-xxl)), transparent); }
-.sim-sheet .sui-cheatsheet-property-info { flex: 1 1 auto; min-width: 0; }
-.sim-sheet .sui-cheatsheet-property-info div { flex-wrap: wrap; max-width: 100%; row-gap: var(--spacing-xs); }
-/* The info rule above reaches into the battery: give it back its own gap. */
-.sim-sheet .sui-cheatsheet-property-info .sui-battery { gap: var(--spacing-xs); }
-
-/* The Deploy list: the game's struct stills at the board's half tile. */
-.sim-types { display: flex; flex-direction: column; min-width: 0; }
-.sim-types .offcanvas-struct-list-layout { gap: var(--spacing-md); padding: var(--spacing-md); }
-.sim-types a.offcanvas-struct-container { position: relative; box-sizing: content-box; width: calc(var(--tile-width) / 2); height: calc(var(--tile-height) / 2); }
-.sim-types .struct-still { width: 100%; height: 100%; isolation: isolate; background-size: calc(var(--tile-width) / 2) calc(var(--tile-height) / 2); }
-.sim-types .struct-still img { width: 100%; height: 100%; image-rendering: pixelated; }
-.sim-types.enemy .struct-still img { transform: scaleX(-1); }
-.sim-types a.offcanvas-struct-container:focus-visible { outline: 0; }
-.sim-types a.sim-current::after, .sim-types a.offcanvas-struct-container:focus-visible::after { content: ''; position: absolute; inset: 0; z-index: 1; pointer-events: none; border: var(--spacing-xl) solid transparent; border-image: url('img/focus/focus-friendly.png') 32; image-rendering: pixelated; }
-.sim-types.enemy a.sim-current::after, .sim-types.enemy a.offcanvas-struct-container:focus-visible::after { border-image-source: url('img/focus/focus-enemy.png'); }
-.sim-types-sheet { display: flex; min-width: 0; }
+/* Inspector: identity, keys, weapons, guard; the Matchup's duel hero. */
+.s-id { display: flex; flex-direction: column; gap: var(--spacing-xs); min-width: 0; }
+/* The four keys spread across the panel, so each caption has room under
+   its key (narrower than drawn: sim-side, above). */
+.d-keys.s-keys { display: flex; justify-content: space-between; margin: 0 calc(-1 * var(--spacing-sm)); }
+.s-preview { padding-top: var(--spacing-md); box-shadow: inset 0 1px 0 var(--border-subtle); }
+.s-hero-mark { position: absolute; left: var(--spacing-xs); bottom: var(--spacing-xs); }
+.d-hero.s-duel { gap: var(--spacing-xl); }
+/* The tape's two columns narrow with the panel (36 at the drawn 176, 24 at
+   152), so 'Open slots' fits; the heads are the fleets' marks over them. */
+.s-tape .d-stat-v { display: flex; justify-content: flex-end; width: clamp(var(--spacing-xxl), calc((var(--s-side) - 13 * var(--spacing-md)) / 2), calc(var(--spacing-xxxl) + var(--spacing-xs))); }
+.s-tape .d-stat-l { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.s-tape .d-stat-lead { min-width: var(--spacing-xs); }
+.d-panel-f.s-objective { gap: var(--spacing-sm); }
+.s-objective-t { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 /* ── Battle ────────────────────────────────────────────────────────────── */
 /* Fixed under the nav; simulator.js sets `top` to the panel's bottom. */
@@ -300,187 +222,166 @@ body[data-screen="battle"] #menu-page-panel { min-height: 0; }
 #board { display: block; width: 100%; height: 100%; border: 0; background: var(--page-background); }
 
 /* ── P7 overlays: Paused, Deploy, End battle ───────────────────────────── */
-/* The game's system modal (SUIParts.modal) on the board's scaled layer:
-   SUI's own scrim, frame and CTA row; only the stacking is the page's. A
-   modal taller than the board scrolls rather than losing its top. */
-#sim .sp-scrim.sim-scrim { z-index: 3; justify-content: safe center; overflow-y: auto; }
-/* The board is shorter than a page (a third of it at 4x): the modal keeps a
-   smaller margin and inset, and its CTA row wraps rather than overflows. */
-#sim .sim-scrim .sui-message-system-modal { padding: var(--spacing-md); }
-#sim .sim-scrim .sui-message-system-model-frame-center { padding: var(--spacing-xl) 0; }
-#sim .sim-scrim .sui-message-system-modal-cta { flex-wrap: wrap; }
-#sim .sim-modal-title { display: flex; align-items: baseline; justify-content: space-between; gap: var(--spacing-xl); }
-#paused .sui-form-element-label-group { align-items: stretch; }
-#paused label.sui-form-element-group-label { min-height: 0; }
-/* Deploy: each side's structs, charge and reach, then the objective. */
-.sim-matchup { display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); gap: var(--spacing-xxl); align-items: center; }
-.sim-matchup .sim-side { gap: var(--spacing-md); }
-.sim-side-stats { display: flex; align-items: center; gap: var(--spacing-md); }
-.sim-matchup .sim-side-cpu .sim-reach { justify-content: flex-end; }
-.sim-countdown { display: flex; flex-direction: column; align-items: center; gap: var(--spacing-sm); align-self: stretch; }
-/* The verdict and the countdown: the display face at 4x its 8px design. */
-#sim .sim-huge { font-size: 32px; line-height: 40px; }
+/* W2-battle. Deck modals (SimDeck.modal) on the board's scaled layer: the
+   scrim, rail and CTA are the kit's. A modal taller than the board scrolls
+   inside itself (.d-modal max-height) rather than losing its top. */
 
-/* ── P7 debrief ────────────────────────────────────────────────────────── */
-/* Three bands: the verdict beside the next moves, what became of the run,
-   then the battle as two of the game's data cards side by side (the tallies
-   the wider, so a label keeps to its line). Beside the board's height the
-   page keeps to the screen: the cards take what is left, and a long list
-   scrolls inside its card, never the page. */
-.sim-debrief { display: flex; flex-direction: column; gap: var(--spacing-md); padding: var(--spacing-sm) var(--spacing-lg); min-width: 0; text-align: left; }
-.sim-verdict { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: var(--spacing-md) var(--spacing-xl); align-items: center; flex: none; }
-.sim-verdict-text { display: flex; flex-direction: column; align-items: flex-start; gap: var(--spacing-sm); min-width: 0; }
-.sim-next { justify-self: stretch; display: flex; flex-wrap: wrap; gap: var(--spacing-sm); min-width: 0; }
+/* Engagement: the two fleets face to face across VS, then the objective
+   beside the launch countdown. The foe's side is the mirror of yours. */
+.b-face { display: grid; grid-template-columns: minmax(0, 1fr) calc(2 * var(--spacing-xxxl) - var(--spacing-xs)) minmax(0, 1fr); gap: var(--spacing-lg); align-items: center; }
+.b-side { display: flex; flex-direction: column; align-items: flex-start; gap: var(--spacing-md); min-width: 0; }
+.b-side.is-foe { align-items: flex-end; }
+.b-side-id { display: flex; align-items: center; gap: var(--spacing-md); min-width: 0; }
+.b-side-n { display: flex; flex-direction: column; gap: var(--spacing-xs); min-width: 0; }
+.b-side.is-foe .b-side-id, .b-side.is-foe .b-side-reach, .b-side.is-foe .d-roster { flex-direction: row-reverse; }
+.b-side.is-foe .b-side-n { align-items: flex-end; text-align: right; }
+.d-screen.b-side-roster { max-width: 100%; padding: var(--spacing-xs) var(--spacing-md); overflow: hidden; }
+.b-side-reach { display: flex; align-items: center; gap: var(--spacing-md); }
+.b-face-vs { display: flex; flex-direction: column; align-items: center; gap: var(--spacing-md); }
+.b-face-vs::before, .b-face-vs::after { content: ""; display: block; width: 1px; height: calc(var(--spacing-xxl) + var(--spacing-xs)); background-color: var(--border-subtle); }
+.b-go { display: flex; align-items: stretch; gap: var(--spacing-md); }
+.b-go-obj { display: flex; flex: 1 1 auto; align-items: center; gap: var(--spacing-md); min-width: 0; padding: 0 var(--spacing-lg) 0 var(--spacing-md);
+  background-color: var(--d-amber-ground); box-shadow: inset var(--spacing-xs) 0 0 var(--text-warning), inset 0 0 0 1px var(--d-amber-frame); }
+.b-go-t { display: flex; flex-direction: column; gap: var(--spacing-xs); min-width: 0; }
+.b-go-t > .d-lbl { color: var(--text-warning); }
+/* The target wears the enemy's brackets, as a picked target on the board. */
+.b-go-target > .d-brackets { opacity: 1; border-image: url('img/focus/focus-enemy.png') 32 stretch; }
+/* The faces, the rule, then the objective, a step apart. */
+#deploy-body { display: flex; flex-direction: column; gap: var(--spacing-md); }
+/* Wide enough that LAUNCH keeps a margin inside the screen's well. */
+.d-screen.b-go-count { flex: none; flex-direction: column; justify-content: center; gap: 0; width: calc(var(--icon-xxl) + var(--spacing-lg)); height: var(--icon-xxl); padding: var(--spacing-xs) var(--spacing-md); }
+
+/* Paused: the forfeit and the round's alternatives in one row of keys, the
+   forfeit apart at the left; Resume below, across the dialog. */
+.b-pause-keys { display: flex; align-items: center; gap: var(--spacing-md); }
+.b-pause-keys > .d-btn.is-sm { padding-left: var(--spacing-md); padding-right: var(--spacing-md); }
+.b-pause-keys > #pause-end { margin-right: auto; }
+
+/* ── P7 debrief (W2-debrief) ───────────────────────────────────────────── */
+/* COMMAND DECK's after-action report, a column filling the body: the
+   verdict over the starfield beside the next moves, both fleets as they
+   ended, then the report columns (the Challenge when there is one, the
+   Tally, the Turning points). */
+#debrief-screen.x-root { display: flex; flex-direction: column; min-height: 100%; text-align: left; }
+.x-hero { --x-tint: color-mix(in srgb, var(--surface-player-body) 30%, transparent); position: relative; display: flex; flex: 1 0 calc(4 * var(--spacing-xxxl) - var(--spacing-sm)); flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--spacing-lg) var(--spacing-xxl); padding: var(--spacing-lg);
+  box-shadow: inset 0 0 80px 24px color-mix(in srgb, var(--border-neutral-dark) 80%, transparent), inset 0 0 0 999px var(--x-tint), inset 0 -1px 0 var(--border-subtle); }
+.x-hero[data-verdict="defeat"] { --x-tint: color-mix(in srgb, var(--surface-enemy-body) 45%, transparent); }
+.x-hero[data-verdict="draw"] { --x-tint: color-mix(in srgb, var(--d-amber-ground) 40%, transparent); }
+/* The verdict takes the row the keys leave it, up to 600. */
+.x-hero > .d-verdict { flex: 1 1 calc(8.75 * var(--spacing-xxxl)); max-width: calc(18.75 * var(--spacing-xxxl)); }
+.x-acts { display: flex; flex: none; flex-direction: column; gap: var(--spacing-md); width: clamp(calc(7 * var(--spacing-xxxl)), calc(100cqw - 14.5 * var(--spacing-xxxl)), calc(8 * var(--spacing-xxxl))); max-width: 100%; }
+.x-sec { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--spacing-sm); }
+.x-sec > .d-btn, .x-share, .x-share > .d-btn { width: 100%; min-width: 0; }
+.x-sec > .x-wide, .x-sec > #db-new { grid-column: 1 / -1; }
+.x-share > .d-menu { min-width: 100%; }
+.x-share > .d-menu.x-down { top: calc(100% + var(--spacing-sm)); bottom: auto; }
+/* Survivors: both fleets as static terrain chips, mirrored about VS. */
+.x-strip { display: grid; flex: none; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); align-items: end; gap: var(--spacing-lg); padding: var(--spacing-md) var(--spacing-lg); background-color: var(--d-deck); box-shadow: inset 0 -1px 0 var(--border-subtle); }
+.x-side { display: flex; flex-direction: column; align-items: flex-start; gap: var(--spacing-sm); min-width: 0; }
+.x-side.is-foe { align-items: flex-end; }
+.x-side-h { display: flex; align-items: baseline; gap: var(--spacing-md); min-height: var(--spacing-lg); max-width: 100%; white-space: nowrap; }
+.x-side-h > .d-lbl { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.x-side.is-foe .x-side-h { flex-direction: row-reverse; }
+/* One row a side, always: on a narrow page the chips shrink, square, the
+   ship with them. */
+.x-chips { display: flex; flex-wrap: nowrap; gap: var(--spacing-xs); width: 100%; }
+.x-chips > .d-tile { flex: 0 1 calc(var(--spacing-xxl) + var(--spacing-sm)); min-width: 0; width: auto; height: auto; aspect-ratio: 1; }
+.x-chips > .d-tile > .d-ship { width: calc(100% - var(--spacing-sm)); height: calc(100% - var(--spacing-sm)); }
+.x-side.is-foe .x-chips { flex-direction: row-reverse; }
+.x-vs { margin-bottom: var(--spacing-xs); }
+/* The report: the news band, then the columns. */
+.x-body { display: flex; flex: 1 0 auto; flex-direction: column; gap: var(--spacing-md); min-height: 0; padding: var(--spacing-lg); }
 #db-post { flex: none; }
-.sim-debrief-cols { display: grid; grid-template-columns: minmax(min-content, 1fr) minmax(0, 1fr); gap: var(--spacing-md) var(--spacing-xl); align-items: start; min-height: 0; }
-@container sim-page (min-width: 481px) {
-  #debrief-screen:not(.hidden), #debrief-screen > .sim-debrief-wrap { height: 100%; }
-  #debrief-screen .sim-debrief { max-height: 100%; }
-  .sim-debrief-cols { flex: 0 1 auto; }
-  .sim-db-card { max-height: 100%; min-height: 0; }
-  .sim-db-card > .sui-data-card-body { flex: 0 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain; }
-  .sim-debrief-wrap > #db-challenge { max-height: calc(100% - 2 * var(--spacing-md)); }
+.x-cols { display: grid; flex: 1 1 auto; grid-template-columns: calc(8 * var(--spacing-xxxl) + var(--spacing-sm)) minmax(0, 1fr); align-items: stretch; gap: var(--spacing-lg); }
+.x-cols:has(> #db-challenge:not(.hidden)) { grid-template-columns: calc(5 * var(--spacing-xxxl) + var(--spacing-md)) calc(7 * var(--spacing-xxxl) + var(--spacing-xs)) minmax(0, 1fr); }
+.x-tally .d-stat-l { overflow: hidden; text-overflow: ellipsis; }
+.x-tally .d-stat-lead { min-width: var(--spacing-xs); }
+.x-cols:has(> #db-challenge:not(.hidden)) .x-tally .d-stat-v { width: var(--spacing-xxxl); }
+.x-tally .sim-tally-h > span { max-width: calc(3 * var(--spacing-xxxl)); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.x-mvp { gap: var(--spacing-md); }
+/* The struct small, in a thin teal rim on the well, as the kit draws it. */
+.x-mvp-s { display: inline-flex; flex: none; background-color: var(--d-well); box-shadow: 0 0 0 1px var(--d-well), 0 0 0 2px var(--surface-player-highlight); }
+.x-mvp-t { display: flex; flex-direction: column; min-width: 0; }
+.x-mvp-t > .d-txt { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.x-tl-b { flex: 1 1 auto; justify-content: center; }
+#moments { display: flex; flex-direction: column; justify-content: center; padding: 0 var(--spacing-lg); }
+.x-tl-none { padding: var(--spacing-md) 0; text-align: center; }
+.x-push { margin-left: auto; }
+/* Narrower than the drawn page: the Challenge beside the Tally, the
+   Turning points under both. Narrowest (with the setup's, above): the keys
+   under the verdict, and one column. */
+@container sim-page (max-width: 719px) {
+  .x-cols:has(> #db-challenge:not(.hidden)) { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+  .x-cols:has(> #db-challenge:not(.hidden)) > .x-tl { grid-column: 1 / -1; }
 }
-/* Narrow, or beside the Challenge panel on a narrow page: one column. */
-@container sim-page (max-width: 480px) {
-  .sim-verdict, .sim-debrief-cols { grid-template-columns: minmax(0, 1fr); }
-  .sim-next { justify-self: stretch; max-width: none; }
-}
-@container sim-page (max-width: 600px) {
-  .sim-debrief-wrap:has(> #db-challenge:not(.hidden)) :is(.sim-verdict, .sim-debrief-cols) { grid-template-columns: minmax(0, 1fr); }
-  .sim-debrief-wrap:has(> #db-challenge:not(.hidden)) .sim-next { justify-self: stretch; max-width: none; }
-}
-
-/* The verdict: the game's banner (96×32 art at 2x the layout, so 4x on
-   screen with the window's scale), or the word led by its glyph. */
-.sim-verdict-banner { flex: none; width: calc(var(--spacing-xxxl) * 6); height: calc(var(--spacing-xxxl) * 2); }
-.sim-verdict-banner svg image { image-rendering: pixelated; }
-.sim-verdict-word { display: inline-flex; align-items: center; gap: var(--spacing-md); }
-#verdict.victory { color: var(--text-player-primary); }
-#verdict.defeat { color: var(--text-enemy-primary); }
-#verdict.draw { color: var(--text-warning); }
-/* Read out, not shown: the banner says it. */
-.sim-sr,
-.sim-fold-1 #share-card .sui-screen-btn > span,
-.sim-fold-2 .sim-head-tools .sui-screen-btn:has(> i) > span,
-.sim-fold-2 #live-to > span { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
-
-/* The next moves: Rematch and two pairs; New encounter, the game's
-   tertiary link, sits under the result it starts over from. */
-#sim .sim-db-new { align-self: flex-start; padding-left: 0; padding-right: 0; }
-/* Rematch across, then two to a row on one pair of columns; a button left
-   standing alone spans the row. Icon and label centre as one. */
-#sim .sim-next > .sui-screen-btn { flex: 1 1 40%; justify-content: center; gap: var(--spacing-md); padding: 0 var(--spacing-md); white-space: nowrap; }
-#sim .sim-next > #db-rematch { flex-basis: 100%; }
-#sim .sim-next .sui-screen-btn span { flex-grow: 0; }
-
-/* What became of the run: the game's system alert, across the page. */
-#sim .sim-post { max-width: none; align-items: center; flex-wrap: wrap; }
-/* The action slot drops under the text before a long name squeezes it. */
-.sim-post .sui-message-system-alert-close-container { padding: var(--spacing-sm) var(--spacing-md); align-items: center; gap: var(--spacing-md); margin-left: auto; max-width: 100%; min-width: 0; }
-.sim-post .sui-screen-btn { min-width: 0; max-width: 100%; }
-.sim-post .sui-screen-btn span { overflow: hidden; text-overflow: ellipsis; }
-
-/* Tallies and Turning points: data cards (Team Ops' H.card). */
-#sim .sim-db-card .sui-data-card-body { align-items: stretch; padding: var(--spacing-sm) var(--spacing-md); gap: var(--spacing-sm); }
-/* The tallies: the label, then one column per side under its tag. The rows
-   share the card's columns (subgrid), so every figure sits under its side. */
-.sim-tallies { display: grid; grid-template-columns: minmax(max-content, 1fr) max-content max-content; grid-auto-rows: max-content; column-gap: var(--spacing-md); }
-.sim-tally-rows { display: contents; }
-.sim-tally { display: grid; grid-column: 1 / -1; grid-template-columns: subgrid; min-height: var(--icon-sm); border-top: 1px solid var(--border-subtle); }
-.sim-tally-h { border-top: 0; min-height: 0; }
-.sim-tally > span:not(:first-child) { justify-self: end; padding: 0 var(--spacing-sm); text-align: right; }
-.sim-tally-l { display: flex; align-items: center; gap: var(--spacing-md); min-width: 0; white-space: nowrap; }
-.sim-tally-i { flex: none; width: var(--icon-sm); }
-.sim-tally-l > i { flex: none; }
-.sim-side-tag { max-width: 12ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-/* Turning points, in the Map Viewer log's row language. */
-#moments { display: grid; grid-template-columns: auto auto auto minmax(0, 1fr); column-gap: var(--spacing-md); align-self: stretch; }
-.sim-moment { display: grid; grid-column: 1 / -1; grid-template-columns: subgrid; align-items: center; padding: var(--spacing-sm) 0; border-top: 1px solid var(--border-subtle); text-align: left; }
-.sim-moment:first-child { border-top: 0; padding-top: 0; }
-.sim-moment-t { font-variant-numeric: tabular-nums; white-space: nowrap; }
-.sim-moment-none { display: block; }
-#show-log { align-self: flex-start; max-width: 100%; min-width: 0; }
-#show-log span { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 
 /* ── P8 social: the Challenge / Live panel ────────────────────────────── */
-/* The Challenge panel takes the Round card's place: a challenge's settings
-   are part of the battle, so they are read here, not edited. It is the game's
-   data card, its tag naming the round, with the frameless close the game puts
-   at the end of a header that can be left. */
-#challenge { grid-area: round; }
-.sim-challenge { min-width: 0; }
-.sim-card-head { display: flex; align-items: flex-end; justify-content: space-between; gap: var(--spacing-md); align-self: stretch; }
-.sim-card-head .sui-screen-nav-close { align-self: center; padding: 0 var(--spacing-xs); }
-.sim-challenge-b { min-width: 0; align-items: stretch; text-align: left; }
-.sim-challenge .sim-challenge-b.sui-mod-spacing-xl { padding: var(--spacing-md); gap: var(--spacing-md); }
-.sim-challenge-top { display: flex; flex-direction: column; gap: var(--spacing-md); min-width: 0; }
-.sim-challenge-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-body); }
-/* A STATE as the game's badge, then the settings as one hint line. */
-.sim-settings { display: flex; flex-wrap: wrap; align-items: center; gap: var(--spacing-md); }
-.sim-settings .sui-text-hint > span { white-space: nowrap; }
-/* People are playercard's person line: face, [TAG] name — the id stays off,
-   as the Comms ladder leaves it. */
-.sim-challenge .pc-person { min-width: 0; overflow: hidden; }
-.sim-challenge .pc-person .pc-id { display: none; }
-.sim-by { display: flex; flex-wrap: wrap; align-items: center; gap: var(--spacing-xs) var(--spacing-md); min-width: 0; }
-/* The Comms ladder (simcard.js ladderList) in the debrief's narrow side
-   panel: the run's reading takes a line of its own under the name, so a name
-   is read, not cut to its first letters. Setup's wider panel keeps one line. */
-#db-challenge .chl-run { grid-template-columns: var(--icon-sm) minmax(0, 1fr); row-gap: 0; padding: var(--spacing-xs) var(--spacing-xs) var(--spacing-xs) var(--spacing-md); }
-#db-challenge .chl-run > .pc-reads { grid-column: 2; justify-self: end; }
-/* ...and a long name breaks onto a second line rather than losing its end. */
-#db-challenge .chl-run .pc-name, #db-challenge .chl-run .pc-nm { white-space: normal; overflow-wrap: anywhere; }
-.sim-by-where { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.sim-pfp { position: relative; flex: none; overflow: hidden; width: var(--icon-sm); height: var(--icon-sm); background: var(--surface-neutral-body); }
-.sim-pfp .pfp-viewer-layer { position: absolute; top: 0; left: 0; width: 100%; height: 100%; max-width: none; transform: none; }
-/* A live battle's two seats: the person, and what they owe the lobby. You
-   are marked as the Comms ladder marks you. */
-.sim-seats { display: flex; flex-direction: column; }
-.sim-seat { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: var(--spacing-md); min-height: calc(var(--icon-md) + 2 * var(--spacing-xs)); padding: 0 var(--spacing-xs) 0 var(--spacing-md); border-top: 1px solid var(--border-subtle); }
-.sim-seat:first-child { border-top: 0; }
-.sim-seat.sim-run-me { background: var(--surface-player-highlight); box-shadow: inset var(--spacing-xs) 0 0 var(--accent-primary); }
-.sim-panel-empty { padding: var(--spacing-sm) 0; text-align: left; }
-
-.sim-thread { display: flex; flex-direction: column; padding-top: var(--spacing-sm); border-top: 1px solid var(--border-subtle); }
-.sim-thread-h { display: flex; justify-content: space-between; padding-bottom: var(--spacing-xs); }
-/* The talk is chatrow.js's rows (chat-rows.css), read-only here: the
-   conversation itself is the Map Viewer's Comms rail beside the battle. The
-   rows are drawn at the game's 1x and take the window's scale like the rest. */
-.sim-talk { display: flex; flex-direction: column; text-align: left; min-width: 0; }
-.sim-talk .chat-msg + .chat-msg { margin-top: var(--spacing-xs); }
-/* The clock in the message's own face, so it never outweighs the message. */
-.sim-talk .chat-msg-time { font-family: 'DirectiveZero', sans-serif; font-size: 8px; line-height: 12px; color: var(--text-hint); }
-
-
-/* Debrief (P7): the challenge beside the debrief, the two centred on the
-   page; the debrief grows to its width and no further. */
-.sim-debrief-wrap { display: flex; flex-wrap: wrap; justify-content: center; align-items: flex-start; padding: 0; }
-.sim-debrief-wrap > #db-challenge { flex: 0 0 180px; min-width: 0; margin: var(--spacing-md) 0 0 var(--spacing-lg); }
-.sim-debrief-wrap > .sim-debrief { flex: 1 1 calc(var(--spacing-xxxl) * 10); max-width: calc(var(--spacing-xxxl) * 26); }
+/* W2-social. The Challenge panel stands in the Mission panel's place: a
+   challenge's settings are part of the battle, so they are read here, not
+   edited. simulator-social.js draws its header and body into
+   #challenge-main; the footer (Edit fleets, or a live lobby's composer) is
+   the page's own. In the debrief the same panel is compact (.x-chal). */
+.s-chal { display: flex; flex-direction: column; flex: 1 1 auto; min-height: 0; }
+.s-chal > .d-panel-b { flex: 1 1 auto; overflow-y: auto; overscroll-behavior: contain; }
+/* The header sits one level down (in #challenge-main), so it takes the
+   panel's tone here: amber for a challenge, coral for a live battle. */
+#challenge.is-warn .s-chal > .d-panel-h, #challenge.is-warn .s-chal > .d-panel-h > .d-gly { color: var(--text-warning); }
+#challenge.is-enemy .s-chal > .d-panel-h { background-color: var(--surface-enemy-body); color: var(--text-enemy-primary); }
+#challenge.is-enemy .s-chal > .d-panel-h > .d-gly { color: var(--text-enemy-primary); }
+.s-ident { display: flex; flex-direction: column; gap: var(--spacing-sm); min-width: 0; }
+:is(.s-chal, .x-chal) .d-name { overflow: hidden; text-overflow: ellipsis; }
+.s-by { display: flex; align-items: center; gap: var(--spacing-sm); min-width: 0; white-space: nowrap; }
+.s-by-n { flex: 0 0 auto; max-width: 60%; overflow: hidden; text-overflow: ellipsis; }
+.s-by-w { flex: 0 10 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.s-pills { display: flex; flex-wrap: wrap; gap: var(--spacing-sm); }
+.s-lock { display: flex; align-items: center; gap: var(--spacing-sm); min-width: 0; color: var(--text-hint); white-space: nowrap; }
+.s-lock > .d-lbl-sm { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.s-empty { padding: var(--spacing-sm) 0; }
+.x-chal .d-panel-b.is-flush > .s-empty { padding: var(--spacing-sm) var(--spacing-md); }
+.x-chal-f { white-space: nowrap; }
+.x-chal-f > .d-txt { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+/* The ladder is simcard's (.chl-*) worn as deck ladder rows (.d-lrow): the
+   person spans the portrait and name columns, the time leads the verdict. */
+:is(#challenge, #db-challenge) .chl-run { border-top: 0; }
+:is(#challenge, #db-challenge) .chl-run > :is(.pc-person, .pc-nm) { grid-column: span 2; display: flex; align-items: center; gap: var(--spacing-sm); min-width: 0; overflow: hidden; }
+:is(#challenge, #db-challenge) .chl-run .pc-pfp { flex: none; width: var(--icon-sm); height: var(--icon-sm); box-shadow: 0 0 0 1px var(--border-subtle); }
+:is(#challenge, #db-challenge) .chl-run.is-me .pc-pfp { box-shadow: 0 0 0 1px var(--accent-primary); }
+:is(#challenge, #db-challenge) .chl-run .pc-pfp .pfp-viewer-layer { width: 100%; height: 100%; }
+:is(#challenge, #db-challenge) .chl-run .pc-id { display: none; }
+:is(#challenge, #db-challenge) .chl-run .d-lrow-name { display: block; }
+:is(#challenge, #db-challenge) .chl-run .gc-tag { color: var(--accent-secondary); }
+:is(#challenge, #db-challenge) .chl-verdict { order: 1; display: inline-flex; justify-content: center; }
+:is(#challenge, #db-challenge) .chl-more { padding: var(--spacing-xs) var(--spacing-sm); }
+/* A live lobby: the seats, and the composer in the panel's footer. */
+.s-seats { display: flex; flex-direction: column; gap: var(--spacing-sm); }
+.s-say { flex: 1 1 auto; }
+/* The debrief's alert band holds one line: a long name gives way first. */
+#db-post.d-alert { white-space: nowrap; }
+#db-post.d-alert > :is(.d-alert-h, .d-alert-d) { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+#db-post.d-alert > .d-alert-d { flex-grow: 1; }
+#db-post.d-alert > .d-btn { flex: 0 1 auto; min-width: 0; max-width: 50%; }
+#db-post.d-alert > .d-btn > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+/* Head-to-head: a live battle's debrief band. */
+.x-h2h { display: flex; align-items: center; gap: var(--spacing-md); min-width: 0; min-height: var(--spacing-xxxl); padding: var(--spacing-sm) var(--spacing-sm) var(--spacing-sm) var(--spacing-md); background-color: var(--surface-default); box-shadow: inset 2px 0 0 var(--accent-secondary), inset 0 0 0 1px var(--border-subtle); text-align: left; white-space: nowrap; }
+.x-h2h-l { flex: none; }
+.x-score { display: flex; align-items: center; gap: var(--spacing-sm); flex: none; }
+.x-score-who { max-width: calc(4 * var(--spacing-xxxl)); overflow: hidden; text-overflow: ellipsis; }
+.x-h2h-t { min-width: 0; margin-left: auto; overflow: hidden; text-overflow: ellipsis; }
 
 /* ── P8 social: Share, Paste and Post to… ─────────────────────────────── */
-/* The game's system modal (SUIParts.modal), held to the window: a long room
-   list scrolls inside it, and the calls to action never leave the screen. */
-/* The modal's own padding is clear space around the frame; at the game's
-   scale a short window needs it for the list instead. */
-/* Centred over the body, clear of the foot it would otherwise cover. */
-#sim .sim-dialog { padding-bottom: calc(var(--from-input-height-content) + 2 * var(--spacing-sm)); }
-.sim-dialog .sui-message-system-modal { width: min(calc(20 * var(--spacing-xxxl)), 100%); max-height: 100%; min-height: 0; padding: var(--spacing-xl); }
-.sim-dialog .sui-message-system-modal-frame { flex: 1 1 auto; min-height: 0; }
-.sim-dialog .sui-message-system-model-frame-center { align-self: stretch; min-width: 0; min-height: 0; }
-.sim-dialog .sp-modal-body { align-self: stretch; min-height: 0; }
-.sim-dialog .sp-modal-body > * { flex: none; }
-.sim-dialog label.sui-input-text { min-width: 0; }
-/* SUI's notch is the text field's focus mark. */
-#sim label.sui-input-text input:focus-visible { outline: 0; }
-.sim-post-what { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-/* The rooms: the game's radio result rows, the radio leading, then the room
-   as the Comms channel list draws it. The list scrolls; the radio sprite
-   alone says which one is picked. */
-.sim-dialog .sp-modal-body > .sim-post-rooms { border-top: 1px solid var(--border); flex: 0 1 auto; min-height: calc(var(--icon-xl) + 2 * var(--spacing-md)); max-height: calc(2.5 * (var(--icon-xl) + 2 * var(--spacing-md))); overflow-y: auto; overscroll-behavior: contain; }
-.sim-room { cursor: pointer; text-align: left; }
-.sim-room .sui-radio-container { flex: none; width: var(--form-input-height-total); }
-.sim-dialog .sui-result-row-left-section { min-width: 0; padding-right: 0; }
-.sim-room .sui-result-row-player-info { min-width: 0; padding-right: 0; }
-.sim-room .sui-text-label-block { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* W2-social. Deck dialogs (SimDeck.modal) in the scaled layout. Post to…
+   lists the rooms as radio rows: the real radio is visually hidden, the row
+   is the target, and its ground says which one is picked. */
+.s-post-what { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.s-rooms { display: flex; flex-direction: column; min-height: 0; max-height: calc(5 * var(--spacing-xxxl)); overflow-y: auto; overscroll-behavior: contain; box-shadow: inset 0 1px 0 var(--border-subtle); }
+.s-rooms > .s-empty { padding: var(--spacing-sm); }
+.s-room { position: relative; display: grid; grid-template-columns: var(--icon-sm) minmax(0, 1fr) auto; align-items: center; gap: var(--spacing-sm); flex: none; min-height: var(--spacing-xxl); padding: 0 var(--spacing-sm); box-shadow: inset 0 -1px 0 var(--border-subtle); cursor: pointer; text-align: left; }
+.s-room:hover { background-color: var(--d-panel2); }
+.s-room:has(> input:checked) { background-color: var(--surface-player-body); box-shadow: inset 2px 0 0 var(--accent-primary), inset 0 -1px 0 var(--border-subtle); }
+.s-room:has(> input:focus-visible) { box-shadow: inset 0 0 0 1px var(--accent-primary-active); }
+.s-room > :is(.pfp-frame, .chat-room-icon, .chat-room-mark) { position: relative; display: flex; align-items: center; justify-content: center; width: var(--icon-sm); height: var(--icon-sm); min-width: 0; margin: 0; padding: 0; border: 0; overflow: hidden; background-color: var(--surface-neutral-body); color: var(--text-hint); }
+.s-room > .pfp-frame .pfp-viewer-layer { position: absolute; top: 0; left: 0; width: 100%; height: 100%; max-width: none; transform: none; }
+.s-room-n, .s-room-sub { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.s-room-n { color: var(--text-body); }
+.s-room:has(> input:checked) .s-room-n { color: var(--accent-primary); }
+.s-room-sub { max-width: calc(4 * var(--spacing-xxxl)); }

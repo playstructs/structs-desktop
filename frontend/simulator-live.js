@@ -271,6 +271,17 @@
         var sw = function (id) { return id === HOST_ID ? GUEST_ID : id === GUEST_ID ? HOST_ID : id; };
         return Object.assign({}, k, { owner: sw(k.owner), by_owner: sw(k.by_owner) });
       }),
+      // Each struct's kills and damage, whose they are in this side's terms:
+      // the debrief's Top struct.
+      byStruct: (function () {
+        var out = {}, by = s.byStruct || {};
+        Object.keys(by).forEach(function (id) {
+          var b = by[id] || {};
+          var owner = !flipIt ? b.owner : b.owner === HOST_ID ? GUEST_ID : b.owner === GUEST_ID ? HOST_ID : b.owner;
+          out[id] = Object.assign({}, b, { owner: owner });
+        });
+        return out;
+      })(),
     };
     if (this.opts.onChange) this.opts.onChange();
   };

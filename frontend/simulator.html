@@ -11,182 +11,169 @@
        game scales its menus (1x, scale(2) from 1152px, scale(4) from 2304px).
        Everything here is laid out at the game's 1x and drawn at its scale. -->
   <link rel="stylesheet" href="css/main.css">
-  <link rel="stylesheet" href="sui-parts.css">
   <link rel="stylesheet" href="chat-rows.css">
   <link rel="stylesheet" href="playercard.css">
   <link rel="stylesheet" href="structs-cards.css">
   <link rel="stylesheet" href="simcard.css">
+  <link rel="stylesheet" href="simdeck.css">
   <link rel="stylesheet" href="simulator.css">
 </head>
 <body id="sim" class="sui-theme-player sui-text-tiny" data-screen="setup">
 
 <div id="menu-page-layout">
-  <div id="menu-page-panel" class="sui-panel sui-theme-player">
-    <div class="sui-panel-top-fill-background"></div>
-    <div class="sui-panel-bottom-fill-background"></div>
-    <div class="sui-panel-edge-left"></div>
-    <div id="menu-page-panel-chunk" class="sui-panel-chunk sui-mod-grow sui-mod-shrink">
+  <div id="menu-page-panel" class="d-root s-shell">
+    <div id="menu-page-panel-chunk">
 
-      <!-- ONE nav on every screen: the mode, the three steps, the battle's
-           status, and the battle's own tools. -->
-      <div id="menu-page-nav" class="sui-screen sui-screen-full-width">
-        <nav class="sui-screen-nav" aria-label="Simulator">
-          <div id="sim-steps" class="sui-screen-nav-items">
-            <span id="sim-mode" class="sui-screen-nav-item sui-mod-header">Simulator</span>
-            <a class="sui-screen-nav-item" data-step="setup" href="javascript:void(0)">Setup</a>
-            <a class="sui-screen-nav-item" data-step="battle" href="javascript:void(0)">Battle</a>
-            <a class="sui-screen-nav-item" data-step="debrief" href="javascript:void(0)">Debrief</a>
-          </div>
-          <div id="sim-nav-tools">
-            <div id="sim-status" aria-live="polite"></div>
-            <a id="pause" class="sui-nav-btn" href="javascript:void(0)">Pause</a>
-            <a id="end" class="sui-screen-nav-close" href="javascript:void(0)" title="End battle" aria-label="End battle"><i class="sui-icon sui-icon-sm icon-close"></i></a>
-          </div>
+      <!-- COMMAND DECK top bar, on every screen: the mode, the three steps,
+           then the battle's status and its own tools. -->
+      <header id="menu-page-nav" class="d-topbar">
+        <nav class="s-nav" aria-label="Simulator">
+          <span id="sim-mode" class="d-mode"><i class="sui-icon icon-computer d-gly is-16" aria-hidden="true"></i><span>Simulator</span></span>
+          <ol id="sim-steps" class="d-steps">
+            <li><a class="d-step" data-step="setup" href="javascript:void(0)"><i class="sui-icon icon-success d-gly is-16 d-step-ok" aria-hidden="true"></i><span>Setup</span></a></li>
+            <li class="d-step-sep" aria-hidden="true"><i class="sui-icon icon-chevron-right d-gly is-16" aria-hidden="true"></i></li>
+            <li><a class="d-step" data-step="battle" href="javascript:void(0)"><i class="sui-icon icon-success d-gly is-16 d-step-ok" aria-hidden="true"></i><span>Battle</span></a></li>
+            <li class="d-step-sep" aria-hidden="true"><i class="sui-icon icon-chevron-right d-gly is-16" aria-hidden="true"></i></li>
+            <li><a class="d-step" data-step="debrief" href="javascript:void(0)"><i class="sui-icon icon-success d-gly is-16 d-step-ok" aria-hidden="true"></i><span>Debrief</span></a></li>
+          </ol>
         </nav>
-      </div>
+          <div id="sim-nav-tools" class="d-topbar-r">
+            <div id="sim-status" class="s-status" aria-live="polite"></div>
+            <span class="d-topbar-sep s-tools-sep" aria-hidden="true"></span>
+            <button id="pause" type="button" class="d-tool" aria-pressed="false"><i class="sui-icon icon-in-progress d-gly" aria-hidden="true"></i><span>Pause</span></button>
+            <button id="end" type="button" class="d-end" title="End battle" aria-label="End battle"><i class="sui-icon icon-close d-gly is-16" aria-hidden="true"></i><span class="d-end-cap">End</span></button>
+          </div>
+      </header>
 
-      <div id="sim-body-screen" class="height-100 sui-screen sui-screen-full-width sui-screen-shrink">
-        <div id="menu-page-screen-body" class="height-100 sui-page-body-screen">
+      <div id="sim-body-screen" class="height-100">
+        <div id="menu-page-screen-body" class="height-100">
 
   <!-- ── Setup ─────────────────────────────────────────────────────────── -->
-  <div id="setup-screen" class="sim-setup">
-    <!-- P5 Round + Share: the round's settings and what to do with them, as
-         the game's form cards (.sui-data-card) holding the game's fields. -->
+  <div id="setup-screen" class="s-body">
+    <!-- Mission: the round's settings. -->
     <div class="sim-round-col">
-    <aside id="round" class="sui-data-card sp-narrow" aria-label="Round">
-      <!-- The card's tag, and who the round is for (a DM) beside it, with the
-           frameless close the challenge card's head carries. -->
-      <div class="sim-card-head">
-        <div class="sui-data-card-header sui-text-header">Round</div>
-        <div id="addressed" class="sim-addressed hidden">
-          <label id="for-l" class="sui-text-label sim-for-l">For</label>
-          <div class="sim-for" role="group" aria-labelledby="for-l">
-            <span id="addressed-pfp" class="sim-pfp"></span>
-            <span id="addressed-name" class="sui-text-label sim-for-name"></span>
-            <span class="sui-text-hint">DM</span>
-            <a id="addressed-clear" class="sui-screen-nav-close" href="javascript:void(0)" aria-label="Not for anyone" title="Not for anyone"><i class="sui-icon sui-icon-sm icon-close"></i></a>
-          </div>
+    <aside id="round" class="d-panel" aria-label="Mission">
+      <header class="d-panel-h"><i class="sui-icon icon-planet d-gly is-16" aria-hidden="true"></i><span>Mission</span><span class="d-panel-r"><button id="relock" type="button" class="d-iconbtn hidden" aria-label="Back to the challenge" title="Back to the challenge"><i class="sui-icon icon-chevron-left d-gly is-16" aria-hidden="true"></i></button></span></header>
+      <div id="addressed" class="s-for hidden"><span id="addressed-pfp" class="d-pf is-violet"></span><span class="s-for-t"><span class="d-lbl s-for-name"><span id="for-l">For</span> <span id="addressed-name"></span></span><span class="d-txt d-hint">DM</span></span><button id="addressed-clear" type="button" class="d-iconbtn" aria-label="Not for anyone" title="Not for anyone"><i class="sui-icon icon-close d-gly is-16" aria-hidden="true"></i></button></div>
+      <div class="d-panel-b s-mission-b">
+        <div class="d-sec">
+          <div class="d-sec-h"><span id="enc-l">Encounter</span></div>
+          <div id="encounters"></div>
+        </div>
+        <div id="ai-level"></div>
+        <div class="d-sec">
+          <div class="d-sec-h"><span id="bt-l">Block time</span></div>
+          <div id="block-time" data-labelledby="bt-l"></div>
+        </div>
+        <div class="d-sec">
+          <div class="d-sec-h"><span id="charge-l">Opening charge</span></div>
+          <div id="charges" class="s-batts" role="group" aria-labelledby="charge-l"></div>
         </div>
       </div>
-      <div class="sui-data-card-body sim-round-b">
-        <div class="sui-form-element-label-group sim-span">
-          <label id="enc-l" class="sui-form-element-group-label sui-text-label">Encounter</label>
-          <div id="encounters" data-labelledby="enc-l" data-rows="sp-compact sp-tiles"></div>
-        </div>
-        <label class="sui-input-text sui-text-label" for="ai-level"><span>Opponent</span>
-          <select id="ai-level"><option value="easy">Easy</option><option value="difficult">Difficult</option><option value="hard">Hard</option></select>
-        </label>
-        <div class="sim-row sim-row-end">
-          <label class="sui-input-text" for="seed"><span>Seed</span><input type="text" id="seed" value="spearpoint" maxlength="60" spellcheck="false" autocomplete="off"></label>
-          <button id="reseed" type="button" class="set-username-pfp-refresh-btn" aria-label="New seed" title="New seed"><i class="sui-icon sui-icon-md icon-refresh-12 sui-text-secondary"></i></button>
-        </div>
-        <div class="sui-form-element-label-group sim-span">
-          <label id="bt-l" class="sui-form-element-group-label sui-text-label">Block time</label>
-          <div id="block-time" data-labelledby="bt-l" data-rows="sp-compact sp-tiles"></div>
-        </div>
-        <div class="sui-form-element-label-group sim-span">
-          <label id="charge-l" class="sui-form-element-group-label sui-text-label">Opening charge</label>
-          <div id="charges" class="sim-charges" role="group" aria-labelledby="charge-l"></div>
-        </div>
+      <div class="d-panel-f s-seed">
+        <label for="seed" class="d-lbl d-hint">Seed</label>
+        <span class="d-code"><input type="text" id="seed" class="d-code-in" value="spearpoint" maxlength="60" spellcheck="false" autocomplete="off" aria-label="Battle seed"><button id="reseed" type="button" class="d-code-btn" aria-label="Roll a new seed" title="Roll a new seed"><i class="sui-icon icon-refresh-12 d-gly" aria-hidden="true"></i></button></span>
       </div>
     </aside>
     </div>
 
-    <aside id="challenge" class="sui-data-card sim-challenge hidden" aria-label="Challenge"></aside>
+    <aside id="challenge" class="d-panel is-warn hidden" aria-label="Challenge"><div id="challenge-main" class="s-chal"></div><div class="d-panel-f"><button id="unlock" type="button" class="d-tool hidden" title="Edit fleets"><i class="sui-icon icon-edit d-gly" aria-hidden="true"></i><span>Edit fleets</span></button></div></aside>
 
-    <main id="fleets">
-      <div id="fleet-head">
-        <div class="sim-side"><span class="sui-text-label sim-you">Your fleet</span><span class="sui-resource sim-count" title="Structs"><i class="sui-icon sui-icon-deployed-structs"></i><span id="count-you" class="sui-text-label"></span></span></div>
-        <div class="sim-side sim-side-cpu"><span class="sui-text-label sim-cpu">Computer</span><span class="sui-resource sim-count" title="Structs"><i class="sui-icon sui-icon-enemy-deployed-structs"></i><span id="count-cpu" class="sui-text-label"></span></span></div>
+    <main id="fleets" class="s-centre" aria-label="Fleets">
+      <div id="fleet-head" class="s-fleets">
+        <div class="s-fleetblock">
+          <div class="d-fleet"><span class="d-fleet-name sim-you">Your fleet</span><span class="d-fleet-count sim-count" title="Structs"><i class="sui-icon sui-icon-deployed-structs d-ico" aria-hidden="true"></i><span id="count-you"></span></span></div>
+          <div class="s-reachrow"><span class="d-lbl d-hint">Reach</span><span id="reach-you"></span></div>
+        </div>
+        <div class="s-fleetblock is-foe">
+          <div class="d-fleet is-foe"><span class="d-fleet-name sim-cpu">Computer</span><span class="d-fleet-count sim-count" title="Structs"><i class="sui-icon sui-icon-enemy-deployed-structs d-ico" aria-hidden="true"></i><span id="count-cpu"></span></span></div>
+          <div class="s-reachrow"><span class="d-lbl d-hint">Reach</span><span id="reach-cpu"></span></div>
+        </div>
       </div>
-      <div id="arena" aria-label="Fleet setup"></div>
+      <div id="arena" class="d-board s-board" aria-label="Both fleets"></div>
     </main>
 
-    <aside id="inspector" aria-label="Selected slot"></aside>
+    <aside id="inspector" class="d-panel" aria-label="Matchup"></aside>
   </div>
 
   <!-- ── Debrief ───────────────────────────────────────────────────────── -->
-  <div id="debrief-screen" class="hidden">
-    <div class="sim-debrief-wrap">
-    <aside id="db-challenge" class="sui-data-card sim-challenge hidden" aria-label="Challenge"></aside>
-    <div class="sim-debrief">
-      <!-- P7 debrief: the game's end-of-battle banner, the next moves, what
-           became of the run, then the battle as two of the game's data cards. -->
-      <section class="sim-verdict">
-        <div class="sim-verdict-text">
-          <div id="verdict-banner" class="raid-end-banner sim-verdict-banner hidden" aria-hidden="true"></div>
-          <span id="verdict" class="sui-text-display sim-huge"></span>
-          <span id="reason"></span>
-          <span id="debrief-meta" class="sui-text-hint"></span>
-          <a id="db-new" href="javascript:void(0)" class="sui-nav-btn sim-db-new">New encounter</a>
+  <!-- Debrief (W2-debrief): the verdict over the starfield beside the next
+       moves, both fleets as they ended, then the battle's tally and its
+       turning points. #db-post and #db-challenge are simulator-social.js's. -->
+  <div id="debrief-screen" class="hidden x-root">
+    <section id="db-hero" class="x-hero d-t-space" data-verdict="victory" aria-label="Result">
+      <div id="verdict-box" class="d-verdict">
+        <h1 id="verdict" class="d-verdict-t"></h1>
+        <span id="reason" class="d-verdict-sub"></span>
+        <div id="debrief-meta" class="d-facts x-facts"></div>
+      </div>
+      <div class="x-acts sim-next">
+        <button id="db-rematch" type="button" class="d-launch is-block"><span>Rematch</span><i class="sui-icon icon-chevron-right d-gly" aria-hidden="true"></i></button>
+        <div class="x-sec">
+          <button id="db-edit" type="button" class="d-btn is-sm is-20"><i class="sui-icon icon-edit d-gly is-16" aria-hidden="true"></i><span>Edit fleets</span></button>
+          <button id="db-swap" type="button" class="d-btn is-sm is-20"><i class="sui-icon icon-transfers d-gly is-16" aria-hidden="true"></i><span>Swap sides</span></button>
+          <button id="db-harder" type="button" class="d-btn is-sm is-20 is-coral"><i class="sui-icon icon-chevron-up d-gly is-16" aria-hidden="true"></i><span>Harder</span></button>
+          <span class="d-menu-anchor x-share"><button id="db-code" type="button" class="d-btn is-sm is-20 is-violet"><i class="sui-icon icon-outgoing d-gly is-16" aria-hidden="true"></i><span>Share</span><i class="sui-icon icon-caret-down d-gly is-16 d-tool-caret" aria-hidden="true"></i></button></span>
+          <button id="db-new" type="button" class="d-btn is-sm is-20 hidden"><i class="sui-icon icon-refresh-12 d-gly is-16" aria-hidden="true"></i><span>New encounter</span></button>
         </div>
-        <div class="sim-next">
-          <button id="db-rematch" type="button" class="sui-screen-btn sui-mod-primary sim-wide"><i class="sui-icon sui-icon-md icon-refresh-12"></i><span>Rematch</span></button>
-          <button id="db-edit" type="button" class="sui-screen-btn sui-mod-secondary"><i class="sui-icon sui-icon-md icon-edit"></i><span>Edit fleets</span></button>
-          <button id="db-swap" type="button" class="sui-screen-btn sui-mod-secondary"><i class="sui-icon sui-icon-md icon-transfers"></i><span>Swap sides</span></button>
-          <button id="db-harder" type="button" class="sui-screen-btn sui-mod-secondary"><i class="sui-icon sui-icon-md icon-chevron-up"></i><span>Harder</span></button>
-          <button id="db-code" type="button" class="sui-screen-btn sui-mod-secondary"><i class="sui-icon sui-icon-md icon-outgoing"></i><span>Share</span></button>
-        </div>
-      </section>
-      <div id="db-post" class="sim-post hidden" role="status"></div>
-      <div class="sim-debrief-cols">
-        <section class="sui-data-card sui-theme-player sim-db-card sim-db-tallies" aria-label="Tallies">
-          <div class="sui-data-card-header sui-text-header">Tallies</div>
-          <div class="sui-data-card-body sim-tallies">
-            <div class="sui-data-card-row sim-tally sim-tally-h"><span></span><span class="sui-text-label sim-side-tag sim-you">You</span><span class="sui-text-label sim-side-tag sim-cpu">Computer</span></div>
-            <div id="tallies" class="sim-tally-rows"></div>
-          </div>
+      </div>
+    </section>
+    <section class="x-strip" aria-label="Survivors">
+      <div class="x-side"><div class="x-side-h"><span class="d-lbl sim-you">You</span><span id="db-lost-you" class="d-txt d-hint"></span></div><div id="db-chips-you" class="x-chips"></div></div>
+      <span class="d-vs x-vs" aria-hidden="true">VS</span>
+      <div class="x-side is-foe"><div class="x-side-h"><span id="db-them" class="d-lbl sim-cpu">Computer</span><span id="db-lost-cpu" class="d-txt d-hint"></span></div><div id="db-chips-cpu" class="x-chips"></div></div>
+    </section>
+    <div class="x-body">
+      <div id="db-post" class="hidden" role="status"></div>
+      <div class="x-cols">
+        <aside id="db-challenge" class="hidden" aria-label="Challenge"></aside>
+        <section class="d-panel x-tally sim-db-tallies" aria-label="Tally">
+          <header class="d-panel-h"><i class="sui-icon icon-dmg d-gly is-16" aria-hidden="true"></i><span>Tally</span><span class="d-panel-r sim-tally-h"><span class="sim-you">You</span><span class="d-hint">vs</span><span class="sim-cpu">Computer</span></span></header>
+          <div class="d-panel-b is-tight"><div id="tallies"></div></div>
+          <footer id="db-mvp" class="d-panel-f x-mvp hidden"></footer>
         </section>
-        <section class="sui-data-card sui-theme-player sim-db-card sim-db-moments" aria-label="Turning points">
-          <div class="sui-data-card-header sui-text-header">Turning points</div>
-          <div class="sui-data-card-body sui-mod-spacing-xl">
-            <div id="moments"></div>
-            <button id="show-log" type="button" class="sui-screen-btn sui-mod-secondary"><i class="sui-icon sui-icon-md icon-combat-log"></i><span>Full battle log</span></button>
-          </div>
+        <section class="d-panel x-tl sim-db-moments" aria-label="Turning points">
+          <header class="d-panel-h"><i class="sui-icon icon-combat-log d-gly is-16" aria-hidden="true"></i><span>Turning points</span><span id="db-blocks" class="d-panel-r"></span></header>
+          <div class="d-panel-b is-flush x-tl-b"><div id="moments"></div></div>
+          <footer class="d-panel-f"><button id="show-log" type="button" class="d-tool"><i class="sui-icon icon-combat-log d-gly" aria-hidden="true"></i><span>Full battle log</span></button><span id="db-attacks" class="d-txt d-hint x-push"></span></footer>
         </section>
       </div>
-    </div>
     </div>
   </div>
 
         </div>
       </div>
 
-      <!-- The foot of the panel: what stops a start, then every action the
-           page has, the forward one last (simulator.js fitFoot folds the
-           labels of iconed buttons when the strip is short of room). -->
-      <div id="sim-go" class="sim-go">
-        <div id="checks" aria-live="polite"></div>
-        <!-- The fleets' tools: what the board can do as a whole. -->
-        <div class="sim-head-tools sui-screen-btn-flex-wrapper" role="group" aria-label="Fleets">
-          <span id="locked-chip" class="sui-badge sui-mod-default hidden"></span>
-          <button id="unlock" type="button" class="sui-screen-btn sui-mod-secondary hidden" title="Edit fleets"><i class="sui-icon sui-icon-md icon-edit"></i><span>Edit fleets</span></button>
-          <button id="relock" type="button" class="sui-screen-btn sui-mod-secondary hidden" title="Back to the challenge"><i class="sui-icon sui-icon-md icon-chevron-left"></i><span>Back to the challenge</span></button>
-          <button id="live-room" type="button" class="sui-screen-btn sui-mod-secondary hidden" title="Anyone in the room may take it; anyone there may watch"><i class="sui-icon sui-icon-md icon-raid"></i><span>Play live</span></button>
-          <button id="mirror" type="button" class="sui-screen-btn sui-mod-secondary" title="Copy your fleet to the computer"><span>Mirror</span></button>
-          <button id="swap" type="button" class="sui-screen-btn sui-mod-secondary" title="Trade fleets with the computer"><i class="sui-icon sui-icon-md icon-transfers"></i><span>Swap</span></button>
+      <!-- The command bar: readiness, the fleets' tools, then the launch. -->
+      <div id="sim-go" class="d-command">
+        <div class="d-command-l"><div id="checks" class="d-ready" aria-live="polite"></div></div>
+        <div class="d-command-c" role="group" aria-label="Fleets">
+          <button id="mirror" type="button" class="d-tool" title="Copy your fleet to the computer"><i class="sui-icon icon-copy d-gly" aria-hidden="true"></i><span>Mirror</span></button>
+          <button id="swap" type="button" class="d-tool" title="Trade fleets with the computer"><i class="sui-icon icon-transfers d-gly" aria-hidden="true"></i><span>Swap</span></button>
+          <span class="d-menu-anchor">
+            <button id="share" type="button" class="d-tool" title="Share"><i class="sui-icon icon-outgoing d-gly" aria-hidden="true"></i><span>Share</span><i class="sui-icon icon-caret-down d-gly is-16 d-tool-caret" aria-hidden="true"></i></button>
+            <div id="share-card" class="d-menu is-pop" role="menu" aria-label="Share" hidden>
+              <button id="post-to" type="button" role="menuitem" class="d-menu-item"><i class="sui-icon icon-send-alpha d-gly is-16" aria-hidden="true"></i><span>Post to…</span></button>
+              <button id="export" type="button" role="menuitem" class="d-menu-item"><i class="sui-icon icon-copy d-gly is-16" aria-hidden="true"></i><span>Copy link</span></button>
+              <button id="import" type="button" role="menuitem" class="d-menu-item"><i class="sui-icon icon-incoming d-gly is-16" aria-hidden="true"></i><span>Paste a battle</span></button>
+              <div class="d-menu-sep" role="separator"></div>
+              <button id="live-to" type="button" role="menuitem" class="d-menu-item hidden"><i class="sui-icon icon-raid d-gly is-16" aria-hidden="true"></i><span>Play them live</span></button>
+              <button id="live-room" type="button" role="menuitem" class="d-menu-item hidden" title="Anyone in the room may take it"><i class="sui-icon icon-raid d-gly is-16" aria-hidden="true"></i><span>Play live</span></button>
+            </div>
+          </span>
         </div>
-        <!-- Share: the round as a link, posted, copied or pasted. -->
-        <div id="share-card" class="sui-screen-btn-flex-wrapper sim-share" role="group" aria-label="Share">
-          <button id="post-to" type="button" class="sui-screen-btn sui-mod-secondary" title="Post to…"><i class="sui-icon sui-icon-md icon-outgoing"></i><span>Post to…</span></button>
-          <button id="export" type="button" class="sui-screen-btn sui-mod-secondary" title="Copy link"><i class="sui-icon sui-icon-md icon-copy"></i><span>Copy link</span></button>
-          <button id="import" type="button" class="sui-screen-btn sui-mod-secondary" title="Paste"><i class="sui-icon sui-icon-md icon-incoming"></i><span>Paste</span></button>
-        </div>
-        <!-- The page's forward action; a round made for someone is sent. -->
-        <div class="sui-screen-btn-flex-wrapper sim-go-main">
-          <button id="live-to" type="button" class="sui-screen-btn sui-mod-secondary hidden"><i class="sui-icon sui-icon-md icon-raid"></i><span></span></button>
-          <button id="start" type="button" class="sui-screen-btn sui-mod-primary"><span>Start battle</span><i class="sui-icon sui-icon-md icon-chevron-right"></i></button>
-          <button id="send-to" type="button" class="sui-screen-btn sui-mod-primary hidden"><i class="sui-icon sui-icon-md icon-outgoing"></i><span></span></button>
+        <div class="d-command-r">
+          <button id="send-to" type="button" class="d-btn is-violet is-lg hidden"><span>Send to</span><span id="send-to-name" class="d-sr"></span><span id="send-to-pfp" class="d-pf is-32 is-violet"></span></button>
+          <button id="start" type="button" class="d-launch"><span>Start battle</span><i class="sui-icon icon-chevron-right d-gly" aria-hidden="true"></i></button>
         </div>
       </div>
 
     </div>
-    <div class="sui-panel-edge-right"></div>
   </div>
 
-  <!-- Share, Paste and Post to… are the game's system modal (SUIParts.modal),
-       built when they open and appended here: inside the scaled layout, a
-       fixed layer at --menu-page-z-index, so they scale with the window. -->
+  <!-- Paste and Post to… are deck dialogs (SimDeck.modal), built when they
+       open and appended here: inside the scaled layout, so they scale with
+       the window. -->
 </div>
 
   <!-- ── Battle ────────────────────────────────────────────────────────── -->
@@ -196,44 +183,39 @@
     <div id="battle-main">
     <div id="board-wrap">
       <iframe id="board" title="Battle map" src="about:blank"></iframe>
-      <!-- P7: the battle's overlays are the game's system modal, built by
-           SUIParts.modal on this layer (simulator.js overlay()). Their bodies
-           are here so the ids are in the page before the first battle. -->
+      <!-- The battle's dialogs (Engagement, Paused, End battle) are deck
+           modals (SimDeck.modal) on this layer. Their bodies are here so the
+           ids are in the page before the first battle. -->
       <div id="sim-layer" class="sim-scaled">
-        <div id="deploy-body" class="hidden">
-          <div class="sim-matchup">
-            <div class="sim-side">
-              <span class="sui-text-label sim-you">Your fleet</span>
-              <div class="sim-side-stats">
-                <span class="sui-resource" title="Structs"><i class="sui-icon sui-icon-deployed-structs"></i><span id="deploy-you" class="sui-text-label"></span></span>
-                <span id="deploy-charge-you" class="sui-battery sui-theme-player"></span>
-              </div>
-              <div id="deploy-reach-you" class="sim-reach"></div>
+        <div id="deploy-body" class="hidden b-engage">
+          <div class="b-face">
+            <div class="b-side">
+              <div class="b-side-id"><span id="deploy-you-pf" class="d-pf is-64 is-you" aria-hidden="true"></span><span class="b-side-n"><span class="d-lbl sim-you">Your fleet</span><span class="d-txt d-hint"><span id="deploy-you-name">You</span> · <span id="deploy-you"></span> structs</span></span></div>
+              <div id="deploy-roster-you" class="d-screen b-side-roster"></div>
+              <div id="deploy-charge-you"></div>
+              <div class="b-side-reach"><span class="d-lbl d-hint">Reach</span><span id="deploy-reach-you"></span></div>
             </div>
-            <span class="sui-text-display sui-text-hint sim-vs">vs</span>
-            <div class="sim-side sim-side-cpu">
-              <span id="deploy-cpu-name" class="sui-text-label sim-cpu">Computer</span>
-              <div class="sim-side-stats">
-                <span id="deploy-charge-cpu" class="sui-battery sui-theme-enemy"></span>
-                <span class="sui-resource" title="Structs"><span id="deploy-cpu" class="sui-text-label"></span><i class="sui-icon sui-icon-enemy-deployed-structs"></i></span>
-              </div>
-              <div id="deploy-reach-cpu" class="sim-reach"></div>
+            <div class="b-face-vs"><span class="d-vs">VS</span></div>
+            <div class="b-side is-foe">
+              <div class="b-side-id"><span id="deploy-cpu-pf" class="d-pf is-64 is-cpu" aria-hidden="true"></span><span class="b-side-n"><span id="deploy-cpu-name" class="d-lbl sim-cpu">Computer</span><span class="d-txt d-hint"><span id="deploy-cpu-level">Difficult</span> · <span id="deploy-cpu"></span> structs</span></span></div>
+              <div id="deploy-roster-cpu" class="d-screen b-side-roster"></div>
+              <div id="deploy-charge-cpu"></div>
+              <div class="b-side-reach"><span class="d-lbl d-hint">Reach</span><span id="deploy-reach-cpu"></span></div>
             </div>
           </div>
-          <div class="sim-countdown"><span>Destroy the enemy command ship</span><span id="countdown" class="sui-text-display sim-huge"></span></div>
-        </div>
-        <div id="paused-body" class="hidden">
-          <div class="sui-form-element-label-group">
-            <label id="pause-bt-l" class="sui-form-element-group-label sui-text-label">Block time</label>
-            <div id="pause-block-time" data-labelledby="pause-bt-l" data-rows="sp-compact sp-tiles"></div>
+          <div class="d-rule" aria-hidden="true"></div>
+          <div class="b-go">
+            <div class="b-go-obj"><span id="deploy-target" class="b-go-target"></span><span class="b-go-t"><span class="d-lbl">Destroy the enemy command ship</span><span id="deploy-objective" class="d-txt d-hint"></span></span></div>
+            <div id="deploy-timer" class="d-screen is-center b-go-count" role="timer" aria-label="Battle starts in 3"><span class="d-lbl d-hint">Launch</span><span id="countdown" class="d-num-96"></span></div>
           </div>
         </div>
+        <div id="paused-body" class="hidden"><div class="d-sec"><div class="d-sec-h"><span id="pause-bt-l">Block time</span><span id="pause-block" class="d-sec-v"></span></div><div id="pause-block-time" data-labelledby="pause-bt-l"></div></div></div>
       </div>
     </div>
     </div>
   </div>
 
   <div id="message" role="status" aria-live="polite"></div>
-  <script src="pfp.js"></script><script src="chatrow.js"></script><script src="playercard.js"></script><script src="structs-cards.js"></script><script src="battle-art.js"></script><script src="simulator-types.js"></script><script src="simulator-chain.js"></script><script src="simulator-ai.js"></script><script src="simulator-host.js"></script><script src="simcode.js"></script><script src="simcard.js"></script><script src="simulator-live.js"></script><script src="simulator-rtc.js"></script><script src="sui-parts.js"></script><script src="simulator-social.js"></script><script src="raidview-sheet.js"></script><script src="js/vendor/lottie-5.12.2.min.js"></script><script src="simulator.js"></script>
+  <script src="pfp.js"></script><script src="chatrow.js"></script><script src="playercard.js"></script><script src="structs-cards.js"></script><script src="battle-art.js"></script><script src="simulator-types.js"></script><script src="simulator-chain.js"></script><script src="simulator-ai.js"></script><script src="simulator-host.js"></script><script src="simcode.js"></script><script src="simcard.js"></script><script src="simulator-live.js"></script><script src="simulator-rtc.js"></script><script src="simdeck.js"></script><script src="simulator-social.js"></script><script src="simulator.js"></script>
 </body>
 </html>

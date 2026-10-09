@@ -162,6 +162,9 @@
     this.stats[this.you.id] = { attacks: 0, damage: 0, evaded: 0, blocked: 0, countered: 0 };
     this.stats[this.cpu.id] = { attacks: 0, damage: 0, evaded: 0, blocked: 0, countered: 0 };
     this.kills = [];
+    // Per attacking struct (the debrief's top struct): its damage, as the
+    // player tally counts it, and the structs it destroyed.
+    this.byStruct = {};
     this.quietMoves = 0;      // Command Ship moves since the last damage
     this.lastHurt = this.chain.height;
     // Fielded is counted once: a destroyed struct leaves the chain five
@@ -365,16 +368,23 @@
   };
   /* One tx's contribution to the tallies and the kill list. */
   Host.prototype.tally = function (tx, height) {
-    var stats = this.stats, chain = this.chain;
+    var stats = this.stats, chain = this.chain, byStruct = this.byStruct;
     var hit = null;
+    var credit = function (id, type, owner) {
+      if (!id) return null;
+      return byStruct[id] || (byStruct[id] = { type: type || null, owner: owner || null, damage: 0, kills: 0 });
+    };
     tx.events.forEach(function (e) {
       if (e.category !== 'struct_attack') return;
       var d = e.detail;
       hit = d;
       if (stats[d.attackerPlayerId]) stats[d.attackerPlayerId].attacks++;
+      var by = stats[d.attackerPlayerId] ? credit(d.attackerStructId, d.attackerStructType, d.attackerPlayerId) : null;
       (d.eventAttackShotDetail || []).forEach(function (shot) {
         var side = stats[shot.targetPlayerId], own = stats[d.attackerPlayerId];
-        if (own) own.damage += Math.max(0, (Number(shot.damageDealt) || 0) - (Number(shot.damageReduction) || 0));
+        var dealt = Math.max(0, (Number(shot.damageDealt) || 0) - (Number(shot.damageReduction) || 0));
+        if (own) own.damage += dealt;
+        if (by) by.damage += dealt;
         if (!side) return;
         if (shot.evaded === true) side.evaded++;
         if (shot.blocked === true) side.blocked++;
@@ -394,6 +404,9 @@
       // the struct it shot at.
       var shot = hit && (hit.eventAttackShotDetail || [])[0];
       var countered = !!hit && hit.attackerStructId === s.id;
+      var killer = !hit ? null : countered ? credit(shot && shot.targetStructId, shot && shot.targetStructType, shot && shot.targetPlayerId)
+        : credit(hit.attackerStructId, hit.attackerStructType, hit.attackerPlayerId);
+      if (killer) killer.kills++;
       self.kills.push({
         height: height, struct_id: s.id, type: chain.typeOf(s).type, owner: s.owner,
         command: !!(fleet && fleet.commandStruct === s.id), countered: countered,
@@ -406,7 +419,7 @@
   Host.prototype.summary = function () {
     var standing = this.standing(), fielded = this.fielded, lost = {};
     Object.keys(fielded).forEach(function (pid) { lost[pid] = fielded[pid] - (standing[pid] || 0); });
-    return { finished: this.finished, elapsedMs: this.elapsedMs(), stats: this.stats, kills: this.kills.slice(), lost: lost, fielded: fielded, standing: standing };
+    return { finished: this.finished, elapsedMs: this.elapsedMs(), stats: this.stats, kills: this.kills.slice(), lost: lost, fielded: fielded, standing: standing, byStruct: this.byStruct };
   };
   /* Structs still standing on each side. */
   Host.prototype.standing = function () {

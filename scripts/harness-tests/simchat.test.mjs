@@ -204,33 +204,48 @@ async function simulator(context, answers = {}) {
     charge: sw.Simulator.getSettings().charge, units: sw.Simulator.getLayout() }) === battle);
   check('the Challenge panel takes the Round card\'s place', !$('challenge').classList.contains('hidden') && $('round').classList.contains('hidden'));
   check('…with the battle, who posted it, where, its settings', /Spearpoint/.test(text($('challenge'))) && /JPEG/.test(text($('challenge'))) && /SN\.Corporation/.test(text($('challenge')))
-    && /Difficult/.test(text($('challenge'))) && /charge 9 · 9/.test(text($('challenge'))));
+    && /Difficult/.test(text($('challenge'))) && /Charge 9 · 9/.test(text($('challenge'))));
   {
-    // P8: the panel is the game's data card; its state is a badge and its settings one hint line.
+    // COMMAND DECK: the panel is a deck panel in the warning tone; its settings are pills.
     const ch = $('challenge');
-    const head = ch.querySelector('.sim-card-head');
-    check('…a data card: its tag names it, a frameless close leaves it', ch.classList.contains('sui-data-card') && !ch.classList.contains('sim-card')
-      && head && /^Challenge$/.test(text(head.querySelector('.sui-data-card-header'))) && head.querySelector('a.sui-screen-nav-close[title="Leave"] i.sui-icon.sui-icon-sm.icon-close')
-      && ch.querySelector('.sui-data-card-body.sui-mod-spacing-xl'));
-    const set = ch.querySelector('.sim-settings');
-    check('…difficulty is the game\'s badge, the rest one hint line — no invented chips', set && /^Difficult$/.test(text(set.querySelector('.sui-badge.sui-mod-default')))
-      && /^\d+ v \d+ · 2 s blocks · charge 9 · 9$/.test(text(set.querySelector('.sui-text-hint'))) && !ch.querySelector('.sim-chip, .sim-pfp'), set && text(set));
-    check('…who posted it is the shared person line', /JPEG/.test(text(ch.querySelector('.sim-by .pc-person'))) && /SN\.Corporation/.test(text(ch.querySelector('.sim-by .sim-by-where'))));
+    const head = ch.querySelector('.d-panel-h');
+    check('…a deck panel: its header names it, an icon key leaves it', ch.matches('.d-panel.is-warn') && head && /^Challenge$/.test(text(head))
+      && head.querySelector('button.d-iconbtn[aria-label="Leave the challenge"] i.sui-icon.icon-close'));
+    check('…the battle\'s name, then who set it and where', /^Spearpoint$/i.test(text(ch.querySelector('h2.d-name')))
+      && /JPEG/.test(text(ch.querySelector('.s-by'))) && /SN\.Corporation/.test(text(ch.querySelector('.s-by'))) && ch.querySelector('.s-by .d-pf'));
+    const pills = [...ch.querySelectorAll('.s-pills .d-pill')].map(text);
+    check('…its settings as pills from the code, difficulty with its chevrons', pills.join(' | ') === 'Difficult | 2 s | Charge 9 · 9'
+      && ch.querySelector('.s-pills .d-pill .d-chevs'), pills.join(' | '));
+    check('…and its fleets fixed', /^Fleets fixed$/.test(text(ch.querySelector('.s-lock'))) && ch.querySelector('.s-lock .icon-blocked'));
   }
-  check('…the ladder is the Comms card\'s own, you marked', $('challenge').querySelectorAll('.chl-ladder .chl-run').length === 2
-    && /Marklifer/.test(text($('challenge').querySelector('.chl-run.chl-me'))) && $('challenge').querySelectorAll('.chl-run .pc-person').length === 2
-    && $('challenge').querySelectorAll('.chl-run .chl-verdict.sc-ok').length === 2 && !$('challenge').querySelector('.chl-run .chl-lost'),
+  check('…the ladder is the Comms card\'s own, worn as deck rows, you marked', $('challenge').querySelectorAll('.chl-ladder.d-ladder .chl-run.d-lrow').length === 2
+    && /You/.test(text($('challenge').querySelector('.chl-run.chl-me.is-me'))) && $('challenge').querySelector('.chl-run.is-me .d-lrow-name').title === 'Marklifer'
+    && $('challenge').querySelectorAll('.chl-run .chl-verdict.sc-ok').length === 2 && !$('challenge').querySelector('.chl-run .chl-lost')
+    && [...$('challenge').querySelectorAll('.chl-verdict')].every((v) => v.getAttribute('aria-label') === 'Victory' && v.querySelector('i.icon-success'))
+    && /2 runs/.test(text($('challenge').querySelector('.d-sec-h'))),
     $('challenge').querySelector('.chl-ladder') && $('challenge').querySelector('.chl-ladder').outerHTML.slice(0, 600));
-  check('…and the thread, read-only, in the rows Comms draws — talking is the Map Viewer\'s rail and Comms', /guard the command ship/.test(text($('challenge').querySelector('.sim-thread')))
-    && !$('challenge').querySelector('textarea, .sim-reply'));
-  check('the fleets are locked: tagged, Mirror and Swap gone, empty slots dead', !$('locked-chip').classList.contains('hidden') && /Spearpoint fleets/.test(text($('locked-chip')))
-    && $('mirror').classList.contains('hidden') && $('swap').classList.contains('hidden')
+  check('…and the thread, read-only, as deck messages — talking is the Map Viewer\'s rail and Comms', /guard the command ship/.test(text($('challenge').querySelector('.sim-thread')))
+    && /Netlag/.test(text($('challenge').querySelector('.sim-thread .d-msg .d-msg-h')))
+    && !$('challenge').querySelector('textarea, input, .sim-reply'));
+  check('the top bar\'s mode says Challenge', $('sim-mode').matches('.d-mode.is-challenge') && /^Challenge$/.test(text($('sim-mode'))) && $('sim-mode').querySelector('.icon-raid'));
+  // W2-setup: the board, the inspector and the command bar under a challenge.
+  check('the fleets are locked: Mirror and Swap switched off (not hidden), no chip, empty slots dead', !$('locked-chip')
+    && $('mirror').disabled && $('swap').disabled && !$('mirror').classList.contains('hidden') && !$('swap').classList.contains('hidden')
+    && !$('share').disabled
     && [...sw.document.querySelectorAll('#arena .slot')].filter((b) => !b.dataset.unit).every((b) => b.disabled));
+  check('…and its empty slots draw no add mark', !sw.document.querySelector('#arena .slot:not([data-unit]) .d-tile-plus'));
+  check('…the opening charges read fixed', $('charge-player').disabled && $('charge-cpu').disabled && /fixed by challenge/.test(text($('charges'))));
   const bs = sw.document.querySelector('#arena .slot[data-unit="player-space-0"]');
   bs.click();
-  check('…a struct can be looked at but not changed or removed', /Battleship/i.test(text($('inspector'))) && !/Change|Remove/.test(text($('inspector'))) && $('inspector').querySelector('select').disabled
-    && !$('inspector').querySelector('.sui-panel-btn, .sui-action-bar-btn-group'));
-  check('…and its empty slots draw no add glyph', !sw.document.querySelector('#arena .icon-add'));
+  const keys = [...$('inspector').querySelectorAll('.d-key')];
+  check('…a struct can be looked at but not changed: four keys, all off; the guard row off; tagged Fixed', /Battleship/i.test(text($('inspector').querySelector('.d-name')))
+    && keys.length === 4 && keys.every((k) => k.disabled)
+    && [...$('inspector').querySelectorAll('.d-guard button')].every((b) => b.disabled)
+    && /Fixed/.test(text($('inspector').querySelector('.d-hero-tag')))
+    && !$('inspector').querySelector('.sui-panel-btn, select'));
+  check('…and the command bar reads the challenge', /^Spearpoint/.test(text($('checks').querySelector('.d-ready-d'))));
+  check('…its best, once the thread lands: in the readiness and as the top bar\'s Best pill', /· best 02:41$/.test(text($('checks').querySelector('.d-ready-d')))
+    && [...$('sim-status').querySelectorAll('.d-pill.is-amber')].some((p) => /^Best 02:41$/.test(text(p))), text($('checks')) + ' | ' + text($('sim-status')));
 
   // The Map Viewer's rail asks the simulator for its room and talks through it.
   const C = sw.Simulator.comms;
@@ -254,7 +269,12 @@ async function simulator(context, answers = {}) {
   await tick(30);
   check('a best posts itself, into the thread, by codes alone', posts.length === 1 && posts[0].thread === '$root' && posts[0].battle === battle && posts[0].result === mine
     && Object.keys(posts[0]).sort().join() === 'battle,guildId,result,roomId,thread');
-  check('…and the debrief says so, with an Undo', /New best · posted/.test(text($('db-post'))) && /Undo/.test(text($('db-post'))) && !$('db-post').classList.contains('hidden'), text($('db-post')));
+  check('…and the debrief says so in the teal alert band: what it was, where it went, an Undo', $('db-post').matches('.d-alert.is-teal') && !$('db-post').classList.contains('hidden')
+    && /New best · posted/.test(text($('db-post').querySelector('.d-alert-h'))) && /was 02:55/.test(text($('db-post'))) && /to SN\.Corporation/.test(text($('db-post').querySelector('.d-alert-sub')))
+    && /Undo/.test(text($('db-post').querySelector('button.d-tool'))), text($('db-post')));
+  check('…and the debrief\'s Challenge panel is the compact deck panel, the ladder whole', $('db-challenge').matches('.d-panel.is-warn.x-chal') && !$('db-challenge').classList.contains('hidden')
+    && $('db-challenge').querySelectorAll('.chl-run').length === 2 && !$('db-challenge').querySelector('.s-pills') && /^Fleets fixed · Difficult · 2 s$/.test(text($('db-challenge').querySelector('.d-panel-f')))
+    && $('db-challenge').querySelector('.d-panel-f .icon-blocked'), text($('db-challenge').querySelector('.d-panel-f')));
   [...$('db-post').querySelectorAll('button')].filter((b) => /Undo/.test(b.textContent))[0].click();
   await tick(20);
   const undo = s.calls.filter((c) => c[0] === 'matrix_redact')[0];
@@ -266,6 +286,8 @@ async function simulator(context, answers = {}) {
   await tick(20);
   check('a run on edited fleets is not the challenge and does not post', posts.length === 1 && /Your own battle/.test(text($('db-post'))));
 
+  sw.document.body.dataset.screen = 'setup';
+  check('Edit fleets sits in the Challenge panel\'s footer', $('unlock').closest('#challenge .d-panel-f') && !$('unlock').classList.contains('hidden'));
   $('unlock').click();
   check('Edit fleets opens the Round card and offers the way back', !$('round').classList.contains('hidden') && !$('relock').classList.contains('hidden') && $('challenge').classList.contains('hidden'));
   $('relock').click();
@@ -295,14 +317,17 @@ async function simulator(context, answers = {}) {
   });
   await tick(50);
   const { $ } = s;
-  check('who it is for, in the Round card\'s head beside its tag: For, then the name alone', !$('addressed').classList.contains('hidden')
-    && text($('for-l')) === 'For' && text($('addressed-name')) === 'JPEG' && $('addressed').parentNode.matches('#round > .sim-card-head'));
-  check('…and Send / Play live sit in the foot beside Start (the page\'s actions)', $('sim-go').contains($('send-to')) && $('sim-go').contains($('live-to'))
-    && $('send-to').parentNode === $('start').parentNode);
-  check('…and the Send button names them', !$('send-to').classList.contains('hidden') && /Send to JPEG/.test(text($('send-to'))));
-  check('…Send the setup\'s one primary, Start battle stepping back to secondary', $('send-to').classList.contains('sui-mod-primary')
-    && $('start').classList.contains('sui-mod-secondary') && !$('start').classList.contains('sui-mod-primary')
-    && s.sw.document.querySelectorAll('#setup-screen .sui-screen-btn.sui-mod-primary:not(.hidden), #sim-go .sui-screen-btn.sui-mod-primary').length === 1);
+  // W2-setup: where the strip lives, and the command bar's keys.
+  check('who it is for: a strip right under the Mission header — For, then the name alone', !$('addressed').classList.contains('hidden')
+    && text($('for-l')) === 'For' && text($('addressed-name')) === 'JPEG' && $('addressed').closest('#round')
+    && $('addressed').previousElementSibling && $('addressed').previousElementSibling.matches('.d-panel-h'));
+  check('…Send sits beside Start in the command bar; Play live is in the Share menu', $('send-to').parentNode === $('start').parentNode
+    && $('start').parentNode.matches('#sim-go > .d-command-r') && $('share-card').contains($('live-to')));
+  check('…Start stays the launch key, Send a violet key before it', $('start').matches('.d-launch') && $('send-to').matches('.d-btn.is-violet')
+    && $('send-to').nextElementSibling === $('start'));
+  check('…and the readiness says who it is for', /for JPEG$/.test(text($('checks').querySelector('.d-ready-d'))));
+  check('…and the Send button names them', !$('send-to').classList.contains('hidden') && /Send to\s*JPEG/.test($('send-to').textContent) && $('send-to').title === 'Send to JPEG');
+  check('…× says what it stops', $('addressed-clear').getAttribute('aria-label') === 'Stop setting this up for JPEG');
   $('send-to').click();
   await tick(20);
   check('Send posts the battle to them by player id, not by room', posts.length === 1 && posts[0].toPlayer === '1-61' && posts[0].battle && !posts[0].roomId && !posts[0].result);
@@ -310,161 +335,207 @@ async function simulator(context, answers = {}) {
   s.sw.document.body.dataset.screen = 'debrief';
   s.sw.Simulator.social.debrief(JSON.parse(JSON.stringify(config)), result('player', 1, 76, 151));
   await tick(20);
-  const go = $('db-post').querySelector('.sui-message-system-alert-close-container button.sui-mod-primary');
-  check('the debrief offers the send as the game\'s system alert, Send its one primary', $('db-post').matches('.sui-message-system-alert.sui-mod-secondary')
-    && go && /^Send to JPEG$/.test(text(go)) && go.querySelector('span') && $('db-rematch').classList.contains('sui-mod-secondary') && !$('db-rematch').classList.contains('sui-mod-primary'),
+  const go = $('db-post').querySelector('button.d-btn.is-violet');
+  check('the debrief offers the send in the alert band, a violet Send key', $('db-post').matches('.d-alert')
+    && go && /^Send to JPEG$/.test(text(go)) && go.querySelector('span') && go.querySelector('.icon-outgoing') && $('db-rematch').matches('.d-launch'),
     $('db-post').outerHTML.slice(0, 300));
   s.sw.document.body.dataset.screen = 'setup';
   $('addressed-clear').click();
   check('× makes it a sandbox again', $('addressed').classList.contains('hidden') && $('send-to').classList.contains('hidden')
-    && $('start').classList.contains('sui-mod-primary') && !$('start').classList.contains('sui-mod-secondary'));
+    && /^Simulator$/.test(text($('sim-mode'))));
   s.close();
 }
 
 {
-  console.log('\n— the Round and Share cards (P5)');
+  console.log('\n— the Mission panel and the command bar');
   const s = await simulator(null);
   await tick(50);
   const { sw, $ } = s;
   const st = () => sw.Simulator.getSettings();
   const round = $('round');
-  check('Round is the game\'s form card, its fields two up; Share is the foot\'s group', round.classList.contains('sui-data-card')
-    && text(round.querySelector(':scope > .sim-card-head > .sui-data-card-header')) === 'Round'
-    && round.querySelector(':scope > .sui-data-card-body.sim-round-b')
-    && $('sim-go').contains($('share-card')) && $('share-card').getAttribute('aria-label') === 'Share');
-  const enc = () => [...$('encounters').querySelectorAll('input.sui-radio')];
-  check('Encounter is four radio rows, Difficult checked, each led by the game\'s radio', enc().length === 4
-    && $('encounters').querySelector('input.sui-radio:checked').value === 'difficult'
-    && $('encounters').querySelectorAll('label.sui-result-row .sui-radio-container > .sui-radio-display').length === 4
-    && $('encounters').querySelector('[role=radiogroup]').getAttribute('aria-labelledby') === 'enc-l');
-  const counts = [...$('encounters').querySelectorAll('.sui-resource')];
-  check('…its enemy count a struct resource (no size class on the sprite)', counts.length === 4 && counts.map(text).join(' ') === '4 8 12 6-16'
-    && counts.every((r) => r.title === 'Enemy structs' && r.querySelector('i.sui-icon.sui-icon-enemy-deployed-structs') && !/sui-icon-(sm|md)/.test(r.querySelector('i').className)));
-  check('no invented option buttons or header glyph left on the card', !round.querySelector('.sim-opt, .sim-field-h, .icon-enemy-tile, #ai-down, #ai-up'));
-  enc()[3].click();
+  check('Mission is a deck panel, its header named', round.matches('.d-panel') && /^Mission/.test(text(round.querySelector(':scope > .d-panel-h'))));
+  const cards = () => [...$('encounters').querySelectorAll('button.d-card')];
+  check('Encounter is four cards in a radio group, Difficult pressed', $('encounters').getAttribute('role') === 'radiogroup'
+    && $('encounters').getAttribute('aria-labelledby') === 'enc-l' && cards().length === 4 && cards().every((b) => b.getAttribute('role') === 'radio' && b.hasAttribute('aria-checked'))
+    && cards().filter((b) => b.getAttribute('aria-checked') === 'true').map((b) => b.dataset.value).join() === 'difficult');
+  check('…each with its enemy count', cards().map((b) => text(b.querySelector('.d-card-n'))).join(' ') === '4 8 12 6-16',
+    cards().map((b) => text(b.querySelector('.d-card-n'))).join(' '));
+  check('no invented option buttons left on the panel', !round.querySelector('.sim-opt, .sim-field-h, #ai-down, #ai-up, select'));
+  cards()[3].click();
   const seed1 = $('seed').value;
-  enc()[3].click();
-  check('Random rolls again on every click, checked or not', st().preset === 'random' && $('seed').value !== seed1 && enc()[3].checked);
-  enc()[2].click();
-  check('…Hard sets the Opponent with it', st().difficulty === 'hard' && $('ai-level').value === 'hard');
-  const sel = $('ai-level');
-  check('Opponent is a bare select inside the game\'s field', sel.tagName === 'SELECT' && !sel.className && sel.closest('label.sui-input-text')
-    && [...sel.options].map((o) => o.value).join() === 'easy,difficult,hard');
-  sel.value = 'easy'; sel.dispatchEvent(new sw.Event('change'));
-  check('…and choosing one sets the difficulty', st().difficulty === 'easy');
-  check('Seed is the game\'s text field, the reseed a frameless refresh beside it', $('seed').closest('label.sui-input-text') && !$('seed').className
-    && $('reseed').classList.contains('set-username-pfp-refresh-btn') && $('reseed').querySelector('i.sui-icon.sui-icon-md.icon-refresh-12'));
-  const bt = () => [...$('block-time').querySelectorAll('input.sui-radio')];
-  check('Block time is two radio rows with their note trailing', bt().length === 2 && text($('block-time')).includes('training') && text($('block-time')).includes('chain'));
+  cards()[3].click();
+  check('Random rolls again on every click, pressed or not', st().preset === 'random' && $('seed').value !== seed1 && cards()[3].getAttribute('aria-checked') === 'true');
+  cards()[2].click();
+  check('…Hard sets the Opponent with it', st().difficulty === 'hard' && $('ai-level').dataset.value === 'hard');
+  const pips = () => [...$('ai-level').querySelectorAll('[role=radio]')];
+  check('Opponent is a radio group of three pips', $('ai-level').getAttribute('role') === 'radiogroup' && pips().length === 3
+    && pips()[2].getAttribute('aria-checked') === 'true');
+  pips().find((p) => p.getAttribute('aria-label') === 'Easy').click();
+  check('…and pressing one sets the difficulty', st().difficulty === 'easy' && $('ai-level').dataset.value === 'easy');
+  check('Seed sits in a code chip, its dice named', $('seed').closest('.d-code') && $('reseed').closest('.d-code') && $('reseed').getAttribute('aria-label') === 'Roll a new seed');
+  const bt = () => [...$('block-time').querySelectorAll('.d-seg-opt')];
+  check('Block time is a two-way switch with its notes', bt().length === 2 && text($('block-time')).includes('training') && text($('block-time')).includes('chain')
+    && $('block-time').getAttribute('aria-labelledby') === 'bt-l');
   bt()[1].click();
-  check('…picking 6 s sets the block time', st().blockMs === 6000 && bt()[1].checked);
-  check('…and the Paused card\'s copy is its own radio group', $('pause-block-time').querySelector('input.sui-radio')
-    && $('pause-block-time').querySelector('input.sui-radio').name !== bt()[0].name);
-  const field = (id) => $(id).closest('label.sui-input-text');
-  check('Opening charge is two SUI steppers, captioned by side', field('charge-player') && field('charge-cpu')
-    && field('charge-player').querySelector(':scope > span.sim-you') && field('charge-cpu').querySelector(':scope > span.sim-cpu')
-    && $('charge-player').closest('div.sui-input-stepper') && $('charge-player').value === '9');
-  const more = field('charge-player').querySelector('button[aria-label="More opening charge"]');
-  const less = field('charge-player').querySelector('button[aria-label="Less opening charge"]');
-  check('…its buttons are the game\'s secondary − / + glyphs, named for the reader', more && less && more.classList.contains('sui-mod-secondary')
-    && more.querySelector('i.sui-icon.sui-icon-md.icon-add') && less.querySelector('i.sui-icon.sui-icon-md.icon-subtract'));
-  more.click();
-  check('…More raises your charge and keeps the stepper (and its focus) in place', st().charge.player === 10 && $('charge-player').value === '10'
-    && field('charge-player').querySelector('button[aria-label="More opening charge"]') === more);
-  $('charge-cpu').value = '99'; $('charge-cpu').dispatchEvent(new sw.Event('change'));
-  check('…a typed charge is clamped to the maximum and disables More', st().charge.computer === 30 && $('charge-cpu').value === '30'
-    && field('charge-cpu').querySelector('button[aria-label="More opening charge"]').disabled);
+  check('…picking 6 s sets the block time', st().blockMs === 6000 && bt()[1].getAttribute('aria-checked') === 'true' && bt()[0].getAttribute('aria-checked') === 'false');
+  check('…and the readiness reads it', /6 s blocks/.test(text($('checks'))), text($('checks')));
+  const you = $('charge-player'), cpu = $('charge-cpu');
+  check('Opening charge is two batteries, real range inputs to 30', you && cpu && you.matches('input[type=range][max="30"]') && cpu.matches('input[type=range][max="30"]')
+    && $('charges').contains(you) && $('charges').contains(cpu) && you.value === '9' && you.getAttribute('aria-label') === 'Your opening charge');
+  check('…each says when its first shot is ready', /shot ready/.test(text(you.closest('.d-battery'))) && /shot ready/.test(text(cpu.closest('.d-battery'))));
+  you.value = '10'; you.dispatchEvent(new sw.Event('input', { bubbles: true }));
+  check('…moving yours sets your charge, the same input kept', st().charge.player === 10 && $('charge-player') === you && you.value === '10');
+  cpu.value = '99'; cpu.dispatchEvent(new sw.Event('input', { bubbles: true }));
+  check('…a charge past the battery is clamped', st().charge.computer === 30 && cpu.value === '30');
+  {
+    // W3: the pointer lands on the NEAREST cell (group gaps never put it one
+    // off), a drag follows, and the keyboard is the range input's own.
+    const cells = [...you.closest('.d-battery').querySelectorAll('.d-cell')];
+    cells.forEach((c, i) => { const l = 100 + i * 4 + Math.floor(i / 5) * 2; c.getBoundingClientRect = () => ({ left: l, right: l + 3, width: 3, top: 0, bottom: 5, height: 5 }); });
+    const track = you.closest('.d-batt-track');
+    const at = (i) => 100 + i * 4 + Math.floor(i / 5) * 2 + 1;
+    track.dispatchEvent(new sw.MouseEvent('pointerdown', { bubbles: true, cancelable: true, clientX: at(13) }));
+    check('the battery: a press on a cell sets the charge to that cell', st().charge.player === 14 && you.value === '14' && sw.document.activeElement === you, st().charge.player);
+    track.dispatchEvent(new sw.MouseEvent('pointermove', { bubbles: true, clientX: at(4) + 2 }));
+    track.dispatchEvent(new sw.MouseEvent('pointerup', { bubbles: true, clientX: at(4) + 2 }));
+    check('…a drag follows the nearest cell, across a group gap', st().charge.player === 5 && you.value === '5', st().charge.player);
+    track.dispatchEvent(new sw.MouseEvent('pointermove', { bubbles: true, clientX: at(20) }));
+    check('…and stops with the release', st().charge.player === 5);
+    track.dispatchEvent(new sw.MouseEvent('pointerdown', { bubbles: true, cancelable: true, clientX: 90 }));
+    track.dispatchEvent(new sw.MouseEvent('pointerup', { bubbles: true, clientX: 90 }));
+    check('…left of the first cell is none', st().charge.player === 0);
+    you.value = '7'; you.dispatchEvent(new sw.Event('input', { bubbles: true })); you.dispatchEvent(new sw.Event('change', { bubbles: true }));
+    check('…the keyboard (the range input) sets it as well, its cells lit to match', st().charge.player === 7
+      && you.closest('.d-battery').querySelectorAll('.d-cell.is-lit').length === 7 && you.closest('.d-battery').querySelectorAll('.d-cell.is-head').length === 1);
+    you.value = '10'; you.dispatchEvent(new sw.Event('input', { bubbles: true }));
+  }
   $('mirror').click();
-  check('…Mirror copies your charge to the computer\'s stepper', st().charge.computer === 10 && $('charge-cpu').value === '10');
-  const share = $('share-card');
-  check('Share holds Post to…, Copy link and Paste as secondary buttons with their icons and titles', ['post-to', 'export', 'import'].every((id) => share.contains($(id))
-    && $(id).classList.contains('sui-mod-secondary') && $(id).querySelector('i.sui-icon.sui-icon-md') && $(id).querySelector('span') && $(id).title)
-    && $('export').querySelector('.icon-copy') && $('import').querySelector('.icon-incoming'));
-  check('the fleets\' tools sit in the foot too, iconed so they can fold — Mirror, with no game glyph, a word that never folds', ['swap', 'unlock', 'live-room'].every((id) => $('sim-go').contains($(id))
-    && $(id).querySelector('i.sui-icon.sui-icon-md') && $(id).title) && $('sim-go').contains($('mirror')) && !$('mirror').querySelector('i') && text($('mirror')) === 'Mirror'
-    && $('fleet-head').querySelectorAll('button').length === 0);
-  check('every icon on the two cards is a sized SUI icon (sprites excepted)', [...round.querySelectorAll('i'), ...share.querySelectorAll('i')]
-    .every((i) => i.classList.contains('sui-icon') && (/sui-icon-(sm|md)\b/.test(i.className) || /sui-icon-enemy-deployed-structs/.test(i.className))));
+  check('Mirror copies your charge to the computer\'s battery', st().charge.computer === 10 && cpu.value === '10' && $('charge-cpu') === cpu);
+  const share = $('share'), menu = $('share-card');
+  check('Share is a menu key; its menu starts closed', share.getAttribute('aria-haspopup') === 'menu' && menu.hidden && menu.getAttribute('role') === 'menu');
+  share.click();
+  check('…a press opens it: Post to…, Copy link, Paste a battle', !menu.hidden && share.getAttribute('aria-expanded') === 'true'
+    && ['post-to', 'export', 'import'].every((id) => menu.contains($(id)) && $(id).getAttribute('role') === 'menuitem'));
+  menu.dispatchEvent(new sw.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+  check('…Escape closes it', menu.hidden && share.getAttribute('aria-expanded') === 'false');
+  {
+    // W3: the keyboard way in and through: ArrowDown opens on the first
+    // item, arrows walk the shown items (Play live is hidden here), Escape
+    // gives focus back to Share.
+    const kd = (n, key) => n.dispatchEvent(new sw.KeyboardEvent('keydown', { key, bubbles: true, cancelable: true }));
+    share.focus();
+    kd(share, 'ArrowDown');
+    check('Share from the keyboard: ArrowDown opens it on Post to…', !menu.hidden && sw.document.activeElement === $('post-to'));
+    kd(menu, 'ArrowDown'); kd(menu, 'ArrowDown');
+    check('…arrows walk the items', sw.document.activeElement === $('import'));
+    kd(menu, 'ArrowDown');
+    check('…skip what is hidden and wrap', sw.document.activeElement === $('post-to'));
+    kd(menu, 'End');
+    check('…End is the last shown item', sw.document.activeElement === $('import'));
+    kd(menu, 'Escape');
+    check('…and Escape closes it, focus back on Share', menu.hidden && sw.document.activeElement === share);
+  }
+  check('the command bar: readiness, the fleets\' tools, the launch', $('sim-go').matches('.d-command') && $('checks').matches('.d-ready') && $('checks').closest('.d-command-l')
+    && ['mirror', 'swap', 'share'].every((id) => $(id).matches('button.d-tool') && $(id).closest('.d-command-c'))
+    && $('start').matches('button.d-launch') && $('start').closest('.d-command-r') && !$('locked-chip') && $('fleet-head').querySelectorAll('button').length === 0);
+  check('every icon on the Mission panel and the command bar is a deck glyph or sprite', [...round.querySelectorAll('i.sui-icon'), ...$('sim-go').querySelectorAll('i.sui-icon')]
+    .every((i) => i.classList.contains('d-gly') || i.classList.contains('d-ico')));
+  check('…and every control there is a real button with a name', [...round.querySelectorAll('button'), ...$('sim-go').querySelectorAll('button')]
+    .filter((b) => !b.closest('.hidden')).every((b) => b.type === 'button' && (text(b) || b.getAttribute('aria-label'))));
   s.close();
 }
 
 {
-  console.log('\n— the fleet board and the inspector (P6)');
+  console.log('\n— the fleet board and the inspector');
   const s = await simulator(null);
   await tick(50);
   const { sw, $ } = s;
   const doc = sw.document, insp = $('inspector');
-  const info = () => insp.querySelector('.sim-insp-h .sui-screen-info');
+  const head = () => text(insp.querySelector(':scope > .d-panel-h'));
   const lay = (id) => sw.Simulator.getLayout().find((u) => u.id === id);
   const slot = (id) => doc.querySelector('#arena .slot[data-unit="' + id + '"]');
-  const btn = (title) => insp.querySelector('a.sui-panel-btn[title="' + title + '"]');
+  const key = (a) => insp.querySelector('button.d-key[data-ability="' + a + '"]');
   const esc = () => doc.dispatchEvent(new sw.KeyboardEvent('keydown', { key: 'Escape' }));
-  check('fleet counts are struct resources holding the number alone', /^\d+$/.test(text($('count-you'))) && /^\d+$/.test(text($('count-cpu')))
-    && $('count-you').parentNode.matches('.sui-resource') && $('count-you').parentNode.querySelector('i.sui-icon.sui-icon-deployed-structs')
-    && $('count-cpu').parentNode.querySelector('i.sui-icon.sui-icon-enemy-deployed-structs'));
-  check('no defend banner, no hand-made inspector parts', !$('defend-banner') && !insp.classList.contains('sim-card')
-    && !doc.querySelector('.sim-name, .sim-weapons, .sim-pick, .sim-opt[aria-label="land"], .sim-check'));
+  check('fleet counts hold the number alone, beside the fleet sprites', /^\d+$/.test(text($('count-you'))) && /^\d+$/.test(text($('count-cpu')))
+    && $('count-you').closest('.d-fleet-count').querySelector('i.sui-icon.sui-icon-deployed-structs')
+    && $('count-cpu').closest('.d-fleet-count').querySelector('i.sui-icon.sui-icon-enemy-deployed-structs'));
+  check('…each fleet\'s reach under its name', $('fleet-head').querySelectorAll('.s-reachrow .d-reach[role=img]').length === 2
+    && /^Your fleet reaches/.test($('fleet-head').querySelector('.d-reach').getAttribute('aria-label')));
+  check('the board is four ambit bands of deck tiles, 34 slots, 18 structs', $('arena').matches('.d-board') && doc.querySelectorAll('#arena .d-band.band').length === 4
+    && doc.querySelectorAll('#arena .d-band > .d-spine').length === 4 && doc.querySelectorAll('#arena .slot.d-tile').length === 34
+    && doc.querySelectorAll('#arena .slot[data-unit] .d-ship').length === 18);
+  check('no defend banner, no hand-made inspector parts', !$('defend-banner')
+    && !doc.querySelector('.sim-name, .sim-weapons, .sim-pick, .sim-opt, .sim-check, .sim-sheet, .sim-types, .sim-insp-h'));
+  check('nothing is selected at first: the Inspector column is the Matchup', /^Matchup/.test(head()) && /9 v 9$/.test(head()) && insp.querySelector('.d-stats')
+    && !doc.querySelector('#arena .slot.selected'));
   slot('player-cmd').click();
-  check('the inspector is the Action Bar: a side-themed header screen with the slot', info() && info().closest('.sim-insp-h.sui-theme-player > .sui-screen.sui-screen-full-width')
-    && text(info()) === 'Land · Command' && !info().classList.contains('sui-mod-inverted'));
-  check('…the struct\'s health in the game\'s bar', insp.querySelectorAll('.struct-health-bar > .struct-health-bar-segment.mod-filled').length === 6);
-  const sheet = insp.querySelector('.sui-cheatsheet.sim-sheet.sui-theme-player');
-  check('…and its cheatsheet, titled model and class', sheet && text(sheet.querySelector('.sui-cheatsheet-title-text')) === 'ST-21 COMMAND SHIP');
-  check('…its LOCAL weapon reads as the band it holds, in ambit sprites', sheet && [...sheet.querySelectorAll('.sui-cheatsheet-property')][0].querySelector('i.sui-icon.sui-icon-land')
-    && ![...sheet.querySelectorAll('.sui-cheatsheet-property')][0].querySelector('.sui-icon-space'));
-  check('…no build cost, and each weapon\'s charge as a battery', sheet && !sheet.querySelector('.sui-cheatsheet-costs > *')
-    && sheet.querySelector('.sim-sheet-charge > .sui-battery') && /charge$/.test(sheet.querySelector('.sim-sheet-charge').title));
-  const guard = insp.querySelector('select');
-  check('Defends is a bare select in the game\'s field', guard && !guard.className && guard.getAttribute('aria-label') === 'Defends'
-    && guard.closest('label.sui-input-text') && text(guard.closest('label').querySelector(':scope > span')) === 'Defends');
-  check('the abilities are the game\'s panel buttons: Move and Defend for the command ship', btn('Move') && btn('Defend') && !btn('Change') && !btn('Remove')
-    && btn('Move').closest('.sui-action-bar-bottom-row.sui-theme-player > .sui-action-bar-btn-group') && btn('Move').querySelector('i.sui-icon.sui-icon-md.icon-move'));
-  btn('Move').click();
-  check('Move arms a pick: the header inverts to Select Tile and the empty command posts become targets', text(info()) === 'Select Tile' && info().classList.contains('sui-mod-inverted')
-    && doc.querySelectorAll('#arena .slot.sim-move-target').length === 3 && btn('Move').classList.contains('sui-mod-active-defense')
-    && doc.querySelector('.sim-round-col, #round').inert);
-  btn('Move').click();
-  check('…a second press cancels it', text(info()) === 'Land · Command' && !doc.querySelector('#arena .sim-move-target') && !doc.querySelector('.sim-round-col, #round').inert);
-  btn('Move').click();
+  check('a struct\'s Inspector: where it stands, its name, its health', head() === 'Land · Command' && insp.matches('.d-panel.is-player')
+    && text(insp.querySelector('.d-name')) === 'Command Ship' && insp.querySelectorAll('.d-hp.is-lg > .d-hp-s').length === 6 && slot('player-cmd').querySelector('.d-hp'));
+  check('…four keys: Move and Guard live, Change and Remove off for the command ship', ['move', 'defend', 'change', 'remove'].every(key)
+    && !key('move').disabled && !key('defend').disabled && key('change').disabled && key('remove').disabled && key('defend').title === 'Guard');
+  check('…its weapons, reach read from the band it holds', insp.querySelector('.d-weapon .d-reach[aria-label="Hits land"]'),
+    [...insp.querySelectorAll('.d-weapon .d-reach')].map((r) => r.getAttribute('aria-label')).join());
+  key('move').click();
+  check('Move arms a pick: the panel goes amber, the empty command posts become targets', /Pick a band/.test(head()) && insp.matches('.is-warn')
+    && doc.querySelectorAll('#arena .slot.sim-move-target').length === 3 && key('move').getAttribute('aria-pressed') === 'true'
+    && doc.querySelector('.sim-round-col').inert);
+  key('move').click();
+  check('…a second press cancels it', head() === 'Land · Command' && !doc.querySelector('#arena .sim-move-target') && !doc.querySelector('.sim-round-col').inert);
+  key('move').click();
   doc.querySelector('#arena .band.water .slot.sim-move-target').click();
-  check('…and a target moves the command ship there', lay('player-cmd').ambit === 'water' && text(info()) === 'Water · Command' && !doc.querySelector('#arena .sim-move-target'));
+  check('…and a target moves the command ship there', lay('player-cmd').ambit === 'water' && head() === 'Water · Command' && !doc.querySelector('#arena .sim-move-target'));
+  slot('player-space-0').click();
+  check('the Battleship: two weapons, and Move off (only a command ship moves)', insp.querySelectorAll('.d-weapon').length === 2 && key('move').disabled && !key('change').disabled);
+  const hits = [...doc.querySelectorAll('#arena .slot.enemy.is-target')];
+  check('CAN-HIT: every enemy its weapons reach is marked with a reticle, none out of reach', hits.length > 0 && hits.every((b) => b.querySelector('.d-reticle'))
+    && slot('computer-cmd').classList.contains('is-target') && !slot('computer-air-0').classList.contains('is-target')
+    && !doc.querySelector('#arena .slot.friendly.is-target'));
+  slot('computer-space-0').click();
+  check('…and both ways: their Battleship marks yours', doc.querySelectorAll('#arena .slot.friendly.is-target').length > 0
+    && !doc.querySelector('#arena .slot.enemy.is-target') && insp.matches('.is-enemy'));
   slot('player-space-1').click();
-  btn('Defend').click();
+  key('defend').click();
   const mine = sw.Simulator.getLayout().filter((u) => u.side === 'player' && u.id !== 'player-space-1').length;
-  check('Defend arms a pick: Select Struct, your other structs the targets, the rest dimmed', text(info()) === 'Select Struct' && info().classList.contains('sui-mod-inverted')
-    && doc.querySelectorAll('#arena .slot.eligible').length === mine && slot('computer-cmd').classList.contains('dim') && btn('Defend').classList.contains('sui-mod-active-defense'));
+  check('Guard arms a pick: Pick to guard, amber; your other structs the targets, theirs dimmed', /Pick to guard/.test(head()) && insp.matches('.is-warn')
+    && doc.querySelectorAll('#arena .slot.eligible').length === mine && slot('computer-cmd').classList.contains('dim')
+    && key('defend').getAttribute('aria-pressed') === 'true' && insp.querySelector('.d-guard.is-picking'));
   esc();
-  check('…Escape cancels it', !doc.querySelector('#arena .slot.eligible') && text(info()) === 'Space · Slot 2');
-  btn('Defend').click();
+  check('…Escape cancels it', !doc.querySelector('#arena .slot.eligible') && head() === 'Space · Slot 2');
+  key('defend').click();
   slot('computer-cmd').click();
   check('…so does pressing anywhere it cannot land', !doc.querySelector('#arena .slot.eligible') && lay('player-space-1').protects === null);
   slot('player-space-1').click();
-  btn('Defend').click();
+  insp.querySelector('.d-guard > .d-btn').click();
+  check('…the guard row\'s Pick arms it too', doc.querySelectorAll('#arena .slot.eligible').length === mine);
   slot('player-cmd').click();
-  check('…a target sets the ward; the button stays pressed and now clears it', lay('player-space-1').protects === 'player-cmd' && btn('Clear Defense')
-    && btn('Clear Defense').classList.contains('sui-mod-active-defense') && insp.querySelector('select').value === 'player-cmd');
-  check('…and the board draws the defence web from the selection', doc.querySelector('#arena svg.sim-defweb line') && doc.querySelector('#arena svg.sim-defweb circle'));
-  btn('Clear Defense').click();
-  check('…pressing it clears the guard', lay('player-space-1').protects === null && btn('Defend') && !btn('Defend').classList.contains('sui-mod-active-defense'));
-  btn('Change').click();
-  const tiles = () => [...insp.querySelectorAll('.offcanvas-struct-list-layout > a.offcanvas-struct-container')];
-  check('Change opens the game\'s Deploy list: a still per type, the current one marked', text(info()) === 'Select Struct' && tiles().length === 3
-    && tiles().every((a) => a.querySelector(':scope > .struct-still > img') && a.title && /^Place /.test(a.getAttribute('aria-label')) && !text(a))
-    && tiles().filter((a) => a.classList.contains('sim-current')).length === 1 && btn('Change').classList.contains('sui-mod-pressed'));
-  check('…with the sheet of the type under the pointer', insp.querySelector('.sim-types-sheet .sui-cheatsheet'));
+  check('…a target sets the ward, and the guard row names it', lay('player-space-1').protects === 'player-cmd'
+    && /Command Ship/.test(text(insp.querySelector('.d-guard .d-guard-n'))));
+  check('…and the board draws the guard line from the selection', doc.querySelector('#arena svg.sim-defweb line.d-guardline')
+    && doc.querySelector('#arena svg.sim-defweb rect.d-guardline-end'));
+  insp.querySelector('.d-guard .d-iconbtn').click();
+  check('…its × clears the guard', lay('player-space-1').protects === null && insp.querySelector('.d-guard.is-empty'));
+  key('change').click();
+  const cards = () => [...insp.querySelectorAll('button.d-card.is-struct')];
+  check('Change opens Deploy: a card per type that fits the band, the current one marked', head() === 'Space · Slot 2' && /Deploy/.test(text(insp.querySelector('.d-sec-h')))
+    && cards().length === 3 && cards().every((b) => /^Place a /.test(b.getAttribute('aria-label')) && b.title && b.querySelector('.d-ship'))
+    && cards().filter((b) => b.getAttribute('aria-current') === 'true').length === 1);
+  check('…the type under the pointer read out below it', insp.querySelector('.s-preview .d-name') && insp.querySelector('.s-preview .d-weapon'));
   esc();
-  check('…Escape backs out of it', !insp.querySelector('.offcanvas-struct-list-layout') && text(info()) === 'Space · Slot 2');
-  btn('Change').click();
-  const other = tiles().find((a) => !a.classList.contains('sim-current'));
+  check('…Escape backs out of it', !insp.querySelector('.d-card.is-struct') && head() === 'Space · Slot 2');
+  key('change').click();
+  const other = cards().find((b) => b.getAttribute('aria-current') !== 'true');
   other.click();
-  check('…a press places that type', sw.SimulatorTypes.types.find((t) => t.id === lay('player-space-1').type).type === other.title && !insp.querySelector('.offcanvas-struct-list-layout'));
-  btn('Remove').click();
-  check('Remove empties the slot and the empty slot asks for a struct', !lay('player-space-1') && text(info()) === 'Select Struct' && tiles().length === 3
-    && doc.querySelector('#arena .band.space .slot.friendly:not([data-unit]) .icon-add.empty-label'));
+  check('…a press places that type', sw.SimulatorTypes.types.find((t) => t.id === lay('player-space-1').type).type === other.title && !insp.querySelector('.d-card.is-struct'));
+  key('remove').click();
+  check('Remove empties the slot, and the empty slot offers Deploy', !lay('player-space-1') && cards().length === 3 && insp.matches('.is-player')
+    && doc.querySelector('#arena .band.space .slot.friendly:not([data-unit]) .d-tile-plus') && doc.querySelector('#arena .slot.friendly.s-slot-on:not([data-unit])'));
+  insp.querySelector('.d-panel-h button[aria-label="Deselect"]').click();
+  check('× Deselect returns to the Matchup', /^Matchup/.test(head()) && !doc.querySelector('#arena .slot.selected, #arena .s-slot-on'));
   sw.Simulator.getLayout().forEach((u) => { u.protects = null; });
   slot('player-cmd').click();
-  check('readiness notes are the game\'s inline alerts', $('checks').children.length && [...$('checks').children].every((c) => c.matches('.sui-message-inline-alert.sui-mod-warning, .sui-message-inline-alert.sui-mod-destructive'))
-    && /no defender/.test(text($('checks').querySelector('.sui-mod-warning .sui-message-inline-alert-text'))));
+  check('readiness warns, naming what is missing', $('checks').matches('.d-ready.is-warn') && /warning/.test(text($('checks').querySelector('.d-ready-h')))
+    && /no defender/.test(text($('checks').querySelector('.d-ready-d')) + ' ' + $('checks').title), $('checks').title);
+  check('…and Start stays open (warnings never block)', !$('start').disabled);
   s.close();
 }
 
@@ -476,46 +547,58 @@ async function simulator(context, answers = {}) {
   const host = () => sw.Simulator.getHost();
   const esc = () => doc.dispatchEvent(new sw.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
   const open = (id) => !$(id).classList.contains('hidden');
-  const ctas = (ov) => [...ov.querySelectorAll('.sui-message-system-modal-cta .sui-message-system-modal-cta-btn-wrapper > a.sui-screen-btn')];
+  const ctaIds = (ov) => [...ov.querySelectorAll('.d-modal-cta button')].map((b) => b.id).join();
   const p = $('paused');
-  check('Paused is the game\'s system modal on the board layer, a labelled dialog', p.matches('.sui-message-system-model-overlay.sp-scrim.sim-scrim.hidden')
-    && p.parentNode === $('sim-layer') && p.getAttribute('role') === 'dialog' && p.getAttribute('aria-modal') === 'true'
-    && text($(p.getAttribute('aria-labelledby'))).startsWith('Paused') && p.querySelector('.sui-message-system-modal-frame-left-middle i.sui-icon.sui-icon-md.icon-in-progress')
-    && p.querySelector('#paused-clock.sui-text-label.sui-text-hint') && p.contains($('pause-block-time')) && !doc.querySelector('.sim-card, .sim-overlay'));
-  check('…its ways out are its CTAs: the forfeit first, Resume last and the one primary, its chevron after the label',
-    ctas(p).map((a) => a.id).join() === 'pause-end,pause-rematch,pause-edit,resume' && $('pause-end').classList.contains('sui-mod-destructive')
-    && ctas(p).filter((a) => a.classList.contains('sui-mod-primary')).length === 1 && $('resume').classList.contains('sui-mod-primary')
+  const pd = p.querySelector('.d-modal');
+  check('Paused is a deck modal on the board layer, a labelled dialog', p.matches('.d-scrim.hidden') && p.parentNode === $('sim-layer')
+    && pd && pd.getAttribute('role') === 'dialog' && pd.getAttribute('aria-modal') === 'true'
+    && text($(pd.getAttribute('aria-labelledby'))).startsWith('Paused') && p.querySelector('.d-modal-rail .icon-in-progress')
+    && /^\d\d:\d\d$/.test(text($('paused-clock'))) && p.contains($('pause-block-time')) && !doc.querySelector('.sim-card, .sim-overlay'));
+  check('…its ways out: the forfeit first, the round\'s alternatives, then Resume as the launch key, its chevron after the label',
+    ctaIds(p) === 'pause-end,pause-rematch,pause-edit,resume' && $('pause-end').matches('.d-btn.is-coral')
+    && $('resume').matches('.d-launch.is-block') && p.querySelectorAll('.d-launch').length === 1
     && $('resume').lastElementChild.matches('i.icon-chevron-right') && $('resume').firstElementChild.matches('span'));
   const d = $('deploy');
-  check('Deploy is the same modal with no CTA row, titled Engagement', d.matches('.sui-message-system-model-overlay.sp-scrim.sim-scrim.hidden')
-    && d.querySelector('.sui-message-system-modal-frame-left-middle .icon-raid') && /Engagement/.test(text(d.querySelector('h2'))) && !d.querySelector('.sui-message-system-modal-cta'));
+  check('Engagement is a deck modal with no CTA, titled Engagement', d.matches('.d-scrim.hidden') && d.parentNode === $('sim-layer')
+    && d.querySelector('.d-modal-rail .icon-raid') && /Engagement/.test(text($('deploy-title'))) && $('deploy-title').matches('h2')
+    && !d.querySelector('.d-modal-cta').children.length);
 
   $('start').click();
   await tick(30);
-  check('starting deploys: each side its structs as the game\'s resource and its charge as the 5-chunk battery', open('deploy') && text($('deploy-you')) === '9' && text($('deploy-cpu')) === '9'
-    && $('deploy-you').closest('.sui-resource').querySelector('i.sui-icon-deployed-structs') && $('deploy-cpu').closest('.sui-resource').querySelector('i.sui-icon-enemy-deployed-structs')
-    && $('deploy-charge-you').matches('.sui-battery.sui-theme-player') && $('deploy-charge-cpu').matches('.sui-battery.sui-theme-enemy')
-    && $('deploy-charge-you').querySelectorAll('.sui-battery-chunk').length === 5 && $('deploy-charge-you').querySelectorAll('.sui-mod-filled').length === 5);
-  check('…and its reach as the cheatsheet draws it: the range glyph, then one sprite per ambit reached', $('deploy-reach-you').firstElementChild.matches('i.sui-icon.sui-icon-md.icon-range')
-    && [...$('deploy-reach-you').children].slice(1).every((i) => /sui-icon-(space|air|land|water)\b/.test(i.className)) && $('deploy-reach-you').children.length > 1);
-  check('…while it counts, Pause and End are disabled in the nav', $('end').classList.contains('sui-mod-disabled') && $('pause').classList.contains('sui-mod-disabled'));
+  check('starting deploys: each side its count, roster and opening charge as a readout battery', open('deploy') && text($('deploy-you')) === '9' && text($('deploy-cpu')) === '9'
+    && $('deploy-roster-you').querySelectorAll('.d-ship').length === 9 && $('deploy-roster-cpu').querySelectorAll('.d-ship.is-foe').length === 9
+    && $('deploy-charge-you').matches('.d-battery.is-readout') && $('deploy-charge-you').querySelectorAll('.d-cell.is-lit').length === 9
+    && $('deploy-charge-cpu').matches('.d-battery.is-readout.is-foe.is-mirror'));
+  const reachIcons = [...$('deploy-reach-you').querySelectorAll('.d-ico')];
+  const reachLabel = $('deploy-reach-you').querySelector('.d-reach').getAttribute('aria-label');
+  check('…and its reach: the four ambits, the ones it cannot reach off', reachIcons.length === 4
+    && reachIcons.every((i) => i.classList.contains('is-off') === !(/every ambit/.test(reachLabel) || new RegExp(i.className.match(/sui-icon-(space|air|land|water)/)[1]).test(reachLabel))),
+    reachLabel);
+  check('…the objective: their command ship, enemy-bracketed, where and how strong', $('deploy-target').querySelector('.d-ship.is-foe') && $('deploy-target').querySelector('.d-brackets')
+    && /^(Space|Air|Land|Water) · \d+ health/.test(text($('deploy-objective'))) && /^Battle starts in [123]$/.test($('deploy-timer').getAttribute('aria-label')));
+  check('…while it counts, Pause and End are disabled in the nav, and the phase reads Deploying', $('end').disabled && $('pause').disabled
+    && $('pause').getAttribute('aria-disabled') === 'true' && /Deploying/.test(text($('sim-phase'))));
   for (let i = 0; i < 80 && (open('deploy') || !host().running); i++) await tick(50);
-  check('the countdown ends in the battle', !open('deploy') && host().running);
+  check('the countdown ends in the battle', !open('deploy') && host().running && !$('end').disabled && /^Block \d+$/.test(text($('sim-phase'))));
 
   $('end').click();
   await tick(10);
-  const confirm = () => $('end-title') && $('end-title').closest('.sui-message-system-model-overlay');
-  check('End asks first: the system modal, a forfeit and the standing, Cancel then the destructive End battle', confirm() && confirm().getAttribute('role') === 'alertdialog'
-    && /Counts as a forfeit · 9\/9 standing/.test(text(confirm())) && confirm().querySelector('.icon-attention')
-    && ctas(confirm()).map((a) => a.id).join() === 'end-cancel,end-confirm' && $('end-confirm').classList.contains('sui-mod-destructive') && $('end-cancel').classList.contains('sui-mod-secondary'));
+  const confirm = () => $('end-title') && $('end-title').closest('.d-modal');
+  check('End asks first: an alert dialog, a forfeit and the standing, Cancel then the coral End battle', confirm() && confirm().getAttribute('role') === 'alertdialog'
+    && /Counts as a forfeit · 9\/9 standing/.test(text(confirm())) && confirm().querySelector('.d-modal-rail .icon-attention') && confirm().matches('.is-bad')
+    && ctaIds(confirm()) === 'end-cancel,end-confirm' && $('end-confirm').matches('.d-btn.is-coral') && !$('end-cancel').matches('.is-coral'));
   check('…a solo battle holds still while it asks, with no Paused under it', !host().running && !open('paused') && doc.activeElement === $('end-cancel'));
   esc();
   await tick(10);
   check('…Escape cancels and the battle picks up again', !confirm() && host().running && !open('paused'));
   $('pause').click();
   await tick(10);
-  check('Pause opens the Paused modal, Resume focused, the nav\'s Pause hidden', open('paused') && doc.activeElement === $('resume') && doc.body.classList.contains('sim-paused')
-    && /^\d\d:\d\d$/.test(text($('paused-clock'))));
+  check('Pause opens the Paused modal, Resume focused, the nav\'s Pause still there and pressed', open('paused') && doc.activeElement === $('resume') && doc.body.classList.contains('sim-paused')
+    && /^\d\d:\d\d$/.test(text($('paused-clock'))) && $('pause').getAttribute('aria-pressed') === 'true' && sw.getComputedStyle($('pause')).display !== 'none'
+    && /^Block \d+$/.test(text($('pause-block'))));
+  const group = (n) => n && (n.matches('[role="radiogroup"]') ? n : n.querySelector('[role="radiogroup"]'));
+  const bt = group($('pause-block-time')), bt0 = group($('block-time'));
+  check('…its block time: the two times as a segmented choice of its own', $('pause-block-time').querySelectorAll('.d-seg-opt').length === 2 && bt && bt !== bt0);
   $('pause-end').click();
   await tick(10);
   check('…its End battle asks too, standing in for it', confirm() && !open('paused'));
@@ -524,37 +607,77 @@ async function simulator(context, answers = {}) {
   check('…Cancel gives the pause back, still paused', !confirm() && open('paused') && !host().running);
   esc();
   await tick(10);
-  check('…and Escape resumes', !open('paused') && host().running);
+  check('…and Escape resumes', !open('paused') && host().running && $('pause').getAttribute('aria-pressed') === 'false');
+  $('pause').click();
+  await tick(10);
+  $('pause').click();
+  await tick(10);
+  check('…and so does pressing Pause again', !open('paused') && host().running);
   $('end').click();
   await tick(10);
   $('end-confirm').click();
   for (let i = 0; i < 40 && doc.body.dataset.screen !== 'debrief'; i++) await tick(25);
   check('End battle forfeits into the debrief', host().finished && host().finished.forfeit && doc.body.dataset.screen === 'debrief' && !confirm());
 
-  // The debrief.
+  // The debrief (COMMAND DECK, W2-debrief).
   const v = $('verdict');
-  const art = !$('verdict-banner').classList.contains('hidden');
-  check('the verdict: the game\'s banner, or the word led by its glyph — the word always there to be read', text(v) === 'Defeat'
-    && (art ? v.classList.contains('sim-sr') && $('verdict-banner').matches('.raid-end-banner.sim-verdict-banner') : v.querySelector('i.sui-icon.sui-icon-md.icon-alert') && !v.classList.contains('sim-sr')));
+  check('the verdict: the word in h1#verdict inside the deck\'s defeat frame, the hero tinted to match', text(v) === 'Defeat' && v.matches('h1')
+    && v.parentNode.matches('.d-verdict.is-defeat') && $('db-hero').dataset.verdict === 'defeat' && !doc.getElementById('verdict-banner'));
   check('…the meta line in the app\'s words', /^\d\d:\d\d · \d+ blocks? · Difficult · Spearpoint$/.test(text($('debrief-meta'))), text($('debrief-meta')));
-  const tal = $('tallies').closest('.sui-data-card');
-  check('Tallies is a data card: its tag, the side tags, then one row per tally', tal && text(tal.querySelector('.sui-data-card-header')) === 'Tallies'
+  check('…its facts are deck facts, led by the clock and closed by the planet', $('debrief-meta').querySelectorAll(':scope > .d-fact').length === 4
+    && $('debrief-meta').querySelector('.d-fact i.icon-in-progress') && $('debrief-meta').querySelector('.d-fact .d-chevs') && $('debrief-meta').querySelector('.d-fact i.icon-planet'));
+  const tal = $('tallies').closest('.d-panel');
+  check('Tally is a deck panel: its title, the side tags, then one row per tally', tal && /^Tally/.test(text(tal.querySelector('.d-panel-h')))
     && text(doc.querySelector('.sim-tally-h .sim-you')) === 'You' && text(doc.querySelector('.sim-tally-h .sim-cpu')) === 'Computer'
-    && $('tallies').querySelectorAll(':scope > .sui-data-card-row.sim-tally').length === 6
-    && $('tallies').querySelector('.sim-tally .sim-tally-l i.sui-icon.sui-icon-sm.icon-wreckage')
-    && $('tallies').querySelector('.sim-tally .sim-tally-l i.sui-icon.sui-icon-sm.sui-icon-defender-block'));
-  const mom = $('moments').closest('.sui-data-card');
-  check('Turning points is the same card, with the Full battle log in it', mom && text(mom.querySelector('.sui-data-card-header')) === 'Turning points' && mom.contains($('show-log'))
-    && $('show-log').classList.contains('sui-mod-secondary') && !doc.querySelector('.sim-debrief h2'));
-  check('…its rows say Block, not B', [...$('moments').children].every((r) => !/^B\d/.test(text(r))) && $('moments').children.length > 0);
-  check('the next moves: Rematch the one primary, the rest secondary and iconed, Harder\'s label in its span', $('db-rematch').classList.contains('sui-mod-primary')
-    && ['db-edit', 'db-swap', 'db-harder', 'db-code'].every((id) => $(id).classList.contains('sui-mod-secondary') && $(id).parentNode.matches('.sim-next') && $(id).querySelector('i.sui-icon'))
-    && text($('db-harder')) === 'Harder' && $('db-harder').querySelector('span') && $('db-edit').querySelector('i.icon-edit') && $('db-swap').querySelector('i.icon-transfers') && $('db-code').querySelector('i.icon-outgoing'));
-  check('…New encounter is the game\'s frameless text control', $('db-new').matches('a.sui-nav-btn') && !doc.querySelector('.sim-link'));
+    && $('tallies').querySelectorAll('.d-stat:not(.is-head)').length === 6
+    && $('tallies').querySelector('.d-stat i.sui-icon-destroyed') && $('tallies').querySelector('.d-stat i.sui-icon-defender-block') && $('tallies').querySelector('.d-stat i.icon-dmg.is-gold'));
+  const fielded = host().summary().fielded['1-1'];
+  const chips = [...$('db-chips-you').querySelectorAll('.d-tile')];
+  const killed = new Set(host().summary().kills.map((k) => k.struct_id));
+  check('Survivors: one static chip per struct you fielded, the destroyed ones dead', chips.length === fielded && chips.every((c) => c.matches('.is-static.is-56'))
+    && chips.filter((c) => c.classList.contains('is-dead')).length === host().summary().lost['1-1'] && /^lost \d+ of \d+$/.test(text($('db-lost-you')))
+    && $('db-chips-cpu').querySelectorAll('.d-tile.is-foe').length === host().summary().fielded['1-2'] && text($('db-them')) === 'Computer',
+    chips.length + '/' + fielded + ' dead ' + chips.filter((c) => c.classList.contains('is-dead')).length + ' kills ' + killed.size);
+  const mom = $('moments').closest('.d-panel');
+  check('Turning points is a deck panel, with the Full battle log in its footer', mom && /^Turning points/.test(text(mom.querySelector('.d-panel-h'))) && mom.querySelector('.d-panel-f').contains($('show-log'))
+    && $('show-log').matches('button.d-tool') && /^\d+ blocks?$/.test(text($('db-blocks'))) && /^\d+ of \d+ attacks?$/.test(text($('db-attacks'))));
+  const evs = [...$('moments').querySelectorAll('.d-tl-ev')];
+  check('…its events are on the block line, captioned B<n>', evs.length > 0 && evs.length <= 5 && evs.every((e) => /^B\d+$/.test(text(e.querySelector('.d-tl-blk'))) && e.querySelector('.d-ship'))
+    || (evs.length === 0 && /No structs destroyed/.test(text($('moments')))), evs.length + ' events');
+  check('the next moves: Rematch the launch key, the rest deck keys in the secondary grid, iconed and labelled', $('db-rematch').matches('button.d-launch')
+    && ['db-edit', 'db-swap', 'db-harder', 'db-code'].every((id) => $(id).matches('button.d-btn') && $(id).closest('.x-acts .x-sec') && $(id).querySelector('i.sui-icon') && $(id).querySelector('span'))
+    && $('db-edit').querySelector('i.icon-edit') && $('db-swap').querySelector('i.icon-transfers') && $('db-code').querySelector('i.icon-outgoing'));
+  check('…a defeat at Difficult offers Easier, one step down', text($('db-harder')) === 'Easier' && $('db-harder').querySelector('i.icon-chevron-down') && !$('db-harder').classList.contains('is-coral')
+    && !$('db-harder').classList.contains('hidden'), text($('db-harder')));
+  check('…New encounter waits for a challenge or a live battle', $('db-new').matches('button.d-btn.hidden') && !doc.querySelector('.sim-link'));
+  check('…Share is a menu key', $('db-code').getAttribute('aria-haspopup') === 'menu' && $('db-code').getAttribute('aria-expanded') === 'false');
+  $('db-code').click();
+  const shareMenu = $($('db-code').getAttribute('aria-controls'));
+  check('…which opens on Post to… and Copy link', shareMenu && !shareMenu.hidden && [...shareMenu.querySelectorAll('.d-menu-item')].map((b) => text(b)).join('|') === 'Post to…|Copy link'
+    && $('db-code').getAttribute('aria-expanded') === 'true');
+  $('db-code').click();
+  {
+    // W3: TOP STRUCT reads the summary's per-struct tally: yours with the
+    // most kills, then the most damage; none without it.
+    check('no per-struct kills, no Top struct', $('db-mvp').classList.contains('hidden'));
+    const h = host(), plain = h.summary.bind(h);
+    h.summary = () => Object.assign(plain(), { byStruct: {
+      '5-1002': { owner: '1-1', type: 'Tank', kills: 2, damage: 5 },
+      '5-1003': { owner: '1-1', type: 'Battleship', kills: 2, damage: 11 },
+      '5-2001': { owner: '1-2', type: 'Cruiser', kills: 6, damage: 30 },
+    } });
+    sw.Simulator.showDebrief();
+    const mvp = $('db-mvp');
+    check('…with it: your struct with the most kills, ties broken by damage, never theirs', !mvp.classList.contains('hidden')
+      && /^Top struct/.test(text(mvp)) && /Battleship/.test(text(mvp.querySelector('.x-mvp-t'))) && /2 kills · 11 damage/.test(text(mvp))
+      && mvp.querySelector('.x-mvp-s .d-ship') && !/Cruiser/.test(text(mvp)), text(mvp));
+    h.summary = plain;
+    sw.Simulator.showDebrief();
+  }
   sw.Simulator.openLink('zzzz');
   await tick(10);
-  check('the toast is the game\'s system alert, with no action slot', $('message').matches('.sui-message-system-alert.sui-mod-secondary') && /does not hold a battle/.test(text($('message')))
-    && !$('message').querySelector('.sui-message-system-alert-close-container'));
+  check('the toast is the deck\'s neutral alert band, words only', $('message').matches('.d-alert.is-neutral') && /does not hold a battle/.test(text($('message').querySelector('.d-alert-d')))
+    && !$('message').querySelector('button, .sui-message-system-alert-close-container'));
   s.close();
 }
 
@@ -572,35 +695,37 @@ async function simulator(context, answers = {}) {
   $('post-to').click();
   await tick(30);
   const off = (n) => !!n && (n.disabled === true || n.getAttribute('aria-disabled') === 'true');
-  check('the sheet lists the rooms, and picks none for you', $('post-rooms').querySelectorAll('.sim-room').length === 2 && off($('post-send')) && !/Post to \S/.test(text($('post-send'))));
+  check('the sheet lists the rooms, and picks none for you', $('post-rooms').querySelectorAll('.s-room').length === 2 && off($('post-send')) && !/Post to \S/.test(text($('post-send'))));
   {
     const dlg = $('post-dialog');
-    check('…it is the game\'s system modal, in the scaled layout, named by its title', dlg && dlg.classList.contains('sui-message-system-model-overlay') && $('menu-page-layout').contains(dlg)
-      && dlg.getAttribute('role') === 'dialog' && /Share battle/.test(text($(dlg.getAttribute('aria-labelledby'))))
-      && dlg.querySelector('.sui-message-system-modal-frame-left-middle i.sui-icon.sui-icon-md.icon-outgoing'));
-    const ctas = [...dlg.querySelectorAll('.sui-message-system-modal-cta-btn-wrapper > .sui-screen-btn')];
-    check('…Copy link then Post, the one primary last; no close X', ctas.length === 2 && ctas[0].id === 'post-copy' && ctas[0].classList.contains('sui-mod-secondary')
-      && ctas[1].id === 'post-send' && ctas[1].classList.contains('sui-mod-primary') && text(ctas[1]) === 'Post' && !dlg.querySelector('.sui-screen-nav-close'));
-    check('…the find box is a SUI text field', $('post-find').closest('label.sui-input-text') && /Post to/.test(text($('post-find').closest('label.sui-input-text').querySelector('span'))));
-    const rows = [...$('post-rooms').querySelectorAll('.sim-room')];
-    check('…the rooms are radio result rows drawn as Comms draws a room', $('post-rooms').matches('.sui-result-table.sui-result-rows[role="radiogroup"]')
-      && rows.every((r) => r.matches('.sui-result-row') && r.querySelector('.sui-radio-container input.sui-radio[name="post-room"]'))
-      && rows[0].querySelector('.sui-result-row-portrait .chat-room-icon i.icon-guild') && rows[1].querySelector('.sui-result-row-portrait .pfp-frame')
+    const box = dlg && dlg.querySelector('.d-modal');
+    check('…it is a deck dialog, in the scaled layout, named by its title', dlg && dlg.matches('.d-scrim') && $('menu-page-layout').contains(dlg)
+      && box && box.matches('.d-modal.is-violet.is-md[role="dialog"][aria-modal="true"]') && /Share battle/.test(text($(box.getAttribute('aria-labelledby'))))
+      && dlg.querySelector('.d-modal-rail i.sui-icon.icon-outgoing'));
+    const ctas = [...dlg.querySelectorAll('.d-modal-cta > button')];
+    check('…Copy link then Post, the teal key last; no close X', ctas.length === 2 && ctas[0].id === 'post-copy' && ctas[0].matches('.d-btn:not(.is-teal)') && ctas[0].querySelector('.icon-copy')
+      && ctas[1].id === 'post-send' && ctas[1].matches('.d-btn.is-teal') && text(ctas[1]) === 'Post' && ctas[1].querySelector('.icon-send-alpha') && !dlg.querySelector('.d-iconbtn'));
+    check('…the find box is a deck code field, labelled', $('post-find').matches('.d-code > input.d-code-in') && /^Post to$/.test(text(dlg.querySelector('label[for="post-find"]'))));
+    const rows = [...$('post-rooms').querySelectorAll('.s-room')];
+    check('…the rooms are radio rows, each marked as Comms marks a room', $('post-rooms').matches('[role="radiogroup"]')
+      && rows.every((r) => r.matches('label.s-room') && r.querySelector('input.d-sr[type="radio"][name="post-room"]'))
+      && rows[0].querySelector('.chat-room-icon i.icon-guild') && rows[1].querySelector('.pfp-frame')
       && /PID #1-61/.test(text(rows[1])) && !/direct|channel/.test(text($('post-rooms'))));
   }
   $('post-find').value = 'jp';
   $('post-find').dispatchEvent(new s.sw.Event('input'));
-  check('…typing narrows it', $('post-rooms').querySelectorAll('.sim-room').length === 1);
-  $('post-rooms').querySelector('.sim-room').click();
-  check('…a click anywhere on the row picks it, and Post wakes', $('post-rooms').querySelector('input.sui-radio').checked && !off($('post-send')) && /^Post to /.test(text($('post-send'))));
+  check('…typing narrows it', $('post-rooms').querySelectorAll('.s-room').length === 1);
+  $('post-rooms').querySelector('.s-room').click();
+  check('…a click anywhere on the row picks it, and Post wakes', $('post-rooms').querySelector('input[name="post-room"]').checked && !off($('post-send')) && /^Post to /.test(text($('post-send'))));
   $('post-send').click();
   await tick(20);
   check('…and Post sends the battle code to that room, nothing else', posts.length === 1 && posts[0].roomId === '!b:h' && posts[0].guildId === '0-5' && posts[0].battle && posts[0].result == null);
   check('…then closes', !s.$('post-dialog'));
   $('import').click();
-  check('Paste is the same modal: a Battle link field, Cancel and Load battle', $('code-dialog') && $('layout-code').closest('label.sui-input-text')
-    && /Battle link/.test(text($('layout-code').closest('label'))) && text($('code-load')) === 'Load battle' && $('code-load').classList.contains('sui-mod-primary')
-    && $('code-dialog').querySelector('.icon-incoming'));
+  check('Paste is the same deck dialog: a Battle link field, Cancel and Load battle', $('code-dialog') && $('code-dialog').matches('.d-scrim') && $('layout-code').matches('.d-code > input.d-code-in')
+    && /^Battle link$/.test(text($('code-dialog').querySelector('label[for="layout-code"]'))) && text($('code-load')) === 'Load battle' && $('code-load').matches('.d-btn.is-teal')
+    && /^Cancel$/.test(text($('code-dialog').querySelector('.d-modal-cta > button'))) && $('code-dialog').querySelector('.d-modal-rail .icon-incoming')
+    && s.sw.document.activeElement === $('layout-code'));
   $('layout-code').value = 'nonsense';
   $('layout-code').dispatchEvent(new s.sw.KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
   check('…Enter loads, and a bad link says why while the dialog stays', $('code-dialog') && /link|battle/i.test(text($('message'))), text($('message')));
@@ -706,21 +831,32 @@ async function simulator(context, answers = {}) {
   const fire = (frame, sender = '@1-61:h') => (subs['matrix::sim'] || []).forEach((cb) => cb({ payload: { room_id: '!m:h', sender, frame } }));
   check('joining says hello to the host', frames.some((f) => f.kind === 'hello'));
   check('the lobby: Live battle panel, both seats, the match chat', /Live battle/.test(text($('challenge'))) && /JPEG/.test(text($('challenge'))) && /You/.test(text($('challenge'))) && /gl/.test(text($('challenge'))));
-  check('…fleets fixed, and the header button says Ready', $('round').classList.contains('hidden') && /^Ready/.test(text($('start'))) && $('mirror').classList.contains('hidden'));
+  check('…a deck panel in the enemy tone, the talk as deck messages, a composer in its footer', $('challenge').matches('.d-panel.is-enemy:not(.is-warn)')
+    && /^Live battle$/.test(text($('challenge').querySelector('.d-panel-h'))) && /JPEG/.test(text($('challenge').querySelector('.d-msg.is-foe .d-msg-h')))
+    && $('challenge').querySelector('.d-panel-f .d-composer input#match-say') && $('challenge').querySelector('.d-panel-f .d-composer button.d-btn.is-teal[aria-label="Send"] .icon-send-alpha')
+    && $('unlock').classList.contains('hidden'));
+  check('…the top bar\'s mode is Live with the host\'s face', $('sim-mode').matches('.d-mode.is-live') && /^Live · JPEG$/.test(text($('sim-mode'))) && $('sim-mode').querySelector('.d-pf'));
+  check('…fleets fixed, and the launch key says Ready', $('round').classList.contains('hidden') && /^Ready/.test(text($('start').querySelector('span'))) && $('mirror').disabled && $('swap').disabled);
+  $('match-say').value = 'gl hf';
+  $('match-say').dispatchEvent(new s.sw.KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+  await tick(20);
+  const said = s.calls.filter((c) => c[0] === 'matrix_send')[0];
+  check('…what is typed there goes to the match room', said && said[1].roomId === '!m:h' && said[1].body === 'gl hf' && $('match-say').value === '');
   $('start').click();
   await tick(20);
   check('Ready tells the host', frames.some((f) => f.kind === 'ready' && f.ready === true) && /waiting/i.test(text($('start'))), JSON.stringify(frames) + ' | ' + text($('start')) + ' | disabled=' + $('start').disabled);
   fire({ v: 1, kind: 'ready', ready: true }, '@1-99:h');
   const hostSeat = () => text($('challenge').querySelector('.sim-run'));
   check('…a frame from anyone but the host is ignored', /JPEG/.test(hostSeat()) && !/Ready/.test(hostSeat()), hostSeat());
-  check('…a seat not ready says so as a warning badge, and the lobby is the phase badge', $('challenge').querySelector('.sim-seat .sui-badge.sui-mod-warning')
-    && /Not ready/.test(text($('challenge').querySelector('.sim-run'))) && /^Lobby$/.test(text($('challenge').querySelector('.sim-settings .sui-badge'))));
+  check('…a seat not ready says so as an amber pill, and the lobby is the phase pill', $('challenge').querySelector('.sim-seat .d-pill.is-amber')
+    && /Not ready/.test(text($('challenge').querySelector('.sim-run .d-pill'))) && /^Lobby$/.test(text($('challenge').querySelector('.s-pills .s-phase'))));
   fire({ v: 1, kind: 'ready', ready: true });
   check('…the host\'s own ready shows on its seat', /Ready/.test(hostSeat()), hostSeat());
   fire({ v: 1, kind: 'start', battle, block_ms: 6000 });
   await tick(30);
   check('the host\'s start begins the battle here, the board replaying its ticks', s.sw.document.body.dataset.screen === 'battle' && s.sw.Simulator.getHost() instanceof s.sw.SimLive.RemoteHost);
-  check('…with the Live chip, and no pause for a battle between two', /Live/.test(text($('sim-status'))) && s.sw.getComputedStyle($('pause')).display === 'none');
+  check('…with the Live pill (coral, its LED lit), and no pause for a battle between two', /Live/.test(text($('sim-status')))
+    && $('sim-status').querySelector('.d-pill.is-coral > .d-led.is-coral') && $('sim-phase') && s.sw.getComputedStyle($('pause')).display === 'none');
   {
     const rh = s.sw.Simulator.getHost();
     let ticks = 0;
@@ -736,9 +872,16 @@ async function simulator(context, answers = {}) {
   s.sw.Simulator.getHost().end({ v: 1, kind: 'end', winner: 'guest', summary: { stats: {}, lost: { '1-1': 4, '1-2': 1 }, fielded: { '1-1': 9, '1-2': 9 }, kills: [] } });
   await tick(2700);
   check('the host\'s end is the debrief: you beat them', s.sw.document.body.dataset.screen === 'debrief' && /You beat JPEG/.test(text($('db-post'))) && /JPEG/.test(text(s.sw.document.querySelector('.sim-tally-h .sim-cpu'))));
-  check('…no rematch, edit or swap for a guest', $('db-rematch').classList.contains('hidden') && $('db-edit').classList.contains('hidden') && $('db-swap').classList.contains('hidden'));
-  check('…so Share is the screen\'s one primary, and the result a primary system alert (P7)', $('db-code').classList.contains('sui-mod-primary') && !$('db-code').classList.contains('sui-mod-secondary')
-    && $('db-post').matches('.sui-message-system-alert.sui-mod-primary') && $('db-post').querySelector('.sui-text-label.sui-text-primary'));
+  check('…said in the head-to-head band: this window\'s tally, you first', $('db-post').matches('.x-h2h') && !$('db-post').classList.contains('hidden')
+    && [...$('db-post').querySelectorAll('.x-score-n')].map(text).join(' ') === '1 - 0' && /You.*JPEG/.test(text($('db-post').querySelector('.x-score')))
+    && $('db-post').querySelector('.x-score .d-pf.is-you') && $('db-post').querySelector('.x-score .d-pf.is-them'), text($('db-post')));
+  check('…no rematch, edit or swap for a guest: its launch is New encounter', /^New encounter/.test(text($('db-rematch'))) && $('db-new').classList.contains('hidden')
+    && $('db-edit').classList.contains('hidden') && $('db-swap').classList.contains('hidden'), text($('db-rematch')));
+  check('…the survivors from the guest\'s side: its own losses, the host by name, undimmed without kills, and no top struct', text($('db-lost-you')) === 'lost 1 of 9' && text($('db-lost-cpu')) === 'lost 4 of 9'
+    && text($('db-them')) === 'JPEG' && $('db-chips-you').querySelectorAll('.d-tile.is-friend').length > 0 && !$('debrief-screen').querySelector('.x-chips .is-dead') && $('db-mvp').classList.contains('hidden'),
+    text($('db-lost-you')) + ' / ' + text($('db-lost-cpu')));
+  check('…Share stays for them, and the result is the head-to-head band', !$('db-code').classList.contains('hidden') && $('db-code').closest('.x-sec')
+    && $('db-post').matches('.x-h2h'));
   s.close();
 }
 
@@ -847,7 +990,7 @@ async function simulator(context, answers = {}) {
   await tick(2700);
   check('the guest leaving is the host\'s win, posted back as ended', h.finished && h.finished.winner === 'you' && statuses.some((f) => f.state === 'ended' && f.winner === '@1-1:h')
     && frames.some((f) => f.kind === 'end' && f.winner === 'host'));
-  check('…and the debrief says so', /You beat JPEG/.test(text($('db-post'))), text($('db-post')));
+  check('…and the debrief says so, in the head-to-head band', /You beat JPEG/.test(text($('db-post'))) && $('db-post').matches('.x-h2h'), text($('db-post')));
   s.close();
 }
 

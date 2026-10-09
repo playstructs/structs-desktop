@@ -59,7 +59,8 @@
 .chl-run.chl-me { background: var(--surface-player-highlight); }
 .chl-run.chl-old { opacity: .55; }
 .chl-time { text-align: right; white-space: nowrap; }
-.chl-lost { text-align: right; white-space: nowrap; }
+/* The ladder's losses column — not a lost result's row, which is .chl-row.chl-lost. */
+.chl-run > .chl-lost { text-align: right; white-space: nowrap; }
 .chl-more { padding: var(--spacing-xs); }
 
 /* ── the thread, in one line ── */

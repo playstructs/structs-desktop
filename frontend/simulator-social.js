@@ -1,21 +1,25 @@
 /* Battle Simulator — the people around a battle.
  *
  * A battle can come from somewhere: a challenge card's Play in Comms (a room
- * and a thread, with a ladder), or a player's "Challenge to a battle" (a
- * person to send it to). Rust hands that over as a CONTEXT (simulator.rs,
- * `sim_take_context`); this file holds it and draws what it adds:
+ * and a thread, with a ladder), a player's "Challenge to a battle" (a person
+ * to send it to), or a live invite. Rust hands that over as a CONTEXT
+ * (simulator.rs, `sim_take_context`); this file holds it and draws what it
+ * adds, in COMMAND DECK parts (simdeck.js):
  *
- *   setup    the Challenge panel in the Round card's place — the battle's
- *            settings, who played and how, the thread and a reply box; both
- *            fleets locked, because results only compare on the same battle
- *   battle   the same thread beside the board
+ *   setup    the Challenge panel in the Mission panel's place — the battle's
+ *            settings as pills, who played and how, the last of the thread;
+ *            both fleets fixed, because results only compare on the same
+ *            battle. Live: the lobby — the two seats and the match's talk.
+ *            The top bar's mode badge, the addressed strip and Send to.
+ *   battle   the talk is the Map Viewer's own rail beside the board (`talk`)
  *   debrief  your run posts ITSELF into the thread when it is your best (the
- *            rule the player chose); any other run stays here
+ *            rule the player chose), said in the alert band; any other run
+ *            stays here. Live: the head-to-head band.
  *
  * and, for any battle, "Post to…": a room or a DM from Comms. Nothing here
  * writes text into a room: Rust builds every message from the battle and
- * result codes (matrix_sim_post); the only words that leave are the ones
- * typed into the reply box, and those go into this battle's thread only.
+ * result codes (matrix_sim_post); the only words that leave are the ones a
+ * player types to the match (the lobby's composer, the rail).
  *
  *   window.SimSocial(api) → { take, adopt, isChallenge, locked, matches, addressed,
  *                             renderSetup, renderBattle, debrief, openPost, closePost, leave }
@@ -23,8 +27,9 @@
 (function () {
   'use strict';
   window.SimSocial = function (api) {
-    var $ = api.$, el = api.el, icon = api.icon, button = api.button, cap = api.cap;
-    var Code = window.StructsSimCode;
+    var $ = api.$, cap = api.cap;
+    var Code = window.StructsSimCode, D = window.SimDeck;
+    var de = D.el;   // (tag, cls, text)
 
     function tauri() { return window.__TAURI__ && window.__TAURI__.core ? window.__TAURI__ : null; }
     function invoke(cmd, args) {
@@ -78,7 +83,8 @@
     }
     /* Leaving keeps the battle on the board; it just stops being the challenge. */
     function leave() {
-      if (isLive() && live && live.phase !== 'over') sendFrame({ v: 1, kind: 'leave', forfeit: live.phase === 'battle' });
+      // After the battle too: the other side's debrief stops saying Connected.
+      if (isLive() && live) sendFrame({ v: 1, kind: 'leave', forfeit: live.phase === 'battle' });
       if (isLive() && ctx.role === 'host' && live && live.phase === 'lobby') sendStatus({ state: 'cancelled' });
       closeMatch();
       stopDirect();
@@ -107,7 +113,7 @@
       lastAsk = Date.now();
       var asked = ctx;
       invoke('matrix_sim_thread', { guildId: ctx.guild_id, roomId: ctx.room_id, eventId: ctx.event_id })
-        .then(function (v) { if (ctx !== asked) return; view = v; viewError = null; renderPanels(); })
+        .then(function (v) { if (ctx !== asked) return; view = v; viewError = null; renderPanels(); api.renderReady(); })
         .catch(function (e) { if (ctx !== asked) return; viewError = errText(e); renderPanels(); });
     }
     // The thread moves while you play: a reply, somebody else's best.
@@ -188,6 +194,7 @@
       var cfg = Code.decode(c.battle);
       if (!cfg) { api.message('That live battle does not hold a battle.'); return; }
       ctx = c; left = false; view = null; viewError = null; post = null;
+      if (chat) chat.input.value = '';
       live = { phase: 'lobby', guest: null, ready: { host: false, guest: false }, lastGuest: Date.now(), chat: [], seen: {}, rtc: null, expectUser: c.expect ? c.expect.user_id : null };
       if (c.role === 'guest') live.guest = { user: c.me, name: 'You' };
       // Your own seat wears your own face, as the other one does.
@@ -238,7 +245,8 @@
     }
     function opponentName() {
       if (!isLive()) return null;
-      if (ctx.role === 'host') return live.guest ? live.guest.name : 'Guest';
+      // Before they arrive, the one it was opened for (a DM invite) has a name.
+      if (ctx.role === 'host') return live.guest ? live.guest.name : (ctx.expect && ctx.expect.name) || 'Guest';
       if (ctx.role === 'guest') return ctx.host_name;
       return null;
     }
@@ -278,6 +286,7 @@
       // The direct line's handshake, from the one person it is with.
       if (f.kind === 'rtc') { if (live.rtc && from === peer()) live.rtc.signal(f); return; }
       var now = Date.now();
+      if (from === peer()) live.lastPeer = now;
       if (ctx.role === 'host') {
         if (f.kind === 'hello') {
           if (live.phase !== 'lobby' || (live.guest && live.guest.user !== from) || (live.expectUser && from !== live.expectUser)) return;
@@ -315,6 +324,7 @@
       else if (f.kind === 'leave') {
         if (live.phase === 'lobby') { api.message(ctx.host_name + ' left.'); live.phase = 'over'; api.renderAll(); }
         else if (live.remote && !live.remote.finished) live.remote.end({ winner: ctx.role === 'guest' ? 'guest' : 'draw', gone: true });
+        else if (live.phase === 'over') { live.peerGone = true; api.renderReady(); }
       }
     }
     function guestLeft(f) {
@@ -326,16 +336,26 @@
         return;
       }
       if (live.phase === 'battle') api.concede(!!f.gone);
+      else if (live.phase === 'over') { live.peerGone = true; api.renderReady(); }
     }
     // The guest says it is still there; the host notices when it is not.
+    // After the battle both sides say so, while the debrief offers a rematch.
     setInterval(function () {
-      if (!isLive() || !live || live.phase !== 'battle') return;
+      if (!isLive() || !live) return;
+      if (live.phase === 'over' && ctx.role !== 'watch' && !live.peerGone) { sendFrame({ v: 1, kind: 'ping' }); api.renderReady(); return; }
+      if (live.phase !== 'battle') return;
       if (ctx.role === 'guest') sendFrame({ v: 1, kind: 'ping' });
       if (ctx.role === 'host' && Date.now() - live.lastGuest > GUEST_GONE_MS) guestLeft({ gone: true });
     }, PING_MS / 2);
     /* How the other side is doing, for the battle bar. */
     function connection() {
-      if (!isLive() || !live || live.phase !== 'battle') return null;
+      if (!isLive() || !live) return null;
+      // The debrief: connected while the other side still answers.
+      if (live.phase === 'over') {
+        if (ctx.role === 'watch' || live.peerGone || !live.lastPeer) return null;
+        return Date.now() - live.lastPeer <= PING_MS * 1.5 ? { state: 'ok', text: linkText() } : null;
+      }
+      if (live.phase !== 'battle') return null;
       // Over is over: a host that stopped ticking after the end is not lagging.
       if (live.remote && live.remote.finished) return null;
       var blockMs = ctx.block_ms || 4000;
@@ -376,85 +396,120 @@
     // ── the panel ────────────────────────────────────────────────────────
     function me() { return view && view.me; }
     function myEntry() { var m = me(); return ((view && view.ladder) || []).filter(function (e) { return e.sender === m; })[0] || null; }
-
-    /* A person, drawn the one way every window draws a person named inside
-     * something else (playercard.js personLine: face, [TAG] name). Without
-     * the chain's id there is no face to draw: the name alone, set the same. */
-    function personNode(o) {
-      var P = window.StructsPlayerCard && window.StructsPlayerCard.parts;
-      var line = P && o && o.id ? P.personLine({ id: o.id, name: o.name, tag: o.tag || null, pfp: o.pfp || null }) : null;
-      if (line) return line;
-      line = el('span', null, 'pc-person');
-      var nm = el('span', null, 'pc-name');
-      nm.appendChild(el('span', String((o && o.name) || ''), 'pc-nm'));
-      line.appendChild(nm);
-      return line;
-    }
-    function badge(text, mod) { return window.SUIParts.badge(text, mod); }
-    /* One line under the title: a STATE as a badge, the settings as hint. */
-    function settingsLine(state, bits) {
-      var line = el('div', null, 'sim-settings');
-      if (state) line.appendChild(state);
-      bits = bits.filter(Boolean);
-      if (!bits.length) return line;
-      // A setting never breaks inside itself ("charge 9 / · 9"): the line
-      // wraps between them, and the separator goes down with the setting it
-      // leads, so no line ends on a dot.
-      var hint = el('span', null, 'sui-text-hint');
-      bits.forEach(function (b, i) {
-        if (i) hint.appendChild(document.createTextNode(' '));
-        hint.appendChild(el('span', i ? '· ' + b : b));
-      });
-      line.appendChild(hint);
-      return line;
-    }
-    /* "9 v 9": each fleet's size, from the battle code itself. */
-    function sizeOf(c, flip) {
-      var n = { player: 0, computer: 0 };
-      ((c && c.units) || []).forEach(function (u) { if (n[u.side] != null) n[u.side]++; });
-      return flip ? n.computer + ' v ' + n.player : n.player + ' v ' + n.computer;
-    }
-    function chargeOf(c, flip) {
-      if (!c || !c.charge) return null;
-      return 'charge ' + (flip ? c.charge.computer + ' · ' + c.charge.player : c.charge.player + ' · ' + c.charge.computer);
-    }
-    /* Who played it, best first: the Comms card's own ladder (simcard.js),
-     * compact for the column. */
-    function ladderNode(max) {
-      var S = window.StructsSimCard;
-      var list = S && view ? S.ladderList(view, { max: max, compact: true }) : null;
-      return list || el('div', view ? 'Nobody has played it yet' : 'Reading the ladder…', 'sim-panel-empty sui-text-hint');
-    }
-
-    /* The talk, drawn as every window draws a conversation: chatrow.js rows
-     * (chat-rows.css), the same component the Comms window and the Map
-     * Viewer's rail use. Read-only here, as on the rail. */
     function myId() { return (ctx && ctx.me) || (view && view.me) || null; }
-    function talkNode(title, count, list) {
-      var box = el('div', null, 'sim-thread');
-      var head = el('div', null, 'sim-thread-h');
-      head.appendChild(el('span', title, 'sui-text-label sui-text-hint'));
-      if (count != null) head.appendChild(el('span', String(count), 'sui-text-label sui-text-hint'));
-      box.appendChild(head);
-      var R = window.StructsChatRow;
-      // `sui-text-tiny`, as on the Map Viewer's rail: the rows inherit it,
-      // and the clock steps down to it (simulator.css).
-      var rows = el('div', null, 'sim-talk sui-text-tiny');
-      var prev = null;
-      list.forEach(function (r) {
-        var m = { kind: 'text', event_id: r.event_id, sender: r.sender, sender_name: r.name, sender_tag: r.tag || null, player_id: r.player_id || null,
-          body: String(r.body || ''), ts: r.ts, self: !!r.self || (!!r.sender && r.sender === myId()) };
-        var node = R.render(m, prev, {});
-        var b = R.body(m, {});
-        if (b) node.appendChild(b);
-        rows.appendChild(node);
-        prev = m;
-      });
-      box.appendChild(rows);
+    function runs(n) { return n + (n === 1 ? ' run' : ' runs'); }
+    /* A message's clock, as the Comms rows give it: hours and minutes. */
+    function clock(ts) {
+      if (!ts) return null;
+      var d = new Date(Number(ts));
+      if (isNaN(d.getTime())) return null;
+      return String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0');
+    }
+
+    /* The panel's header: the round's glyph, what it is, and its right slot. */
+    function headNode(title, right) {
+      var h = de('header', 'd-panel-h');
+      h.appendChild(D.glyph('raid', 16));
+      h.appendChild(de('span', null, title));
+      var r = de('span', 'd-panel-r');
+      (right || []).forEach(function (n) { if (n) r.appendChild(n); });
+      h.appendChild(r);
+      return h;
+    }
+    /* The battle's name, and who set it and where. */
+    function identNode(compact) {
+      var box = de('div', 's-ident');
+      var name = battleName();
+      var t = de('h2', 'd-name', name);
+      t.title = name;
+      box.appendChild(t);
+      var a = !isLive() && view && view.author;
+      if (a) {
+        var by = de('div', 's-by');
+        by.appendChild(D.pf(a.pfp_attrs || null, { size: compact ? 24 : 32, tone: compact ? 'bare' : null }));
+        by.appendChild(de('span', 'd-lbl d-violet s-by-n', String(a.name || '')));
+        if (view.room_name) by.appendChild(de('span', 'd-txt d-hint s-by-w', String(view.room_name)));
+        box.appendChild(by);
+      }
       return box;
     }
-    function threadNode(max) {
-      return talkNode('Thread', (view && view.reply_count) || 0, ((view && view.replies) || []).slice(-max));
+    /* The battle's settings as pills, straight from its code. A guest flies
+     * the other fleet, so its charge reads its own side first. */
+    var LEVEL = { easy: 1, difficult: 2, hard: 3 };
+    function chargeText(c, flip) {
+      return 'Charge ' + (flip ? c.charge.computer + ' · ' + c.charge.player : c.charge.player + ' · ' + c.charge.computer);
+    }
+    function pillsNode(c, phase, compact) {
+      var box = de('div', 's-pills');
+      if (phase) box.appendChild(phase);
+      if (!c) return box;
+      if (!isLive()) box.appendChild(D.pill({ chevs: LEVEL[c.difficulty] || 1, text: cap(c.difficulty), title: 'Opponent' }));
+      var ms = isLive() ? (ctx.block_ms || 4000) : c.blockMs;
+      box.appendChild(D.pill({ text: (ms / 1000) + ' s', title: 'Block time' }));
+      if (c.charge && !compact) box.appendChild(D.pill({ text: chargeText(c, isLive() && ctx.role === 'guest'), title: 'Opening charge' }));
+      return box;
+    }
+    function lockNode(text) {
+      var l = de('div', 's-lock');
+      l.appendChild(D.glyph('blocked', 16));
+      l.appendChild(de('span', 'd-lbl-sm', text));
+      return l;
+    }
+    function emptyNode(text) { return de('p', 'd-txt d-hint s-empty', text); }
+
+    /* Who played it, best first: the Comms card's own ladder (simcard.js),
+     * worn as a deck ladder — its rows keep their .chl-* hooks and gain the
+     * deck's: the verdict becomes its glyph, the time takes its colour. */
+    function ladderNode(max, fresh) {
+      var S = window.StructsSimCard;
+      var list = S && view ? S.ladderList(view, { max: max, compact: true }) : null;
+      if (!list) return emptyNode(view ? 'Nobody has played it yet' : (viewError || 'Reading the ladder…'));
+      list.classList.add('d-ladder');
+      list.setAttribute('role', 'list');
+      Array.prototype.forEach.call(list.querySelectorAll('.chl-run'), function (row) {
+        var mine = row.classList.contains('chl-me');
+        row.classList.add('d-lrow');
+        row.setAttribute('role', 'listitem');
+        if (mine) row.classList.add('is-me');
+        if (mine && fresh) row.classList.add('is-fresh');
+        var n = row.querySelector('.chl-rank');
+        if (n) n.classList.add('d-lrow-n');
+        var nm = row.querySelector('.pc-name, .pc-nm');
+        if (nm) nm.classList.add('d-lrow-name');
+        // Your own run reads You; the name stays in its title.
+        if (nm && mine) { nm.title = nm.textContent; nm.textContent = 'You'; }
+        var v = row.querySelector('.chl-verdict'), t = row.querySelector('.chl-time');
+        var tone = !v ? 'hint' : v.classList.contains('sc-ok') ? 'teal' : v.classList.contains('sc-tone-warning') ? 'amber' : 'coral';
+        if (t) t.classList.add('d-lrow-t', 'd-' + tone);
+        if (v) {
+          var word = v.textContent;
+          v.replaceChildren(D.glyph(tone === 'teal' ? 'success' : 'close', 16, 'd-' + tone));
+          v.setAttribute('role', 'img');
+          v.setAttribute('aria-label', word);
+          v.title = word;
+        }
+      });
+      var more = list.querySelector('.chl-more');
+      if (more) more.classList.add('d-txt', 'd-hint');
+      return list;
+    }
+    /* The talk, read-only: the thread's last replies as deck messages. The
+     * conversation itself is the Map Viewer's Comms rail and Comms. */
+    function msgNode(m) {
+      var self = !!m.self || (!!m.sender && m.sender === myId());
+      var foe = !self && isLive() && players().indexOf(m.sender) !== -1;
+      return D.msg({ name: self && isLive() ? 'You' : String(m.name || m.sender || ''), time: clock(m.ts), body: String(m.body || ''), self: self, foe: foe });
+    }
+    function threadNode(list, empty) {
+      var box = de('div', 'd-thread sim-thread');
+      list.forEach(function (r) { box.appendChild(msgNode(r)); });
+      if (!list.length) box.appendChild(emptyNode(empty));
+      return box;
+    }
+    function section(label, value, node) {
+      var s = D.sec(label, value);
+      s.root.appendChild(node);
+      return s.root;
     }
 
     /* The conversation the Map Viewer's own Comms rail shows beside the
@@ -504,160 +559,208 @@
       return null;
     }
 
-    /* The battle's name, in the display face when it fits the column and a
-     * size down when it does not: a name is never cut to "SPEARPOI…". */
-    function titleNode() {
-      var t = el('span', battleName(), 'sui-text-display sim-challenge-title');
-      t.title = battleName();
-      requestAnimationFrame(function () {
-        if (t.isConnected && t.scrollWidth > t.clientWidth) t.classList.replace('sui-text-display', 'sui-text-label');
-      });
-      return t;
-    }
-
     /* A live battle: what it is, the two seats, and the match's own talk.
-     * The phase is the settings line's badge, as the Comms invite row says it;
-     * each seat says only what that player owes the lobby. */
-    var PHASE = { lobby: ['Lobby', 'default'], battle: ['Live', 'destructive'], over: ['Ended', 'default'] };
-    function liveBody(body, opts) {
-      var top = el('div', null, 'sim-challenge-top');
-      top.appendChild(titleNode());
+     * Each seat says only what that player owes the lobby. */
+    var PHASE = { lobby: ['Lobby', 'amber', false], battle: ['Live', 'coral', true], over: ['Ended', null, false] };
+    function liveBody(body) {
       var c = Code.decode(ctx.battle);
-      // A guest flies the other fleet: their side first, as on their board.
-      var flip = ctx.role === 'guest';
       var ph = PHASE[live.phase] || PHASE.lobby;
-      top.appendChild(settingsLine(badge(ph[0], ph[1]), opts.compact ? [] : [c ? sizeOf(c, flip) : null, (ctx.block_ms || 4000) / 1000 + ' s blocks', chargeOf(c, flip)]));
+      var top = de('div', 'd-sec');
+      top.appendChild(pillsNode(c, D.pill({ text: ph[0], tone: ph[1], led: ph[2], cls: 's-phase' })));
+      if (live.phase === 'lobby') top.appendChild(lockNode('Fleets fixed'));
       body.appendChild(top);
-      var who = el('div', null, 'sim-seats');
       var fin = live.phase === 'over' ? (api.summary().finished || {}) : null;
       // 'you' in a summary is this window's own side; a watcher sees the host's.
       var hostWon = !!fin && (ctx.role === 'guest' ? fin.winner === 'cpu' : fin.winner === 'you');
       var guestWon = !!fin && (ctx.role === 'guest' ? fin.winner === 'you' : fin.winner === 'cpu');
-      function seat(person, mine, ready, won) {
-        var row = el('div', null, 'sim-run sim-seat' + (mine ? ' sim-run-me' : ''));
-        row.appendChild(personNode(person));
-        if (live.phase === 'lobby') row.appendChild(ready ? badge('Ready') : badge('Not ready', 'warning'));
-        else if (won) row.appendChild(badge('Won'));
-        who.appendChild(row);
+      function seat(p, mine, ready, won, isHost) {
+        var pill = live.phase === 'lobby' ? D.pill({ text: ready ? 'Ready' : 'Not ready', tone: ready ? 'teal' : 'amber' })
+          : won ? D.pill({ text: 'Won', tone: 'teal', glyph: 'success' }) : de('span');
+        var row = D.lrow({ seat: true, pfAttrs: p.pfp || null, name: String(p.name || ''), me: mine, pill: pill });
+        row.classList.add('sim-seat');
+        if (isHost) row.classList.add('sim-run');
+        return row;
       }
       var mine = live.me || {};
-      var hostMine = ctx.role === 'host';
-      seat(hostMine ? { id: mine.player_id, name: 'You', pfp: mine.pfp_attrs } : { id: ctx.host_player_id, name: ctx.host_name, pfp: ctx.host_pfp },
-        hostMine, live.ready.host, hostWon);
+      var hostMine = ctx.role === 'host', guestMine = ctx.role === 'guest';
+      var rows = [seat(hostMine ? { name: 'You', pfp: mine.pfp_attrs } : { name: ctx.host_name, pfp: ctx.host_pfp }, hostMine, live.ready.host, hostWon, true)];
       if (live.guest) {
-        var guestMine = ctx.role === 'guest';
-        seat(guestMine ? { id: mine.player_id, name: 'You', pfp: mine.pfp_attrs } : { id: live.guest.player_id, name: live.guest.name, pfp: live.guest.pfp_attrs },
-          guestMine, live.ready.guest, guestWon);
-      } else who.appendChild(el('div', ctx.expect ? 'Waiting for ' + ctx.expect.name : 'Waiting for someone to accept', 'sim-panel-empty sui-text-hint'));
-      body.appendChild(who);
-      var talk = talkNode(ctx.role === 'watch' ? 'Watchers and players' : 'Match chat', null, live.chat.filter(audible).slice(opts.compact ? -4 : -8));
-      body.appendChild(talk);
+        rows.push(seat(guestMine ? { name: 'You', pfp: mine.pfp_attrs } : { name: live.guest.name, pfp: live.guest.pfp_attrs }, guestMine, live.ready.guest, guestWon, false));
+      }
+      var seats = de('div', 's-seats');
+      seats.appendChild(D.ladder(rows));
+      if (!live.guest) seats.appendChild(emptyNode(ctx.expect ? 'Waiting for ' + ctx.expect.name : 'Waiting for someone to accept'));
+      body.appendChild(section('Players', (live.guest ? 2 : 1) + ' of 2', seats));
+      var said = live.chat.filter(audible).slice(-6);
+      body.appendChild(section(ctx.role === 'watch' ? 'Watchers and players' : 'Match chat', said.length ? String(said.length) : null,
+        threadNode(said, 'Nothing has been said yet')));
     }
 
-    /* The Challenge / Live panel in the Round card's place: the game's data
-     * card, its tag naming what this round is, and the frameless close the
-     * game puts at the end of a header that can be left. */
-    function panel(box, key, opts) {
+    /* Saying something to the match, from the lobby: the deck's composer,
+     * built once so a re-render never takes the half-typed line or focus. */
+    var chat = null;
+    function composerNode() {
+      if (!chat) {
+        var input = de('input');
+        input.type = 'text'; input.id = 'match-say';
+        input.placeholder = 'Say something'; input.maxLength = 500;
+        input.autocomplete = 'off'; input.spellcheck = false;
+        input.setAttribute('aria-label', 'Message the match');
+        var send = D.btn({ tone: 'teal', square: true, glyph: 'send-alpha', ariaLabel: 'Send', title: 'Send' });
+        chat = D.composer({ input: input, send: send });
+        chat.root.classList.add('s-say');
+        input.addEventListener('keydown', function (e) { if (e.key === 'Enter' && !e.isComposing) { e.preventDefault(); say(); } });
+        send.addEventListener('click', say);
+      }
+      var attrs = (live && live.me && live.me.pfp_attrs) || null;
+      if (chat.pfFor !== attrs) {
+        chat.root.replaceChild(D.pf(attrs, { size: 48, tone: 'you' }), chat.root.firstChild);
+        chat.pfFor = attrs;
+      }
+      return chat.root;
+    }
+    function say() {
+      var t = talk(), body = chat.input.value.trim();
+      if (!t || !body || chat.busy) return;
+      chat.busy = true; chat.send.disabled = true;
+      t.send(body, null)
+        .then(function () { chat.input.value = ''; loadMatchChat(); })
+        .catch(function (e) { api.message('Not sent — ' + errText(e)); })
+        .then(function () { chat.busy = false; chat.send.disabled = false; });
+    }
+
+    /* The Challenge / Live panel: in Setup, in the Mission panel's place (its
+     * footer — Edit fleets, or the composer — is the page's own markup); in
+     * the Debrief, a challenge's compact ladder beside the tally (a live
+     * battle's debrief is the head-to-head band, as drawn). */
+    function panel(box, key) {
       if (!box) return;
-      var show = isLive() || (isChallenge() && (opts.always || !left));
+      var isDb = key === 'debrief';
+      var show = isDb ? isChallenge() : isLive() || (isChallenge() && !left);
       box.classList.toggle('hidden', !show);
       if (!show) return;
-      if (!box.dataset.built) {
-        box.replaceChildren();
-        var h = el('div', null, 'sim-card-head');
-        h.appendChild(el('div', 'Challenge', 'sui-data-card-header sui-text-header sim-panel-title'));
-        var x = el('a', null, 'sui-screen-nav-close');
-        x.href = 'javascript:void(0)';
-        x.addEventListener('click', function () { leave(); });
-        x.setAttribute('aria-label', 'Leave'); x.title = 'Leave';
-        x.appendChild(icon('close', 'sm'));
-        h.appendChild(x);
-        box.appendChild(h);
-        box.appendChild(el('div', null, 'sui-data-card-body sui-mod-spacing-xl sim-challenge-b'));
-        box.dataset.built = '1';
-      }
-      var body = box.querySelector('.sim-challenge-b');
-      body.replaceChildren();
-      box.querySelector('.sim-panel-title').textContent = isLive() ? (ctx.role === 'watch' ? 'Watching' : 'Live battle') : 'Challenge';
-      if (isLive()) { liveBody(body, opts); return; }
-      var top = el('div', null, 'sim-challenge-top');
-      top.appendChild(titleNode());
-      if (view && view.author) {
-        var a = view.author;
-        var by = el('div', null, 'sim-by');
-        by.appendChild(personNode({ id: a.player_id, name: a.name, tag: a.tag, pfp: a.pfp_attrs }));
-        if (view.room_name) by.appendChild(el('span', String(view.room_name), 'sui-text-hint sim-by-where'));
-        top.appendChild(by);
-      }
+      if (isDb) box.className = 'd-panel x-chal is-warn';
+      else { box.classList.toggle('is-warn', !isLive()); box.classList.toggle('is-enemy', isLive()); }
+      var main = isDb ? box : (box.querySelector('#challenge-main') || box);
+      main.replaceChildren();
       var c = ctx && Code.decode(ctx.battle);
-      if (c) {
-        // Difficulty as simcard's difficultyBadge draws it: Hard is the warning.
-        top.appendChild(settingsLine(badge(cap(c.difficulty), c.difficulty === 'hard' ? 'warning' : 'default'),
-          opts.compact ? [] : [sizeOf(c), (c.blockMs / 1000) + ' s blocks', chargeOf(c)]));
+      var lad = (view && view.ladder) || [];
+      var title = isLive() ? (ctx.role === 'watch' ? 'Watching' : 'Live battle') : 'Challenge';
+      var right = isDb ? de('span', null, runs(lad.length))
+        : D.iconBtn({ glyph: 'close', label: isLive() ? 'Leave the battle' : 'Leave the challenge', onClick: leave });
+      main.appendChild(headNode(title, [right]));
+      var body = de('div', 'd-panel-b' + (isDb ? ' is-tight' : ''));
+      main.appendChild(body);
+      body.appendChild(identNode(isDb));
+      if (isLive()) {
+        liveBody(body);
+      } else if (isDb) {
+        // Compact: the name, the ladder flush, and the settings as one hint
+        // line in the footer.
+        var flush = de('div', 'd-panel-b is-flush');
+        flush.appendChild(ladderNode(50, !!post && post.state === 'posted'));
+        main.appendChild(flush);
+        if (!left) {
+          var foot = de('footer', 'd-panel-f x-chal-f');
+          foot.appendChild(D.glyph('blocked', 16, 'd-hint'));
+          foot.appendChild(de('span', 'd-txt d-hint', ['Fleets fixed'].concat(c ? [cap(c.difficulty), (c.blockMs / 1000) + ' s'] : []).join(' · ')));
+          main.appendChild(foot);
+        }
+      } else {
+        var set = de('div', 'd-sec');
+        set.appendChild(pillsNode(c, null));
+        set.appendChild(lockNode('Fleets fixed'));
+        body.appendChild(set);
+        if (viewError && view) body.appendChild(emptyNode(viewError));
+        body.appendChild(section('Ladder', runs(lad.length), ladderNode(3, false)));
+        body.appendChild(section('Thread', String((view && view.reply_count) || 0),
+          threadNode(((view && view.replies) || []).slice(-2), 'Nobody has replied yet')));
       }
-      body.appendChild(top);
-      if (viewError) body.appendChild(el('div', viewError, 'sim-panel-empty sui-text-hint'));
-      body.appendChild(ladderNode(opts.compact ? 3 : 6));
-      body.appendChild(threadNode(opts.compact ? 3 : 6));
+      if (!isDb) {
+        var f = box.querySelector('.d-panel-f');
+        var talking = isLive() && ctx.role !== 'watch';
+        if (f && talking) { var cn = composerNode(); if (cn.parentNode !== f) f.appendChild(cn); }
+        else if (chat && chat.root.parentNode) chat.root.parentNode.removeChild(chat.root);
+        if (f) f.classList.toggle('hidden', isLive() && !talking);
+      }
     }
 
-    /* The window's name for what this round is, at the head of the nav. */
+    /* The window's name for what this round is, at the head of the top bar. */
     function renderMode() {
       var m = $('sim-mode');
       if (!m) return;
-      var who = isLive() && ctx.role === 'host' && live && !live.guest && ctx.expect ? ctx.expect.name : isLive() ? opponentName() : null;
-      m.textContent = isLive() ? (ctx.role === 'watch' ? 'Watching' : 'Live · ' + (who || 'Guest'))
-        : isChallenge() && !left ? 'Challenge' : 'Simulator';
+      var text;
+      if (isLive() && ctx.role === 'watch') {
+        D.mode(m, { text: text = 'Watching', tone: 'live', glyph: 'raid' });
+      } else if (isLive()) {
+        var who = opponentName();
+        var attrs = ctx.role === 'guest' ? ctx.host_pfp : (live.guest && live.guest.pfp_attrs);
+        D.mode(m, { text: text = 'Live · ' + (who || 'Guest'), tone: 'live', pfAttrs: attrs || null });
+      } else if (isChallenge() && !left) {
+        D.mode(m, { text: text = 'Challenge', tone: 'challenge', glyph: 'raid' });
+      } else {
+        D.mode(m, { text: text = 'Simulator', glyph: 'computer' });
+      }
+      m.title = text;
     }
 
     function renderPanels() {
       renderMode();
-      panel($('challenge'), 'setup', {});
-      panel($('db-challenge'), 'debrief', { always: true });
-      if (document.body.dataset.screen !== 'debrief' || !(isChallenge() || isLive())) $('db-challenge').classList.add('hidden');
+      panel($('challenge'), 'setup');
+      panel($('db-challenge'), 'debrief');
+      if ($('db-challenge') && (document.body.dataset.screen !== 'debrief' || !isChallenge())) $('db-challenge').classList.add('hidden');
       document.body.classList.toggle('sim-live', isLive());
       renderStart();
       renderPost();
     }
 
     // ── setup ────────────────────────────────────────────────────────────
+    function reveal(id, on) { var n = $(id); if (n) n.classList.toggle('hidden', !on); }
+    function portraitInto(id, attrs) {
+      var n = $(id);
+      if (!n) return;
+      n.replaceChildren();
+      if (window.StructsPfp) window.StructsPfp.fillPortrait(n, attrs || null);
+    }
     function renderSetup() {
       var lockedNow = locked();
-      $('round').classList.toggle('hidden', lockedNow);
-      $('locked-chip').classList.toggle('hidden', !lockedNow);
-      $('locked-chip').textContent = battleName() + ' fleets';
-      $('locked-chip').title = battleName() + ' fleets';
-      $('unlock').classList.toggle('hidden', !lockedNow || isLive());
-      $('relock').classList.toggle('hidden', !(isChallenge() && left));
-      $('mirror').classList.toggle('hidden', lockedNow);
-      $('swap').classList.toggle('hidden', lockedNow);
+      reveal('round', !lockedNow);
+      reveal('unlock', lockedNow && !isLive());
+      reveal('relock', isChallenge() && left);
+      // The board's whole-fleet tools stay in place, switched off.
+      ['mirror', 'swap'].forEach(function (id) { if ($(id)) $(id).disabled = lockedNow; });
       // The other side of the board is a person in a live battle.
       var cpuName = document.querySelector('#fleet-head .sim-cpu');
       if (cpuName) cpuName.textContent = opponentName() || 'Computer';
       var to = addressed();
-      $('addressed').classList.toggle('hidden', !to);
-      $('send-to').classList.toggle('hidden', !to);
-      $('live-to').classList.toggle('hidden', !to);
-      // One primary on the page: a battle made for someone is sent, so Send
-      // leads and Start battle steps back to a try-out.
-      $('start').classList.toggle('sui-mod-primary', !to);
-      $('start').classList.toggle('sui-mod-secondary', !!to);
-      $('live-room').classList.toggle('hidden', !isChallenge() || left);
-      if (to) $('live-to').querySelector('span').textContent = $('live-to').title = 'Play ' + to.name + ' live';
+      reveal('addressed', !!to);
+      reveal('send-to', !!to);
+      reveal('live-to', !!to);
+      reveal('live-room', isChallenge() && !left);
       if (to) {
-        $('addressed-name').textContent = to.name;
-        var pf = $('addressed-pfp'); pf.replaceChildren();
-        if (window.StructsPfp) window.StructsPfp.fillPortrait(pf, to.pfp_attrs || null);
-        $('send-to').querySelector('span').textContent = $('send-to').title = 'Send to ' + to.name;
+        var name = String(to.name || '');
+        if ($('addressed-name')) $('addressed-name').textContent = name;
+        portraitInto('addressed-pfp', to.pfp_attrs);
+        var clear = $('addressed-clear');
+        if (clear) { clear.setAttribute('aria-label', 'Stop setting this up for ' + name); clear.title = 'Stop setting this up for ' + name; }
+        var send = $('send-to');
+        if (send) {
+          send.title = 'Send to ' + name;
+          if ($('send-to-name')) $('send-to-name').textContent = name;
+          else if (send.querySelector('span')) send.querySelector('span').textContent = 'Send to ' + name;
+          portraitInto('send-to-pfp', to.pfp_attrs);
+        }
+        var lt = $('live-to');
+        if (lt) { lt.title = 'Play ' + name + ' live'; if (lt.querySelector('span')) lt.querySelector('span').textContent = 'Play ' + name + ' live'; }
       }
       renderPanels();
     }
 
-    /* The header's button: Start battle, or in a live lobby, Ready. */
+    /* The launch key: Start battle, or in a live lobby, Ready. */
     function renderStart() {
       var b = $('start');
+      if (!b) return;
       var label = b.querySelector('span') || b.insertBefore(document.createElement('span'), b.firstChild);
-      if (b.firstChild && b.firstChild.nodeType === 3) b.removeChild(b.firstChild);
       if (!isLive()) { label.textContent = 'Start battle'; return; }
       var mine = ctx.role === 'host' ? live.ready.host : live.ready.guest;
       label.textContent = live.phase !== 'lobby' ? 'Started' : mine ? 'Ready · waiting' : 'Ready';
@@ -668,6 +771,16 @@
     function renderBattle() {}
 
     // ── debrief ──────────────────────────────────────────────────────────
+    /* Head-to-head, this window's session: rematches in the same window add
+     * up. Keyed by the other player; nothing is kept past the window. */
+    var series = {};
+    function opponentKey() {
+      if (!isLive()) return null;
+      if (ctx.role === 'host') return live.guest ? (live.guest.player_id || live.guest.user) : null;
+      return ctx.host_player_id || ctx.host;
+    }
+    function opponentPfp() { return ctx.role === 'host' ? (live.guest && live.guest.pfp_attrs) || null : ctx.host_pfp || null; }
+
     /* After a run: into the thread if it is your best on this challenge, to
      * the person if the battle is addressed, otherwise nothing — Share is
      * there for that. */
@@ -676,25 +789,33 @@
       post = null;
       if (isLive()) {
         live.phase = 'over';
+        var f = api.summary().finished || {};
         if (ctx.role === 'host') {
-          var f = api.summary().finished || {};
           var winner = f.winner === 'you' ? 'host' : f.winner === 'cpu' ? 'guest' : 'draw';
           var end = { v: 1, kind: 'end', winner: winner, forfeit: !!f.forfeit, stalemate: f.stalemate || null, gone: !!f.gone, summary: api.summary() };
           if (live.link) live.link.after(end); else sendFrame(end);
           sendStatus({ state: 'ended', guest: live.guest && live.guest.user, winner: winner === 'host' ? ctx.host : winner === 'guest' ? live.guest && live.guest.user : null });
+        }
+        var key = ctx.role !== 'watch' && opponentKey();
+        if (key) {
+          var sc = series[key] || (series[key] = { you: 0, them: 0 });
+          if (f.winner === 'you') sc.you++; else if (f.winner === 'cpu') sc.them++;
         }
         post = { state: 'live' };
         renderPanels();
         return;
       }
       if (matches(config)) {
+        // Your standing before this run: the new best says what it beat.
+        var was = myEntry();
+        var prevBest = was && was.outcome ? was.outcome.time : null;
         post = { state: 'posting' };
         renderPost();
         invoke('matrix_sim_post', { guildId: ctx.guild_id, roomId: ctx.room_id, battle: ctx.battle, result: result, thread: ctx.event_id })
           .then(function (r) {
-            post = r && r.posted ? { state: 'posted', event_id: r.event_id, top: r.top, beat: r.beat } : { state: 'kept' };
+            post = r && r.posted ? { state: 'posted', event_id: r.event_id, top: r.top, beat: r.beat, prevBest: prevBest } : { state: 'kept' };
             refresh(true);
-            renderPost();
+            renderPanels();
           })
           .catch(function (e) { post = { state: 'failed', error: errText(e) }; renderPost(); });
       } else if (isChallenge()) {
@@ -705,33 +826,43 @@
       renderPanels();
     }
 
-    /* What became of the run, as the game's system alert (P7): the bar is
-     * primary when it went well, destructive when it failed, secondary for
-     * anything in between; its actions sit in the alert's action slot. */
-    var STRIP_MOD = { good: 'primary', bad: 'destructive', quiet: 'secondary' };
-    function labelled(text, mod, onClick) {
-      var b = button(null, 'sui-screen-btn ' + mod, onClick);
-      b.appendChild(el('span', text));
-      return b;
-    }
-    function strip(tone, glyph, title, sub, buttons) {
+    /* What became of the run: the deck's alert band — teal when it went
+     * well, coral when it failed, neutral for anything in between — its
+     * action at the end. A live battle between two is the head-to-head. */
+    var TONE = { good: 'teal', bad: 'coral', quiet: 'neutral' };
+    function band(tone, head, detail, sub, actions) {
       var box = $('db-post');
-      var a = window.SUIParts.systemAlert(STRIP_MOD[tone] || 'secondary', glyph ? 'icon-' + glyph : null, title, sub || null, buttons);
-      box.className = a.className + ' sim-post';
-      box.replaceChildren.apply(box, Array.prototype.slice.call(a.childNodes));
+      box.className = '';
+      var t = TONE[tone] || 'neutral';
+      D.alert({ into: box, tone: t, cls: 'is-' + t, head: head, detail: detail || '', sub: sub || null, actions: actions || [] });
+    }
+    function hidePost(box) { box.className = 'hidden'; box._dkCls = null; box.replaceChildren(); }
+    function headToHead(fin, other, name) {
+      var box = $('db-post');
+      box.className = 'x-h2h';
+      box._dkCls = null;
+      box.replaceChildren();
+      var sc = series[opponentKey()] || { you: 0, them: 0 };
+      box.appendChild(de('span', 'd-lbl d-hint x-h2h-l', 'Head-to-head'));
+      var score = de('div', 'x-score');
+      score.appendChild(D.pf((live.me && live.me.pfp_attrs) || null, { size: 48, tone: 'you' }));
+      score.appendChild(de('span', 'd-lbl d-teal', 'You'));
+      score.appendChild(de('span', 'd-num x-score-n d-teal', sc.you));
+      score.appendChild(de('span', 'd-num x-score-n d-hint', '-'));
+      score.appendChild(de('span', 'd-num x-score-n d-coral', sc.them));
+      score.appendChild(de('span', 'd-lbl d-coral x-score-who', other));
+      score.appendChild(D.pf(opponentPfp(), { size: 48, tone: 'them' }));
+      box.appendChild(score);
+      var line = fin.winner === 'you' ? 'You beat ' + other : fin.winner === 'cpu' ? other + ' beat you' : 'A draw with ' + other;
+      var why = fin.gone ? (fin.winner === 'you' ? other + ' left' : 'the connection dropped') : fin.forfeit ? 'forfeit' : null;
+      box.appendChild(de('span', 'd-txt d-hint x-h2h-t', [name, line, why].filter(Boolean).join(' · ')));
     }
 
-    /* The strip's Send is the debrief's one primary while it waits, so
-     * Rematch steps down beside it (simulator.js rankDebrief). */
-    function renderPost() {
-      drawPost();
-      var box = $('db-post');
-      var send = !box.classList.contains('hidden') && box.querySelector('.sui-message-system-alert-close-container .sui-mod-primary');
-      if (api.sendPrimary) api.sendPrimary(!!send);
-    }
+    function renderPost() { drawPost(); }
     function drawPost() {
       var box = $('db-post');
-      if (!post || document.body.dataset.screen !== 'debrief') { box.className = 'sim-post hidden'; return; }
+      if (!box) return;
+      if (!post || document.body.dataset.screen !== 'debrief') { hidePost(box); return; }
       var name = battleName();
       var mine = myEntry();
       var lad = (view && view.ladder) || [];
@@ -740,54 +871,50 @@
         var fin = api.summary().finished || {};
         var other = opponentName() || (ctx.role === 'watch' ? 'the guest' : '');
         if (ctx.role === 'watch') {
-          return strip('quiet', 'detected', fin.winner === 'draw' ? 'A draw' : (fin.winner === 'you' ? ctx.host_name : (live.guest && live.guest.name) || 'The guest') + ' won', 'live · ' + name);
+          return band('quiet', fin.winner === 'draw' ? 'A draw' : (fin.winner === 'you' ? ctx.host_name : (live.guest && live.guest.name) || 'The guest') + ' won', 'live · ' + name);
         }
-        var title = fin.winner === 'you' ? 'You beat ' + other : fin.winner === 'cpu' ? other + ' beat you' : 'A draw with ' + other;
-        var why = fin.gone ? (fin.winner === 'you' ? other + ' left' : 'the connection dropped') : fin.forfeit ? 'forfeit' : 'live';
-        return strip(fin.winner === 'you' ? 'good' : 'quiet', fin.winner === 'you' ? 'success' : 'info', title, why + ' · ' + name);
+        return headToHead(fin, other, name);
       }
-      if (post.state === 'posting') return strip('quiet', 'in-progress', 'Posting your best…', where);
+      if (post.state === 'posting') return band('quiet', 'Posting your best…', where);
       if (post.state === 'posted') {
-        var undo = labelled('Undo', 'sui-mod-secondary', function () {
+        var undo = D.tool({ glyph: 'chevron-left', text: 'Undo', title: 'Take the post back', onClick: function () {
           undo.disabled = true;
           invoke('matrix_redact', { guildId: ctx.guild_id, roomId: ctx.room_id, eventId: post.event_id })
-            .then(function () { post = { state: 'undone' }; refresh(true); renderPost(); })
+            .then(function () { post = { state: 'undone' }; refresh(true); renderPanels(); })
             .catch(function (e) { undo.disabled = false; api.message('Not undone — ' + errText(e)); });
-        });
-        var place = mine ? ordinal(mine.rank) + ' of ' + lad.length + ' on ' + name : 'on ' + name;
-        return strip('good', 'success', post.top ? 'New best · posted' : 'Your best · posted', place + ' · ' + where, [undo]);
+        } });
+        var place = (mine ? ordinal(mine.rank) + ' of ' + lad.length + ' on ' + name : 'on ' + name) + (post.prevBest ? ' · was ' + post.prevBest : '');
+        return band('good', post.top ? 'New best · posted' : 'Your best · posted', place, view && view.room_name ? 'to ' + view.room_name : null, [undo]);
       }
       if (post.state === 'kept') {
-        return strip('quiet', 'info', mine ? 'Your best stays ' + mine.outcome.time : 'Not posted',
+        return band('quiet', mine ? 'Your best stays ' + mine.outcome.time : 'Not posted',
           mine ? ordinal(mine.rank) + ' of ' + lad.length + ' on ' + name + ' · this run stays here' : 'this run stays here');
       }
-      if (post.state === 'undone') return strip('quiet', 'info', 'Taken back', 'this run stays here');
-      if (post.state === 'edited') return strip('quiet', 'info', 'Your own battle', 'edited fleets · not on the ' + name + ' ladder');
+      if (post.state === 'undone') return band('quiet', 'Taken back', 'this run stays here');
+      if (post.state === 'edited') return band('quiet', 'Your own battle', 'edited fleets · not on the ' + name + ' ladder');
       if (post.state === 'failed') {
-        return strip('bad', 'alert', 'Not posted', post.error, [labelled('Try again', 'sui-mod-secondary', function () {
+        return band('bad', 'Not posted', post.error, null, [D.tool({ glyph: 'refresh-12', text: 'Try again', onClick: function () {
           if (lastRun) debrief(lastRun.config, lastRun.result);
-        })]);
+        } })]);
       }
       var to = addressed();
       if (to && (post.state === 'send' || post.state === 'sending')) {
-        var go = labelled('Send to ' + to.name, 'sui-mod-primary', function () {
+        var go = D.btn({ tone: 'violet', text: 'Send to ' + to.name, glyph: 'outgoing', disabled: post.state === 'sending', onClick: function () {
           post = { state: 'sending' }; renderPost();
           invoke('matrix_sim_post', { toPlayer: to.player_id, battle: codeOf(lastRun.config), result: lastRun.result })
             .then(function () { post = { state: 'sent' }; renderPost(); })
-          .catch(function (e) { post = { state: 'send' }; renderPost(); api.message('Not sent — ' + errText(e)); });
-        });
-        if (post.state === 'sending') go.disabled = true;
-        return strip('quiet', 'outgoing', 'For ' + to.name, 'your run is the time to beat', [go]);
+            .catch(function (e) { post = { state: 'send' }; renderPost(); api.message('Not sent — ' + errText(e)); });
+        } });
+        return band('quiet', 'For ' + to.name, 'your run is the time to beat', null, [go]);
       }
-      if (to && post.state === 'sent') return strip('good', 'success', 'Sent to ' + to.name, 'in your DM');
-      box.className = 'sim-post hidden';
+      if (to && post.state === 'sent') return band('good', 'Sent to ' + to.name, 'in your DM');
+      hidePost(box);
     }
     function ordinal(n) {
       n = Number(n) || 0;
       var s = n % 100 >= 11 && n % 100 <= 13 ? 'th' : ['th', 'st', 'nd', 'rd'][n % 10] || 'th';
       return n + s;
     }
-
     // ── Send to (setup) ──────────────────────────────────────────────────
     function sendNow() {
       var to = addressed();
@@ -802,45 +929,56 @@
     }
 
     // ── Post to… ─────────────────────────────────────────────────────────
-    /* The game's system modal (SUIParts.modal), built when it opens and gone
-     * when it closes. What it holds is built once, so its ids and handlers
-     * stay put: what is being shared, a find field, and the rooms as the
-     * game's radio result rows — each drawn by the same StructsChatRow parts
-     * the Comms channel list uses, so a room looks the same in both. */
+    /* A deck dialog (SimDeck.modal), built when it opens and gone when it
+     * closes. What it holds is built once, so its ids and handlers stay put:
+     * what is being shared, a find field, and the rooms as radio rows — each
+     * marked by the same StructsChatRow parts the Comms channel list uses, so
+     * a room looks the same in both. */
     var postTo = { rooms: [], guild: null, pick: null, config: null, result: null, line: '', modal: null };
-    var postWhat = el('div', null, 'sim-post-what');
+    var postWhat = de('p', 'd-txt d-hint s-post-what');
     postWhat.id = 'post-what';
-    var postFind = document.createElement('input');
+    var postFind = de('input', 'd-code-in');
     postFind.type = 'text'; postFind.id = 'post-find';
     postFind.placeholder = 'Find a player or room';
     postFind.autocomplete = 'off'; postFind.spellcheck = false;
-    var postFindField = window.SUIParts.field('Post to', postFind);
-    var postRooms = el('div', null, 'sui-result-table sui-result-rows sim-post-rooms');
+    var postField = de('div', 'd-sec');
+    var postFindLabel = de('label', 'd-lbl d-hint', 'Post to');
+    postFindLabel.htmlFor = 'post-find';
+    var postFindBox = de('span', 'd-code');
+    postFindBox.appendChild(postFind);
+    postField.appendChild(postFindLabel);
+    postField.appendChild(postFindBox);
+    var postRooms = de('div', 's-rooms');
     postRooms.id = 'post-rooms';
     postRooms.setAttribute('role', 'radiogroup');
     postRooms.setAttribute('aria-label', 'Post to');
-    function postSend() { return postTo.modal ? postTo.modal.buttons[1] : null; }
+    var postCopy = D.btn({ id: 'post-copy', text: 'Copy link', glyph: 'copy', onClick: function () {
+      var c = postTo.config, r = postTo.result, l = postTo.line;
+      closePost();
+      api.copyFor(c, r, l);
+    } });
+    var postSendBtn = D.btn({ id: 'post-send', tone: 'teal', text: 'Post', glyph: 'send-alpha', disabled: true, onClick: function () { sendPost(); } });
+    function postSend() { return postTo.modal ? postSendBtn : null; }
 
     function openPost(config, result, line) {
       closePost();
       postTo.config = config; postTo.result = result || null; postTo.line = line || '';
       var c = config;
-      postWhat.replaceChildren(el('span', line || ((c.seed ? cap(c.seed) : 'Battle') + ' · ' + cap(c.difficulty)), 'sui-text-label'));
+      postWhat.textContent = line || ((c.seed ? cap(c.seed) : 'Battle') + ' · ' + cap(c.difficulty));
       postFind.value = '';
       postTo.shown = [];
-      postRooms.replaceChildren(el('div', 'Reading your rooms…', 'sim-panel-empty sui-text-hint'));
-      var m = window.SUIParts.modal({
-        icon: 'icon-outgoing', title: result ? 'Share result' : 'Share battle',
-        body: [postWhat, postFindField, postRooms],
-        ctas: [
-          { id: 'post-copy', text: 'Copy link', mod: 'secondary', icon: 'icon-copy',
-            onClick: function () { closePost(); api.copyFor(postTo.config, postTo.result, postTo.line); } },
-          { id: 'post-send', text: 'Post', mod: 'primary', icon: 'icon-outgoing', disabled: true, onClick: sendPost },
-        ],
-        className: 'sim-dialog', parent: $('menu-page-layout'), onCancel: closePost,
+      postTo.pick = null;
+      pickRoom(null);
+      postRooms.replaceChildren(emptyNode('Reading your rooms…'));
+      var m = D.modal({
+        id: 'post-dialog', parent: $('menu-page-layout'), width: 'md', tone: 'violet', railGlyph: 'outgoing',
+        title: result ? 'Share result' : 'Share battle', titleId: 'post-title', role: 'dialog',
+        body: [postWhat, postField, postRooms], cta: [postCopy, postSendBtn],
+        focus: postFind, backdropCancels: true, onCancel: closePost,
       });
-      dialogRole(m, 'post-dialog', 'post-title');
       postTo.modal = m;
+      m.show();
+      pickRoom(null);
       invoke('matrix_sim_rooms').then(function (r) {
         if (postTo.modal !== m) return;
         postTo.rooms = (r && r.rooms) || []; postTo.guild = r && r.guild_id;
@@ -851,65 +989,45 @@
         // happens to be first in the list.
         roomList();
       }).catch(function (e) {
-        if (postTo.modal === m) postRooms.replaceChildren(el('div', errText(e), 'sim-panel-empty sui-text-hint'));
+        if (postTo.modal === m) postRooms.replaceChildren(emptyNode(errText(e)));
       });
-      postFind.focus();
     }
     function closePost() {
       var m = postTo.modal;
       postTo.modal = null;
       if (m) m.close();
     }
-    /* The overlay is a dialog in its own right: named, modal, findable. */
-    function dialogRole(m, id, titleId) {
-      m.overlay.id = id;
-      m.overlay.setAttribute('role', 'dialog');
-      m.overlay.setAttribute('aria-modal', 'true');
-      var h = m.overlay.querySelector('.sp-modal-body > h2');
-      if (h) { h.id = titleId; m.overlay.setAttribute('aria-labelledby', titleId); }
-    }
+    var markParts = { icon: function (name) { return D.glyph(String(name).replace(/^icon-/, '')); } };
     function roomRow(r) {
-      var row = el('label', null, 'sui-result-row sim-room');
-      var left = el('div', null, 'sui-result-row-left-section');
-      var radio = el('div', null, 'sui-radio-container');
-      var input = document.createElement('input');
-      input.type = 'radio'; input.className = 'sui-radio'; input.name = 'post-room'; input.value = r.room_id;
+      var row = de('label', 's-room');
+      var input = de('input', 'd-sr');
+      input.type = 'radio'; input.name = 'post-room'; input.value = r.room_id;
       input.checked = postTo.pick === r.room_id;
       input.addEventListener('change', function () { if (input.checked) pickRoom(r.room_id); });
-      radio.appendChild(input);
-      radio.appendChild(el('span', null, 'sui-radio-display'));
-      left.appendChild(radio);
+      row.appendChild(input);
       var R = window.StructsChatRow;
-      var portrait = el('div', null, 'sui-result-row-portrait');
-      portrait.appendChild(R.roomMark(r));
-      left.appendChild(portrait);
-      var info = el('div', null, 'sui-result-row-player-info');
-      var block = el('div', null, 'sui-text-label-block');
-      block.appendChild(el('span', String(r.name || r.room_id), 'sim-room-name'));
-      var sub = R.roomSub(r);
-      if (sub) { block.appendChild(el('br')); block.appendChild(el('span', sub, 'sui-text-hint')); }
-      info.appendChild(block);
-      left.appendChild(info);
-      row.appendChild(left);
+      row.appendChild(R.roomMark(r, markParts));
+      var nm = String(r.name || r.room_id);
+      row.appendChild(de('span', 'd-txt s-room-n', nm));
+      row.appendChild(de('span', 'd-txt d-hint s-room-sub', R.roomSub(r) || ''));
+      row.title = nm;
       return row;
     }
     function roomList() {
       var q = postFind.value.trim().toLowerCase();
       var list = postTo.rooms.filter(function (r) { return !q || String(r.name || '').toLowerCase().indexOf(q) !== -1; });
       postRooms.replaceChildren();
-      if (!list.length) postRooms.appendChild(el('div', postTo.rooms.length ? 'No room by that name' : 'No rooms yet', 'sim-panel-empty sui-text-hint'));
+      if (!list.length) postRooms.appendChild(emptyNode(postTo.rooms.length ? 'No room by that name' : 'No rooms yet'));
       list.forEach(function (r) { postRooms.appendChild(roomRow(r)); });
       postTo.shown = list;
       pickRoom(postTo.pick);
     }
-    /* The radio sprite carries the pick; Post waits for one the list shows,
-     * and names where it posts. */
+    /* Post waits for a pick the list shows, and names where it posts. */
     function pickRoom(id) {
       postTo.pick = id;
       var picked = (postTo.shown || []).filter(function (r) { return r.room_id === postTo.pick; })[0];
-      var b = postSend();
-      if (!b) return;
-      window.SUIParts.setDisabled(b, !picked);
+      var b = postSendBtn;
+      b.disabled = !picked;
       var label = picked ? 'Post to ' + (picked.name || 'the room') : 'Post';
       var span = b.querySelector('span');
       if (span) span.textContent = label;
@@ -917,24 +1035,25 @@
     }
     function sendPost() {
       var code = codeOf(postTo.config);
-      if (!code || !postTo.pick) return;
-      var m = postTo.modal, b = postSend();
-      window.SUIParts.setDisabled(b, true);
+      if (!code || !postTo.pick || !postSend()) return;
+      var m = postTo.modal, b = postSendBtn;
+      b.disabled = true;
       invoke('matrix_sim_post', { guildId: postTo.guild, roomId: postTo.pick, battle: code, result: postTo.result })
         .then(function () {
           var picked = postTo.rooms.filter(function (r) { return r.room_id === postTo.pick; })[0];
           if (postTo.modal === m) closePost();
           api.message('Posted to ' + (picked ? picked.name : 'the room') + '.');
         })
-        .catch(function (e) { if (postTo.modal === m) window.SUIParts.setDisabled(b, false); api.message('Not posted — ' + errText(e)); });
+        .catch(function (e) { if (postTo.modal === m) b.disabled = false; api.message('Not posted — ' + errText(e)); });
     }
     postFind.addEventListener('input', roomList);
-    $('send-to').addEventListener('click', sendNow);
-    $('addressed-clear').addEventListener('click', leave);
-    $('live-to').addEventListener('click', function () { var to = addressed(); if (to) openLive({ toPlayer: to.player_id }); });
-    $('live-room').addEventListener('click', function () { if (isChallenge()) openLive({ guildId: ctx.guild_id, roomId: ctx.room_id }); });
+    function bind(id, fn) { var n = $(id); if (n) n.addEventListener('click', fn); }
+    bind('send-to', sendNow);
+    bind('addressed-clear', leave);
+    bind('live-to', function () { var to = addressed(); if (to) openLive({ toPlayer: to.player_id }); });
+    bind('live-room', function () { if (isChallenge()) openLive({ guildId: ctx.guild_id, roomId: ctx.room_id }); });
     $('unlock').addEventListener('click', unlock);
-    $('relock').addEventListener('click', relock);
+    bind('relock', relock);
 
     return {
       take: take, adopt: adopt, isChallenge: isChallenge, locked: locked, matches: matches, addressed: addressed,
@@ -943,6 +1062,13 @@
       context: function () { return ctx; }, view: function () { return view; },
       talk: talk, isLive: isLive, liveRole: function () { return isLive() ? ctx.role : null; }, onStart: onStart, openLive: openLive,
       opponentName: opponentName, connection: connection, swapped: function (c) { return api.swapped(c); },
+      /* A live battle's lobby, for the command bar: who has readied. */
+      lobby: function () {
+        if (!isLive() || !live || live.phase !== 'lobby') return null;
+        var host = ctx.role === 'host';
+        return { role: ctx.role, mine: !!(host ? live.ready.host : live.ready.guest), theirs: !!(host ? live.ready.guest : live.ready.host),
+          other: host ? (live.guest ? live.guest.name : null) : ctx.host_name };
+      },
       rematch: function () {
         if (!isLive() || ctx.role !== 'host') return false;
         var g = live.guest, t = ctx.target || {};
