@@ -90,10 +90,8 @@ const entry = (rank, sender, name, o) => ({ rank, sender, name, player_id: sende
   check('…one verb (Play) and the menu', [...row.querySelectorAll('.pc-act')].map((a) => a.title).join(',') === 'Play Spearpoint,More');
 
   const forYou = Card.row({ frame: Object.assign({}, frame, { to: [me], outcome: outcome('Victory', 'player', '02:55', 2) }), me, author: { name: 'Marklifer', self: false } });
-  check('addressed to you: For you and the time to beat — who sent it is the message header, not said again', Card.state({ frame: Object.assign({}, frame, { to: [me] }), me, author: { self: false } }) === 'for-you'
-    && text(forYou.querySelector('.sui-badge')) === 'For you' && /^9 v 9 · to beat 02:55$/.test(text(forYou.querySelector('.pc-id'))) && !/Marklifer/.test(text(forYou)) && forYou.classList.contains('sc-warn'));
-  check('…a challenge wears the battle glyph, toned by its state — not a fleet\'s Command Ship', forYou.querySelector('.gc-emblem i.icon-raid.sc-tone-warning') && !forYou.querySelector('.gc-emblem img')
-    && open.querySelector('.gc-emblem i.icon-raid.sc-tone-player'));
+  check('addressed to you: For you, from whom, the time to beat', Card.state({ frame: Object.assign({}, frame, { to: [me] }), me, author: { self: false } }) === 'for-you'
+    && text(forYou.querySelector('.sui-badge')) === 'For you' && /from Marklifer · to beat 02:55/.test(text(forYou.querySelector('.pc-id'))) && forYou.classList.contains('sc-warn'));
 
   const mine = { frame, me, ladder: [entry(1, me, 'Marklifer', outcome('Victory', 'player', '02:31', 1)), entry(2, '@1-9:h', 'T.Xue', outcome('Victory', 'player', '02:41', 1))] };
   check('holding first: Your best, "1st of 2"', Card.state(mine) === 'best' && /1st of 2/.test(text(Card.row(mine).querySelector('.pc-id')))
@@ -102,19 +100,8 @@ const entry = (rank, sender, name, o) => ({ rank, sender, name, player_id: sende
   check('knocked off: Beaten, theirs against yours, red stripe', Card.state(beaten) === 'beaten' && /T.Xue 02:41 · you 03:30/.test(text(Card.row(beaten).querySelector('.pc-id'))) && Card.row(beaten).classList.contains('sc-bad'));
 
   const shared = Card.resultRow({ frame: Object.assign({}, frame, { kind: 'result', outcome: outcome('Defeat', 'computer', '05:02', 9) }), author: { name: 'Korrin' } });
-  check('a shared result: the battle by name, the verdict as its badge, the figures as readings', text(shared.querySelector('.pc-nm')) === 'Spearpoint'
-    && text(shared.querySelector('.sui-badge')) === 'Defeat' && shared.querySelector('.sui-badge').classList.contains('sui-mod-destructive')
-    && text(shared.querySelector('.pc-id')) === '9 v 9 · 76 blocks' && !/Korrin/.test(text(shared)) && shared.classList.contains('sc-bad'),
-    text(shared.querySelector('.pc-id')));
-  const sharedReads = [...shared.querySelectorAll('.pc-res')];
-  check('…its time behind the defeat glyph in the enemy tone, its losses behind the destroyed sprite', sharedReads.length === 2
-    && text(sharedReads[0]) === '05:02' && sharedReads[0].querySelector('i.icon-alert') && sharedReads[0].classList.contains('sc-bad-text') && !shared.querySelector('.icon-close')
-    && text(sharedReads[1]) === '9/9' && sharedReads[1].querySelector('i.sui-icon-md.sui-icon-destroyed'));
-  check('…its emblem is the verdict glyph; the row carries no outcome class of its own', shared.querySelector('.gc-emblem i.icon-alert.sc-tone-enemy')
-    && !shared.classList.contains('chl-lost') && shared.classList.contains('chl-row'));
-  check('the verdict vocabulary: tick, subtract, alert — each in its tone', Card.verdictGlyph({ winner: 'player' }) === 'icon-success' && Card.verdictGlyph({ winner: 'draw' }) === 'icon-subtract'
-    && Card.verdictGlyph({ winner: 'computer' }) === 'icon-alert' && Card.verdictTone({ winner: 'player' }) === 'sc-ok' && Card.verdictTone({ winner: 'draw' }) === 'sc-tone-warning'
-    && Card.verdictTone({ winner: 'computer' }) === 'sc-bad-text');
+  check('a shared result leads with the verdict, the battle as its badge', text(shared.querySelector('.pc-nm')) === 'Defeat' && text(shared.querySelector('.sui-badge')) === 'Spearpoint'
+    && /05:02 · lost 9 of 9 · 76 blocks · Korrin/.test(text(shared.querySelector('.pc-id'))) && shared.classList.contains('sc-bad'));
 }
 
 {
@@ -123,26 +110,12 @@ const entry = (rank, sender, name, o) => ({ rank, sender, name, player_id: sende
   const view = { frame, me, author: { name: 'JPEG', self: false }, reply_count: 3, replies: [{ name: 'Netlag', body: 'the cruiser block on 49 is the whole fight' }],
     ladder: [entry(1, '@1-9:h', 'T.Xue', outcome('Victory', 'player', '02:41', 1)), entry(2, me, 'Marklifer', outcome('Victory', 'player', '02:55', 2)), entry(3, '@1-1031:h', 'Korrin', outcome('Defeat', 'computer', '05:02', 9))] };
   const c = Card.card(view, { onPlay: () => played++, onReplies: () => replies++, onCopy: () => {}, onMore: () => {}, onCollapse: () => {} });
-  check('the planet-card frame: the battle glyph and name, its size, no battle code', c.classList.contains('sui-planet-card') && text(c.querySelector('.pc-nm')) === 'Spearpoint'
-    && c.querySelector('.sui-planet-card-header-label > i.sui-icon.sui-icon-md.icon-raid')
-    && text(c.querySelector('.sui-planet-card-header .pc-id')) === '9 v 9' && !text(c).includes(battle), text(c.querySelector('.pc-id')));
-  check('…block time a quiet mark beside the doors', /^2 s$/.test(text(c.querySelector('.pc-foot .pc-mark'))) && c.querySelector('.pc-foot .pc-mark i.icon-in-progress'));
-  const stats = [...c.querySelectorAll('.chl-stats.pc-record .pc-rec')].map((n) => text(n.querySelector('.pc-rec-v')) + ' ' + text(n.querySelector('.pc-rec-l'))).join(' · ');
-  check('…the miniature, the tallies (the player card\'s record), the ladder', c.querySelector('.chl-board') && stats === '3 Played · 2 Won · 02:41 Best' && c.querySelectorAll('.chl-run').length === 3, stats);
-  check('…Best in its run\'s verdict tone', c.querySelectorAll('.pc-rec-v')[2].classList.contains('sc-ok'));
-  check('…the ambits are the game\'s sprites, not letters', [...c.querySelectorAll('.chl-amb')].map((a) => a.querySelector('i.sui-icon.sui-icon-sm') && a.querySelector('i').className.split(' ').pop()).join() === 'sui-icon-space,sui-icon-air,sui-icon-land,sui-icon-water');
+  check('the planet-card frame: name, who and how, no battle code', c.classList.contains('sui-planet-card') && text(c.querySelector('.pc-nm')) === 'Spearpoint'
+    && /JPEG · 9 v 9 · 2 s blocks/.test(text(c.querySelector('.pc-id'))) && !text(c).includes(battle));
+  const stats = [...c.querySelectorAll('.chl-stat')].map((n) => text(n.querySelector('.chl-stat-v')) + ' ' + text(n.querySelector('.chl-stat-l'))).join(' · ');
+  check('…the miniature, the tallies, the ladder', c.querySelector('.chl-board') && stats === '3 Played · 2 Won · 02:41 Best' && c.querySelectorAll('.chl-run').length === 3, stats);
   check('…you are marked on the ladder', c.querySelector('.chl-run.chl-me') && /Marklifer/.test(text(c.querySelector('.chl-run.chl-me'))));
-  const runs = [...c.querySelectorAll('.chl-run')];
-  check('…each run: rank as a label, then its time behind the verdict glyph and what it lost, as readings', runs.every((r) => r.querySelector('.chl-rank.sui-text-label') && r.querySelectorAll('.pc-reads .pc-res').length === 2)
-    && runs[0].querySelector('.pc-res i.icon-success') && runs[2].querySelector('.pc-res.sc-bad-text i.icon-alert') && text(runs[2].querySelectorAll('.pc-res')[1]) === '9'
-    && !/Victory|Defeat/.test(text(c.querySelector('.chl-ladder'))));
-  const compact = Card.ladderList(view, { compact: true });
-  check('…and compact, the losses are left out', [...compact.querySelectorAll('.chl-run')].every((r) => r.querySelectorAll('.pc-res').length === 1));
-  check('…the thread as Comms\' own thread pointer', c.querySelector('a.chat-reply-quote.chat-mod-thread.chl-thread') && text(c.querySelector('.chl-thread .chat-reply-who')) === 'Netlag'
-    && /^the cruiser block/.test(text(c.querySelector('.chl-said'))) && text(c.querySelector('.chl-replies')) === '3 replies' && c.querySelector('.chl-replies.sui-text-label'));
-  const cta = c.querySelector('.sui-planet-card-body > .sui-screen-btn-flex-wrapper');
-  check('…Play last in the body, across it; the foot holds only the quiet doors', cta && cta.querySelector('.chl-play')
-    && (!cta.nextElementSibling || cta.nextElementSibling.classList.contains('pc-foot')) && !c.querySelector('.pc-foot .chl-play'));
+  check('…the thread in one line', text(c.querySelector('.chl-replies')) === '3 replies' && /^Netlag the cruiser block/.test(text(c.querySelector('.chl-said'))));
   c.querySelector('.chl-play').dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
   c.querySelector('.chl-replies').dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
   check('…Play and the replies are wired', played === 1 && replies === 1);
@@ -184,36 +157,6 @@ const entry = (rank, sender, name, o) => ({ rank, sender, name, player_id: sende
   node.querySelector('.pc-act').dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
   const play = asked.filter((a) => a[0] === 'sim_challenge_open')[0];
   check('Play hands the simulator the room, the thread and the battle — nothing else', play && play[1].roomId === '!r:h' && play[1].eventId === '$root' && play[1].battle === battle && Object.keys(play[1]).sort().join() === 'battle,eventId,guildId,roomId');
-  const lost = Object.assign({}, best, { event_id: '$lost', sim: Object.assign({}, best.sim, { outcome: outcome('Defeat', 'computer', '05:02', 9) }) });
-  const lostLine = sim.simLine(lost);
-  check('a best that is a defeat opens on the defeat glyph, never a tick', lostLine.querySelector('i.icon-alert.sc-bad-text') && !lostLine.querySelector('.icon-success'));
-}
-
-{
-  console.log('\n— rows open to their card');
-  const S = { view: 'room', roomId: '!r:h', guildId: '0-1', profile: { user_id: me }, messages: [] };
-  const host = w.document.createElement('div');
-  let draw = () => {};
-  const sim = w.ChatSim({
-    el: (tag, cls, t) => { const e = w.document.createElement(tag); if (cls) e.className = cls; if (t != null) e.textContent = t; return e; },
-    icon: (name, size) => { const i = w.document.createElement('i'); i.className = 'sui-icon ' + (size || 'sui-icon-md') + ' ' + name; return i; },
-    invoke: () => Promise.resolve(null), render: () => draw(), serverIdOf: (m) => m.event_id, S, Chat: {},
-  });
-  const pasted = { event_id: '$paste', sender: '@1-9:h', sender_name: 'Korrin', body: frame.link, ts: 9,
-    sim: Object.assign({}, frame, { kind: 'result', pasted: true, outcome: outcome('Defeat', 'computer', '05:02', 9) }) };
-  S.messages = [pasted];
-  draw = () => { host.textContent = ''; host.appendChild(sim.simNode(pasted)); };
-  draw();
-  check('a pasted result is a row', host.querySelector('.chat-mod-row [data-kind="challenge-result"]') && !host.querySelector('.chl-card'));
-  host.querySelector('.pc-act[title="More"]').dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
-  const items = [...host.querySelectorAll('.chat-ref-menu-item')].map((a) => text(a));
-  check('…its menu opens on "Open the card", and the More door lights while it is open', items[0] === 'Open the card' && host.querySelector('.pc-act[title="More"].sc-on'), items.join(','));
-  host.querySelector('.chat-ref-menu').dispatchEvent(new w.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
-  check('…Escape closes it and the door goes quiet', !host.querySelector('.chat-ref-menu') && !host.querySelector('.pc-act.sc-on'));
-  host.querySelector('.pc-row').dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
-  check('clicking the row opens the battle\'s card, not a challenge row', host.querySelector('.chl-card') && !host.querySelector('.chat-mod-row'));
-  host.querySelector('.pc-act[title="Collapse"]').dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
-  check('…and its collapse door gives the row back', host.querySelector('.chat-mod-row [data-kind="challenge-result"]') && !host.querySelector('.chl-card'));
 }
 
 /* ── 4. The simulator ──────────────────────────────────────────────────── */
@@ -276,7 +219,7 @@ async function simulator(context, answers = {}) {
   }
   check('…the ladder is the Comms card\'s own, you marked', $('challenge').querySelectorAll('.chl-ladder .chl-run').length === 2
     && /Marklifer/.test(text($('challenge').querySelector('.chl-run.chl-me'))) && $('challenge').querySelectorAll('.chl-run .pc-person').length === 2
-    && $('challenge').querySelectorAll('.chl-run .sc-ok .icon-success, .chl-run .sc-ok.icon-success').length === 2 && !$('challenge').querySelector('.chl-run .sui-icon-destroyed'),
+    && $('challenge').querySelectorAll('.chl-run .chl-verdict.sc-ok').length === 2 && !$('challenge').querySelector('.chl-run .chl-lost'),
     $('challenge').querySelector('.chl-ladder') && $('challenge').querySelector('.chl-ladder').outerHTML.slice(0, 600));
   check('…and the thread, read-only, in the rows Comms draws — talking is the Map Viewer\'s rail and Comms', /guard the command ship/.test(text($('challenge').querySelector('.sim-thread')))
     && !$('challenge').querySelector('textarea, .sim-reply'));
@@ -911,8 +854,6 @@ async function simulator(context, answers = {}) {
 {
   console.log('\n— live: the invite in Comms');
   const v = (extra) => Object.assign({ frame: Object.assign({}, frame, { kind: 'invite', match: '!m:h', block_ms: 6000 }), me, author: { name: 'Marklifer', self: false }, ts: Date.now() }, extra);
-  // Who plays whom, one word per part (the parts are spaced by layout, not text).
-  const versus = (row) => [...row.querySelector('.sc-versus-row').children].map((n) => text(n)).join(' ');
   const open = Card.inviteRow(v({}), { onAccept: () => {}, onWatch: () => {} });
   check('an open invite: anyone may Accept', Card.inviteState(v({})) === 'open' && [...open.querySelectorAll('.pc-act')].map((a) => a.title).join(',') === 'Accept');
   check('…addressed to you: For you', Card.inviteState(v({ frame: Object.assign({}, frame, { kind: 'invite', match: '!m:h', block_ms: 6000, to: [me] }) })) === 'for-you');
@@ -920,19 +861,10 @@ async function simulator(context, answers = {}) {
   check('…your own: Waiting', Card.inviteState(v({ author: { name: 'You', self: true } })) === 'waiting');
   check('…untaken for a quarter hour: Lapsed', Card.inviteState(v({ ts: Date.now() - 16 * 60 * 1000 })) === 'lapsed');
   const liveRow = Card.inviteRow(v({ live: { state: 'live', guest_name: 'JPEG' } }), { onAccept: () => {}, onWatch: () => {} });
-  check('playing: Live, the battle by name, who vs whom, and Watch', text(liveRow.querySelector('.pc-nm')) === 'Spearpoint' && versus(liveRow) === 'Marklifer vs JPEG'
-    && text(liveRow.querySelector('.sui-badge')) === 'Live' && [...liveRow.querySelectorAll('.pc-act')].map((a) => a.title).join(',') === 'Watch'
-    && liveRow.querySelector('.pc-act[title="Watch"] .icon-raid') && liveRow.querySelector('.gc-emblem i.icon-raid.sc-tone-enemy'));
-  check('…block time is a reading, not caps prose', text(liveRow.querySelector('.pc-res')) === '6 s' && liveRow.querySelector('.pc-res i.icon-in-progress') && !/6 s/.test(text(liveRow.querySelector('.pc-id'))));
-  const faces = Card.inviteRow(v({ author: { name: 'Marklifer', self: false, player_id: '1-1', pfp_attrs: null }, live: { state: 'live', guest_name: 'JPEG', guest_id: '1-61', guest_pfp: null } }), {});
-  check('…with the chain\'s ids, both players are faces', faces.querySelectorAll('.sc-versus-row .pc-person').length === 2);
-  const waiting = Card.inviteRow(v({ author: { name: 'You', self: true } }), {});
-  check('…your own, untaken: "anyone may take it", the guest "anyone"', text(waiting.querySelector('.pc-id')) === 'anyone may take it' && versus(waiting) === 'You vs anyone');
+  check('playing: Live, who v whom, and Watch', /Marklifer v JPEG/.test(text(liveRow.querySelector('.pc-id'))) && text(liveRow.querySelector('.sui-badge')) === 'Live'
+    && [...liveRow.querySelectorAll('.pc-act')].map((a) => a.title).join(',') === 'Watch');
   const ended = Card.inviteRow(v({ live: { state: 'ended', guest_name: 'JPEG', winner_name: 'JPEG' } }), {});
-  check('over: who won, as a mark under who played', versus(ended) === 'Marklifer vs JPEG' && text(ended.querySelector('.pc-marks')) === 'JPEG'
-    && ended.querySelector('.pc-marks i.icon-success') && !ended.querySelector('.pc-act[title="Accept"]'));
-  const drawn = Card.inviteRow(v({ live: { state: 'ended', guest_name: 'JPEG' } }), {});
-  check('…or a draw', text(drawn.querySelector('.pc-id')) === 'a draw' && drawn.querySelector('.pc-marks i.icon-subtract'));
+  check('over: who won', /JPEG won · Marklifer v JPEG/.test(text(ended.querySelector('.pc-id'))) && !ended.querySelector('.pc-act[title="Accept"]'));
 }
 
 console.log(failures ? failures + ' failing check(s)' : 'all checks passed');

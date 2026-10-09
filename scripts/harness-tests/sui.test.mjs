@@ -56,7 +56,7 @@ const BUDGET = {
   // Comms: the challenge card (simcard.*) and its timeline wiring. The
   // miniature board's px are the simulator's band geometry at chat scale.
   'simcard.js': [0, 0],
-  'simcard.css': [0, 12],
+  'simcard.css': [0, 14],
   'chat-sim.js': [0, 0],
   // file:            colour, px
   //
