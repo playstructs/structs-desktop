@@ -150,7 +150,9 @@
     // battle, block_ms, host, host_name, host_pfp, me }.
     var live = null;   // { phase: 'lobby'|'battle'|'over', guest, ready, lastGuest, link, remote, chat, expectUser }
     var GUEST_GONE_MS = 30000, PING_MS = 10000;
-    function liveCfg() { var c = Code.decode(ctx.battle); if (c) c.blockMs = ctx.block_ms || c.blockMs; return c; }
+    // The battle as its code holds it. The match's block time rides apart,
+    // in liveOpts: a 4 s config could never be shared or rematched again.
+    function liveCfg() { return Code.decode(ctx.battle); }
     /* A frame to the other side: over the direct line when it is open
      * (simulator-rtc.js), through the room when it is not — and through the
      * room as well when someone else needs it. Each frame carries this
@@ -217,7 +219,7 @@
         });
       }
       // The match's block time is the match's, not the layout's: it rides
-      // in at the start (liveCfg) and never touches the setup board, whose
+      // in at the start (liveOpts) and never touches the setup board, whose
       // settings only know the battle code's own 2 s and 6 s.
       if (c.role === 'watch') {
         live.phase = 'battle';
@@ -249,6 +251,7 @@
     function liveOpts(role) {
       return {
         role: role,
+        blockMs: ctx.block_ms || LIVE_MS,
         host: { name: ctx.role === 'host' ? 'You' : ctx.host_name, pfp: ctx.host_pfp || null },
         guest: live.guest ? { name: live.guest.name, pfp: live.guest.pfp_attrs || null } : { name: 'Guest', pfp: null },
         send: sendFrame,

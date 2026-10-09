@@ -170,7 +170,7 @@ async function simulator(context, answers = {}) {
     url: pathToFileURL(page).href, runScripts: 'dangerously', resources: 'usable', pretendToBeVisual: true,
     beforeParse(sw) {
       sw.HTMLCanvasElement.prototype.getContext = () => null;
-      sw.navigator.clipboard = { writeText: () => Promise.resolve() };
+      sw.navigator.clipboard = { writeText: (t) => { (sw.__copied = sw.__copied || []).push(t); return Promise.resolve(); } };
       sw.__TAURI__ = {
         core: { invoke: (cmd, args) => {
           calls.push([cmd, args || {}]);
@@ -1104,7 +1104,10 @@ async function simulator(context, answers = {}) {
 {
   console.log('\n— live: the guest\'s simulator');
   const frames = [];
-  const s = await simulator({ kind: 'live', role: 'guest', guild_id: '0-1', room_id: '!r:h', invite_event: '$inv', match_room: '!m:h', battle, block_ms: 6000,
+  // A real match runs at 4 s, which no battle link can hold; uneven charge
+  // tells the host's side of the battle from the guest's.
+  const lopsided = Code.encode(Object.assign({}, config, { charge: { player: 9, computer: 6 } }));
+  const s = await simulator({ kind: 'live', role: 'guest', guild_id: '0-1', room_id: '!r:h', invite_event: '$inv', match_room: '!m:h', battle: lopsided, block_ms: 4000,
     host: '@1-61:h', host_name: 'JPEG', host_pfp: null, me: '@1-1:h' }, {
     matrix_sim_live_send: (a) => { frames.push(a.frame); return { event_id: '$x' }; },
     matrix_timeline: () => ({ messages: [{ event_id: '$c1', sender: '@1-61:h', sender_name: 'JPEG', kind: 'text', body: 'gl', ts: 1 }] }),
@@ -1135,7 +1138,7 @@ async function simulator(context, answers = {}) {
     && /Not ready/.test(text($('challenge').querySelector('.sim-run .d-pill'))) && /^Lobby$/.test(text($('challenge').querySelector('.s-pills .s-phase'))));
   fire({ v: 1, kind: 'ready', ready: true });
   check('…the host\'s own ready shows on its seat', /Ready/.test(hostSeat()), hostSeat());
-  fire({ v: 1, kind: 'start', battle, block_ms: 6000 });
+  fire({ v: 1, kind: 'start', battle: lopsided, block_ms: 4000 });
   await tick(30);
   check('the host\'s start begins the battle here, the board replaying its ticks', s.sw.document.body.dataset.screen === 'battle' && s.sw.Simulator.getHost() instanceof s.sw.SimLive.RemoteHost);
   check('…with the Live pill (coral, its LED lit), and no pause for a battle between two', /Live/.test(text($('sim-status')))
@@ -1165,6 +1168,17 @@ async function simulator(context, answers = {}) {
     text($('db-lost-you')) + ' / ' + text($('db-lost-cpu')));
   check('…Share stays for them, and the result is the head-to-head band', !$('db-code').classList.contains('hidden') && $('db-code').closest('.x-sec')
     && $('db-post').matches('.x-h2h'));
+  check('…its facts read the match\'s 4 s, while the board keeps the battle\'s own block time', /4 s chain/.test(text($('debrief-meta')))
+    && s.sw.Simulator.getSettings().blockMs === config.blockMs, text($('debrief-meta')) + ' | ' + s.sw.Simulator.getSettings().blockMs);
+  $('db-code').click(); $('db-copy').click();
+  await tick(20);
+  {
+    const got = (s.sw.__copied || []).slice(-1)[0] || '';
+    const m = /^Victory vs JPEG · \d\d:\d\d · \d+ blocks? · lost 1 of 9 — https:\/\/structs\.app\/sim\/([A-Za-z0-9_-]+)$/.exec(got);
+    const d = m && Code.decode(m[1]);
+    check('Copy link after a live battle: the line against the person, then the battle from your own side — no results code (it reads You v Computer)',
+      !!d && d.blockMs === config.blockMs && d.charge.player === 6 && d.charge.computer === 9, got);
+  }
   s.close();
 }
 
@@ -1241,7 +1255,7 @@ async function simulator(context, answers = {}) {
   console.log('\n— live: the host\'s simulator');
   const frames = [], statuses = [], opened = [];
   const s = await simulator({ kind: 'addressed', player_id: '1-61', name: 'JPEG', pfp_attrs: null }, {
-    matrix_sim_live_open: (a) => { opened.push(a); return { guild_id: '0-1', room_id: '!dm:h', match_room: '!m:h', invite_event: '$inv', me: '@1-1:h', block_ms: 6000, guest: { user_id: '@1-61:h', name: 'JPEG' } }; },
+    matrix_sim_live_open: (a) => { opened.push(a); return { guild_id: '0-1', room_id: '!dm:h', match_room: '!m:h', invite_event: '$inv', me: '@1-1:h', block_ms: 4000, guest: { user_id: '@1-61:h', name: 'JPEG' } }; },
     matrix_sim_live_send: (a) => { frames.push(a.frame); return { event_id: '$x' }; },
     matrix_sim_live_status: (a) => { statuses.push(a.frame); return { event_id: '$s' }; },
     matrix_person: (a) => ({ user_id: a.userId, name: 'JPEG', pfp_attrs: null, player_id: '1-61' }),
@@ -1279,6 +1293,23 @@ async function simulator(context, answers = {}) {
   check('the guest leaving is the host\'s win, posted back as ended', h.finished && h.finished.winner === 'you' && statuses.some((f) => f.state === 'ended' && f.winner === '@1-1:h')
     && frames.some((f) => f.kind === 'end' && f.winner === 'host'));
   check('…and the debrief says so, in the head-to-head band', /You beat JPEG/.test(text($('db-post'))) && $('db-post').matches('.x-h2h'), text($('db-post')));
+  check('…the battle ran at the match\'s 4 s and its facts say so; the board keeps the battle\'s own block time', h.blockMs === 4000 && /4 s chain/.test(text($('debrief-meta')))
+    && s.sw.Simulator.getSettings().blockMs === Code.decode(opened[0].battle).blockMs, h.blockMs + ' | ' + text($('debrief-meta')) + ' | ' + s.sw.Simulator.getSettings().blockMs);
+  $('db-code').click(); $('db-copy').click();
+  await tick(20);
+  {
+    const got = (s.sw.__copied || []).slice(-1)[0] || '';
+    check('Copy link after a live battle: the line against the person, then the battle that was played — no results code',
+      new RegExp('^Victory vs JPEG · \\d\\d:\\d\\d · \\d+ blocks? · lost \\d+ of \\d+ — https://structs\\.app/sim/' + opened[0].battle + '$').test(got), got);
+  }
+  $('db-code').click(); $('db-post-to').click();
+  await tick(20);
+  check('…Post to carries the same line', !!$('post-dialog') && /^Victory vs JPEG/.test(text($('post-what'))), text($('post-what')));
+  s.sw.Simulator.social.closePost();
+  $('db-rematch').click();
+  await tick(30);
+  check('Rematch opens the next match: the same battle, at 4 s', opened.length === 2 && opened[1].battle === opened[0].battle && opened[1].blockMs === 4000,
+    JSON.stringify(opened.map((o) => [o.battle && o.battle.slice(0, 12), o.blockMs])));
   s.close();
 }
 

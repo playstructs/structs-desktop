@@ -30,6 +30,10 @@
   var settings = { preset: 'difficult', difficulty: 'difficult', blockMs: Host.BLOCK_MS, charge: { player: 9, computer: 9 } };
   var draft, selection = null, changing = false, picking = null;
   var host = null, initial = null, startHeight = 0, deploying = false;
+  // The running battle's block time: its config's, or a live match's own.
+  // A match runs at 4 s, which a battle link cannot hold (simcode.js knows
+  // 2 s and 6 s), so it never goes into the config or the settings.
+  var runMs = Host.BLOCK_MS;
   var toastTimer, clockTimer, countdownTimer, debriefTimer, debriefShown = false;
   var social = null;   // simulator-social.js, built once the functions below exist
 
@@ -134,6 +138,12 @@
     return { id: unitId(side, u.type, u.ambit, u.slot), side: side, type: u.type, ambit: u.ambit, slot: u.slot, protects: u.protects ? u.protects.replace(/^[a-z]+-/, side + '-') : null };
   }
   function swapped(units) { return units.map(function (u) { return reside(u, u.side === 'player' ? 'computer' : 'player'); }); }
+  function swappedConfig(cfg) {
+    var c = clone(cfg);
+    c.units = swapped(c.units);
+    c.charge = { player: cfg.charge.computer, computer: cfg.charge.player };
+    return c;
+  }
 
   /* ── Reading a fleet ───────────────────────────────────────────────────── */
 
@@ -801,6 +811,7 @@
       validate(config.units);
       stopBattle();
       initial = clone(config);
+      runMs = (live && live.blockMs) || config.blockMs;
       settings.blockMs = config.blockMs; settings.difficulty = config.difficulty; settings.charge = clone(config.charge);
       var chain = chainFromDraft(config);
       startHeight = chain.height;
@@ -822,7 +833,7 @@
         var cpu = live ? { id: CPU.id, name: live.guest.name, pfp: live.guest.pfp, label: live.guest.name + '\u2019s fleet' }
           : { id: CPU.id, name: CPU.fleetName + ' · ' + config.difficulty, pfp: CPU.pfp };
         host = new Host({
-          chain: chain, you: YOU, cpu: cpu, label: 'sim', blockMs: config.blockMs,
+          chain: chain, you: YOU, cpu: cpu, label: 'sim', blockMs: runMs,
           ai: live ? null : new Ai(CPU.id, config.difficulty, config.seed),
           frame: frame, onChange: onChange, comms: commsInvoke,
         });
@@ -1166,7 +1177,7 @@
     box.replaceChildren();
     fact([Deck.glyph('in-progress', 16, 'd-hint'), Deck.el('span', 'd-fact-n', format(s.elapsedMs))]);
     fact([Deck.el('span', 'd-fact-n', blocks), blocks === 1 ? ' block' : ' blocks']);
-    if (liveRole) fact([Deck.el('span', 'd-fact-n', Math.round((initial.blockMs || Host.BLOCK_MS) / 1000) + ' s'), ' chain']);
+    if (liveRole) fact([Deck.el('span', 'd-fact-n', Math.round(runMs / 1000) + ' s'), ' chain']);
     else fact([Deck.chevs(LEVELS.indexOf(initial.difficulty) + 1, { small: true }), cap(initial.difficulty)]);
     fact([Deck.glyph('planet', 16, 'd-hint'), social.isChallenge() ? social.battleName() : cap(initial.seed)]);
   }
@@ -1379,18 +1390,33 @@
     var s = host.summary(), f = s.finished;
     var verdict = f.winner === 'you' ? 'Victory' : f.winner === 'cpu' ? 'Defeat' : 'Draw';
     var blocks = Math.max(0, f.height - startHeight);
-    return [verdict + ' vs ' + cap(initial.difficulty), format(s.elapsedMs), blocks + (blocks === 1 ? ' block' : ' blocks'),
+    var vs = social.isLive() ? social.opponentName() || 'a player' : cap(initial.difficulty);
+    return [verdict + ' vs ' + vs, format(s.elapsedMs), blocks + (blocks === 1 ? ' block' : ' blocks'),
       'lost ' + s.lost[YOU.id] + ' of ' + s.fielded[YOU.id]].join(' · ');
+  }
+  /* What the debrief's Share hands on. A live battle goes as its line and
+   * the battle from your side (a guest flew the host's other fleet), with no
+   * results code: that code reads You against the Computer
+   * (proposals/sim-results-link.md). A watcher's line would be someone
+   * else's, so it shares the battle alone. */
+  function shared() {
+    var role = social.liveRole();
+    return {
+      config: role === 'guest' ? swappedConfig(initial) : initial,
+      result: role ? null : resultCode(),
+      line: role === 'watch' ? '' : resultLine(),
+    };
   }
   function shareResult() {
     if (!host || !host.finished || !initial) return;
-    social.openPost(initial, resultCode(), resultLine());
+    var x = shared();
+    social.openPost(x.config, x.result, x.line);
   }
   /* Copy for anywhere outside Comms: the result line and its link, or the
    * battle's link. A result link is also "play this battle". */
   function copyFor(config, result, line) {
-    if (!result) { copyLink(config); return; }
-    try { copyText((line ? line + ' — ' : '') + battleLink(config) + '/' + result, 'Result copied.', 'Share result'); }
+    if (!result && !line) { copyLink(config); return; }
+    try { copyText((line ? line + ' — ' : '') + battleLink(config) + (result ? '/' + result : ''), 'Result copied.', 'Share result'); }
     catch (e) { message('This battle cannot be shared: ' + e.message + '.'); }
   }
   /* Paste a battle link, or — when the clipboard refused — the link to copy
@@ -1513,12 +1539,7 @@
      * read its best. */
     renderReady: function () { if (draft) renderChecks(); renderStatus(); },
     startLive: function (cfg, live) { start(cfg, live); },
-    swapped: function (cfg) {
-      var c = clone(cfg);
-      c.units = swapped(c.units);
-      c.charge = { player: cfg.charge.computer, computer: cfg.charge.player };
-      return c;
-    },
+    swapped: swappedConfig,
     summary: function () { return host ? host.summary() : {}; },
     /* Something new was said where the rail is listening: it re-reads. */
     talkChanged: function (roomId, messages) { toFrame('matrix::timeline', { room_id: roomId, messages: messages || [{ self: false }] }); },
@@ -1591,12 +1612,7 @@
     start(initial);
   });
   $('db-edit').addEventListener('click', function () { toSetup(false); });
-  $('db-swap').addEventListener('click', function () {
-    var c = clone(initial);
-    c.units = swapped(c.units);
-    c.charge = { player: initial.charge.computer, computer: initial.charge.player };
-    start(c);
-  });
+  $('db-swap').addEventListener('click', function () { start(swappedConfig(initial)); });
   $('db-harder').addEventListener('click', function () {
     if (!stepTo) return;
     var c = clone(initial); c.difficulty = stepTo;
@@ -1606,7 +1622,7 @@
   (function () {
     var menu = Deck.menu({ id: 'db-share-menu', label: 'Share', pop: true, items: [
       { id: 'db-post-to', text: 'Post to\u2026', glyph: 'send-alpha', onClick: shareResult },
-      { id: 'db-copy', text: 'Copy link', glyph: 'copy', onClick: function () { if (host && host.finished && initial) copyFor(initial, resultCode(), resultLine()); } },
+      { id: 'db-copy', text: 'Copy link', glyph: 'copy', onClick: function () { if (host && host.finished && initial) { var x = shared(); copyFor(x.config, x.result, x.line); } } },
     ] });
     $('db-code').parentNode.appendChild(menu);
     Deck.bindMenu($('db-code'), menu);
