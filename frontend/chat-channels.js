@@ -381,6 +381,8 @@
           if (e.key !== 'Escape') return;
           e.preventDefault(); e.stopPropagation();
           S.roomFilter = '';
+          // The field too: render() carries what it holds across the repaint.
+          fi.value = '';
           render();
           var again = byId('chat-room-filter-q');
           if (again) again.focus();

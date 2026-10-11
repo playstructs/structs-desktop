@@ -82,7 +82,11 @@
         ' sui-text-secondary'));
       a.addEventListener('click', function () {
         S.searchRoom = S.searchRoom ? null : S.roomId;
-        if (S.searchQuery) runSearch(S.searchQuery); else render();
+        // What the field says now, which a repaint keeps — not the last query
+        // sent, which may be a few keystrokes behind it.
+        var live = document.getElementById('chat-search-query');
+        var query = live ? live.value : S.searchQuery;
+        if (query) runSearch(query); else render();
       });
       wrap.appendChild(a);
       return wrap;

@@ -622,6 +622,9 @@
   // arriving while you are mid-sentence would otherwise delete what you had
   // typed and take the cursor with it. A chat window that eats your draft
   // whenever someone else speaks is unusable, so the draft is carried across.
+  var DRAFT_FIELDS = ['chat-input', 'chat-people-query', 'chat-browse-query',
+    'chat-room-filter-q', 'chat-search-query'];
+
   function draftOf(id) {
     var node = byId(id);
     if (!node) return null;
@@ -667,9 +670,11 @@
     updateBadge();
     var host = byId('menu-page-body-content');
     if (!host) return;
-    // Both text inputs the window has; only one exists at a time.
-    var draft = draftOf('chat-input') || draftOf('chat-people-query')
-      || draftOf('chat-browse-query');
+    // Every text field the window has; only one exists at a time. A field
+    // missing here loses its caret on every repaint — the channel filter
+    // repaints per keystroke, so it took one letter and dropped the focus.
+    var draft = null;
+    for (var di = 0; di < DRAFT_FIELDS.length && !draft; di++) draft = draftOf(DRAFT_FIELDS[di]);
     var timeline = byId('chat-timeline');
     var prevTop = timeline ? timeline.scrollTop : 0;
     noteScrollPosition();

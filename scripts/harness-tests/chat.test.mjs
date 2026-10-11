@@ -2766,6 +2766,14 @@ async function openCard(w, ref) {
   check('typing alone does not search',
     w.__HARNESS_CALLS__.filter((c) => c.cmd === 'matrix_search').length === 0);
 
+  // A repaint underneath (any presence or room push) keeps what is typed and
+  // where the cursor is — the query only reaches state on Enter.
+  field.focus();
+  w.Chat.render();
+  const kept = d.getElementById('chat-search-query');
+  check('a repaint keeps the unsent query', kept.value === 'refin', kept.value);
+  check('…and the focus', d.activeElement === kept, d.activeElement && d.activeElement.id);
+
   field.value = '2-15361';
   field.dispatchEvent(new w.KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
   await tick();
@@ -3693,8 +3701,21 @@ async function openCard(w, ref) {
   const filter = () => d.getElementById('chat-room-filter-q');
   check('a long list offers a filter', !!filter());
 
-  filter().value = 'logi';
-  filter().dispatchEvent(new w.Event('input', { bubbles: true }));
+  /* One key at a time, the way a player types. Every keystroke repaints the
+   * page, and a field render() does not carry across lost the caret after
+   * the first letter — the player had to click back in for each one. Shown
+   * unasked (a long list), so the Ctrl-K refocus does not paper over it. */
+  filter().focus();
+  for (const ch of 'logi') {
+    const f = filter();
+    f.value += ch;
+    f.setSelectionRange(f.value.length, f.value.length);
+    f.dispatchEvent(new w.Event('input', { bubbles: true }));
+    check('…the filter keeps the focus after "' + f.value + '"',
+      d.activeElement === filter(), d.activeElement && d.activeElement.id);
+  }
+  check('…with the caret at the end', filter().selectionStart === 4,
+    String(filter().selectionStart));
   await tick();
   const rows = all(d, '.sui-result-row');
   check('typing narrows it to one', rows.length === 1, String(rows.length));
