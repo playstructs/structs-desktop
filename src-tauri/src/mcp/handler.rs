@@ -623,11 +623,28 @@ mod surface_tests {
 
     #[test]
     fn descriptions_say_which_commands_write() {
-        assert!(desc("structs_action").contains("changes game state on the chain"));
+        // Fix 6, part 1: every one of the ten tools that can change something
+        // ends with its read/write sentence (keyed on a phrase unique to each).
+        let expected = [
+            ("structs_action", "changes game state on the chain"),
+            ("structs_sequence", "Runs structs_action steps on the chain"),
+            ("structs_strike", "Fires at the target unless dry_run is true"),
+            ("structs_doctrine", "change the account's combat rules"),
+            ("structs_system", "changes the app's settings"),
+            ("structs_hash", "change the hashing engine"),
+            ("structs_policy", "change the account's standing orders"),
+            ("structs_players", "switch background loops"),
+            ("structs_board", "change what the human sees or can reach"),
+            ("structs_map", "changes nothing in the game"),
+        ];
+        for (name, phrase) in expected {
+            assert!(desc(name).contains(phrase), "{name} lacks its read/write sentence: {phrase}");
+        }
         assert!(desc("structs_hash").contains("task_id (the struct's id"));
         assert!(desc("structs_hash").contains("confirm:true"));
         assert!(desc("structs_system").contains("grass_source"));
-        assert!(desc("structs_map").contains("changes nothing in the game"));
+        let hash_schema = tool("structs_hash").input_schema;
+        assert!(hash_schema["properties"].get("confirm").is_some(), "structs_hash schema must expose confirm");
     }
 
     #[test]
