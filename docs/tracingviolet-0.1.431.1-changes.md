@@ -2,7 +2,8 @@
 
 Branch `0.1.431.1`, cut from the exact commit tagged `v0.1.431` (the build the
 September sweep ran on), carrying **only** the twelve fixes from the Agent
-Readiness Diagnostic plus one logged item (the `wait_secs` clamp). Nothing else
+Readiness Diagnostic, the confirm gate Fix 6 called for, and one logged item (the
+`wait_secs` clamp). Nothing else
 from our main line is on this branch, so a retest delta is attributable.
 
 Git tag: **`v0.1.431.1`** (branch `0.1.431.1`). The release workflow derives the
@@ -31,12 +32,22 @@ onto it; install it deliberately. Hold auto-update on the audit machine with
 | 12 | Soft `resync` now awaits the perception refresh (joining one in flight) and returns `{refreshed, stream_reconnect_requested, snapshot:{age_s, height, …}}`; hard `resync` says to confirm with the dashboard after the reload. | `structs_action {action:"resync"}` returns a snapshot with a small `age_s`. |
 | — | `structs_events` says when `wait_secs` was clamped: `(wait_secs 180 clamped to the 55 s maximum)`. | Ask for 180. |
 
-## Not changed on this branch (deliberately)
+## Also on this branch: the confirm gate your Fix 6 asked for
 
-The configuration-write gating we proposed in our review (confirm step for
-`grass_source`/`sign_mode`/`snapshot_source`, `structs_hash config enabled:false`,
-`resync hard:true`) is **not** on this branch, to keep the retest delta to the
-twelve tickets you specified. It is queued for the main line.
+Fix 6's ticket says a description line is guidance and that a guaranteed drop
+needs a confirm step for writes. Three writes that can degrade the app now
+refuse without `confirm: true`, with `isError: true` and a reply that names
+the risk and the key to send:
+
+| Write | Why it is gated | Refusal (abridged) |
+|---|---|---|
+| `structs_system config set {sign_mode\|verify_source\|snapshot_source\|grass_source}` | A model switched `grass_source` to `webview` mid-sweep and froze the app's local state for three passes. | `config: grass_source can degrade the app's connection or signing and was not applied. Send the same set with confirm:true only if the user asked for this change.` |
+| `structs_hash config enabled:false` | Cancels every running proof-of-work task. | `Error: config enabled:false stops all hashing and cancels N running task(s); not applied. Send it again with confirm:true …` |
+| `structs_action resync hard:true` | Reloads the whole app page (9 unrequested reloads in the sweep). | `Error: resync hard:true reloads the whole app page …; not applied. Try the soft resync first …` |
+
+Tuning keys (`remediate`, `tx_gate_cap`, `difficulty_start`, `engine`,
+`max_concurrent`) and every read are unchanged. The gate is described in the
+affected tool descriptions and in the `structs_hash` schema (`confirm`).
 
 ## Expected score movement (from your own predictions)
 

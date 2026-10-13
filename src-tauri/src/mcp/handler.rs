@@ -40,7 +40,7 @@ impl StructsMcpHandler {
         vec![
             Tool::new(
                 "structs_action",
-                "Execute a game action. Handles preflight checks and transaction signing. Actions: explore, build, mine, refine, attack, defend, activate, deactivate, move_fleet, transfer, deploy, raid, update_primary_reactor. Provide action name and args. Every action except resync changes game state on the chain; resync with hard: true reloads the app page. Send an action only when the user asked for it, and a soft resync only when the app's state is stale.",
+                "Execute a game action. Handles preflight checks and transaction signing. Actions: explore, build, mine, refine, attack, defend, activate, deactivate, move_fleet, transfer, deploy, raid, update_primary_reactor. Provide action name and args. Every action except resync changes game state on the chain; resync with hard: true reloads the app page and needs confirm: true. Send an action only when the user asked for it, and a soft resync only when the app's state is stale.",
                 schema(serde_json::json!({
                     "type": "object",
                     "properties": {
@@ -51,7 +51,7 @@ impl StructsMcpHandler {
                         },
                         "args": {
                             "type": "object",
-                            "description": "Action-specific args. explore: {name?}. build: {struct_type, ambit, slot}. mine/refine: {struct_id}. attack: {attacker_id, target_id, weapon?}. defend: {defender_id, protected_id}. move_fleet: {destination}. transfer: {to, amount}. deploy: {struct_id, ambit, slot}. raid: {target_id}. update_primary_reactor: {reactor_id}. resync: {hard?} (soft: re-sync game state, reconnect the event stream and return the refreshed snapshot's age; hard: reload the app page — only when the soft resync did not help)."
+                            "description": "Action-specific args. explore: {name?}. build: {struct_type, ambit, slot}. mine/refine: {struct_id}. attack: {attacker_id, target_id, weapon?}. defend: {defender_id, protected_id}. move_fleet: {destination}. transfer: {to, amount}. deploy: {struct_id, ambit, slot}. raid: {target_id}. update_primary_reactor: {reactor_id}. resync: {hard?, confirm?} (soft: re-sync game state, reconnect the event stream and return the refreshed snapshot's age; hard: reload the app page — only when the soft resync did not help, and refused unless confirm:true is sent with it)."
                         }
                     },
                     "required": ["action"]
@@ -69,13 +69,14 @@ impl StructsMcpHandler {
             ).annotate(ToolAnnotations { read_only_hint: Some(true), ..Default::default() }),
             Tool::new(
                 "structs_hash",
-                "Manage SHA256 proof-of-work hash tasks (~200M h/s on GPU). Commands: 'list' (all tasks + current config), 'start' (begin hashing for a struct), 'progress' (single task detail), 'stop' (cancel), 'config' (tune the hashing engine). For 'start': provide task_id (the struct's id, e.g. '5-1386'), task_type (MINE/REFINE/BUILD/RAID); block_start and difficulty_target are optional for MINE/REFINE (resolved from the planet's ore clock and the struct type) and required for BUILD/RAID. For 'config' (omit args to just read current values): 'enabled' (master on/off — false stops all hashing, cancels running tasks, and pauses the task manager), 'engine' (auto|cpu|gpu — force CPU or prefer GPU), 'difficulty_start' (the difficulty a worker waits for before it starts grinding; lower = waits longer for an easier proof), 'max_concurrent' (the task manager's concurrent-job cap). 'start', 'stop' and 'config' with any value change the hashing engine; 'list', 'progress' and 'config' with no value only read. Change it only when the user asked.",
+                "Manage SHA256 proof-of-work hash tasks (~200M h/s on GPU). Commands: 'list' (all tasks + current config), 'start' (begin hashing for a struct), 'progress' (single task detail), 'stop' (cancel), 'config' (tune the hashing engine). For 'start': provide task_id (the struct's id, e.g. '5-1386'), task_type (MINE/REFINE/BUILD/RAID); block_start and difficulty_target are optional for MINE/REFINE (resolved from the planet's ore clock and the struct type) and required for BUILD/RAID. For 'config' (omit args to just read current values): 'enabled' (master on/off — false stops all hashing, cancels running tasks, and pauses the task manager), 'engine' (auto|cpu|gpu — force CPU or prefer GPU), 'difficulty_start' (the difficulty a worker waits for before it starts grinding; lower = waits longer for an easier proof), 'max_concurrent' (the task manager's concurrent-job cap). 'start', 'stop' and 'config' with any value change the hashing engine; 'list', 'progress' and 'config' with no value only read. Change it only when the user asked. config enabled:false cancels every running task and is refused unless confirm:true is sent with it.",
                 schema(serde_json::json!({
                     "type": "object",
                     "properties": {
                         "command": { "type": "string", "enum": ["list", "start", "progress", "stop", "config"] },
                         "enabled": { "type": "boolean", "description": "config: master on/off for the hashing system." },
                         "task_id": { "type": "string", "description": "Task/struct ID (e.g., '5-1386'). Required for start/progress/stop." },
+                        "confirm": { "type": "boolean", "description": "Required (true) with config enabled:false — it cancels every running hash task. Set it only when the user asked for that." },
                         "task_type": { "type": "string", "enum": ["MINE", "REFINE", "BUILD", "RAID"], "description": "For start command." },
                         "block_start": { "type": "integer", "description": "Block height when task was initiated. For start command." },
                         "difficulty_target": { "type": "integer", "description": "Difficulty target from struct type. For start command." },
@@ -245,7 +246,7 @@ impl StructsMcpHandler {
             ),
             Tool::new(
                 "structs_system",
-                "System health, logs, and self-tuning — is the automation healthy, and if not, why. Commands: 'status' (one-page health: watchdog snapshot, per-loop last run/duration/error rate, tx success rate, live adaptive values, telemetry stats — START HERE when anything seems off); 'logs' {component?, severity?, since_ms?, limit?} (the app's persistent structured log — components: auto_build/auto_harvest/auto_defend/auto_infuse/tx/vplayer/policy/conn/watchdog/hasher); 'loops' (per-loop liveness/throughput over window_minutes); 'tx' (transaction-attempt ledger summary: successes/failures/skips per context + top error reasons — auto-loop failures are visible here, nothing is silently dropped); 'pow' (proof-of-work solve stats per engine: median/p90 durations, est. hashrate); 'watchdog' (recent findings + remediations, e.g. wedged loops reset, stalled hash tasks cancelled); 'feed' (the Team Ops board event feed); 'config' (read adaptive values + signing knobs; set {remediate:bool} to toggle self-healing, {sign_mode:'sync'|'async'|'native'|'native_async'} — async returns after mempool acceptance (~0.2 s vs ~6 s inclusion wait) and settles via tx_settled events; native signs virtual players in Rust over the LCD (no webview round-trip; needs the key handed over at game sign-in, see native_signer in this read-out, falls back to the webview until then), {tx_gate_cap:1..32} concurrent signs — change one at a time and watch 'tx' duration/failures, {verify_source:'guild'|'lcd'} where a pre-sign verify goes on a snapshot miss — guild (default) spares the shared public LCD, lcd is the exact chain; {grass_source:'native'|'webview'} where GRASS frames enter Rust — native (default) subscribes NATS from Rust with async-nats, webview is the game window's WebSocket tap; {snapshot_source:'guild'|'lcd'} where the perception snapshot (the local source of truth every loop and window reads; GRASS-patched, ore clocks re-swept every 2 min) is bulk-loaded from — guild (default, ~45 requests) or the chain's 60k-row stores; 'status' reports lcd_requests and guild_api_requests per minute plus verify failovers); 'perception' (the shared whole-galaxy snapshot the loops will scan from: height, age, object counts, GRASS deltas applied/skipped, structs awaiting a read; set {refresh:true} to pull a fresh snapshot now — ~11 bulk LCD requests, ~8 s). The system self-adapts: loop concurrency AIMD-halves under endpoint pressure and recovers on clean scans; the watchdog auto-heals stuck processes (logged, never silent). 'config' with 'set' changes the app's settings; 'perception' with set {refresh: true} only re-reads the chain into the app's snapshot; every other command only reads. Send 'config' with 'set' only when the user asked for that change.",
+                "System health, logs, and self-tuning — is the automation healthy, and if not, why. Commands: 'status' (one-page health: watchdog snapshot, per-loop last run/duration/error rate, tx success rate, live adaptive values, telemetry stats — START HERE when anything seems off); 'logs' {component?, severity?, since_ms?, limit?} (the app's persistent structured log — components: auto_build/auto_harvest/auto_defend/auto_infuse/tx/vplayer/policy/conn/watchdog/hasher); 'loops' (per-loop liveness/throughput over window_minutes); 'tx' (transaction-attempt ledger summary: successes/failures/skips per context + top error reasons — auto-loop failures are visible here, nothing is silently dropped); 'pow' (proof-of-work solve stats per engine: median/p90 durations, est. hashrate); 'watchdog' (recent findings + remediations, e.g. wedged loops reset, stalled hash tasks cancelled); 'feed' (the Team Ops board event feed); 'config' (read adaptive values + signing knobs; set {remediate:bool} to toggle self-healing, {sign_mode:'sync'|'async'|'native'|'native_async'} — async returns after mempool acceptance (~0.2 s vs ~6 s inclusion wait) and settles via tx_settled events; native signs virtual players in Rust over the LCD (no webview round-trip; needs the key handed over at game sign-in, see native_signer in this read-out, falls back to the webview until then), {tx_gate_cap:1..32} concurrent signs — change one at a time and watch 'tx' duration/failures, {verify_source:'guild'|'lcd'} where a pre-sign verify goes on a snapshot miss — guild (default) spares the shared public LCD, lcd is the exact chain; {grass_source:'native'|'webview'} where GRASS frames enter Rust — native (default) subscribes NATS from Rust with async-nats, webview is the game window's WebSocket tap; {snapshot_source:'guild'|'lcd'} where the perception snapshot (the local source of truth every loop and window reads; GRASS-patched, ore clocks re-swept every 2 min) is bulk-loaded from — guild (default, ~45 requests) or the chain's 60k-row stores; 'status' reports lcd_requests and guild_api_requests per minute plus verify failovers); 'perception' (the shared whole-galaxy snapshot the loops will scan from: height, age, object counts, GRASS deltas applied/skipped, structs awaiting a read; set {refresh:true} to pull a fresh snapshot now — ~11 bulk LCD requests, ~8 s). The system self-adapts: loop concurrency AIMD-halves under endpoint pressure and recovers on clean scans; the watchdog auto-heals stuck processes (logged, never silent). 'config' with 'set' changes the app's settings; 'perception' with set {refresh: true} only re-reads the chain into the app's snapshot; every other command only reads. Send 'config' with 'set' only when the user asked for that change. The infrastructure keys sign_mode, verify_source, snapshot_source and grass_source can degrade the app and are refused unless set also carries confirm:true.",
                 schema(serde_json::json!({
                     "type": "object",
                     "properties": {
@@ -586,5 +587,65 @@ mod is_error_tests {
         assert!(flagged);
         // Outside any tool call, marking is a harmless no-op.
         mark_error();
+    }
+}
+
+
+#[cfg(test)]
+mod surface_tests {
+    use super::*;
+
+    fn tool(name: &str) -> Tool {
+        StructsMcpHandler::tool_definitions().into_iter().find(|t| t.name == name).expect(name)
+    }
+    fn desc(name: &str) -> String {
+        tool(name).description.map(|d| d.to_string()).unwrap_or_default()
+    }
+
+    #[test]
+    fn dashboard_takes_no_required_arguments() {
+        let t = tool("structs_dashboard");
+        assert!(t.input_schema.get("required").is_none(), "player_id must not be required");
+        assert!(desc("structs_dashboard").contains("Takes no arguments"));
+        assert!(!desc("structs_dashboard").contains("1-18"));
+    }
+
+    #[test]
+    fn read_only_tools_carry_the_annotation_and_write_tools_do_not() {
+        for name in ["structs_dashboard", "structs_events", "structs_intel"] {
+            let a = tool(name).annotations.expect(name);
+            assert_eq!(a.read_only_hint, Some(true), "{name}");
+        }
+        for name in ["structs_action", "structs_hash", "structs_system", "structs_players"] {
+            assert!(tool(name).annotations.is_none(), "{name} must not claim read-only");
+        }
+    }
+
+    #[test]
+    fn descriptions_say_which_commands_write() {
+        assert!(desc("structs_action").contains("changes game state on the chain"));
+        assert!(desc("structs_hash").contains("task_id (the struct's id"));
+        assert!(desc("structs_hash").contains("confirm:true"));
+        assert!(desc("structs_system").contains("grass_source"));
+        assert!(desc("structs_map").contains("changes nothing in the game"));
+    }
+
+    #[test]
+    fn events_schema_and_description_agree_about_struct_attack() {
+        let t = tool("structs_events");
+        let cat = t.input_schema["properties"]["category"]["description"].as_str().unwrap_or("");
+        assert!(!cat.contains("struct_attack"), "{cat}");
+        assert!(desc("structs_events").contains("there is NO `struct_attack` category"));
+        assert!(desc("structs_events").contains("'query' and 'args' belong to structs_intel"));
+    }
+
+    #[test]
+    fn intel_description_names_the_owner_filters() {
+        let d = desc("structs_intel");
+        assert!(d.contains("filter.by=owner"));
+        assert!(d.contains("allocation takes filter.by=controller"), "{d}");
+        let args = tool("structs_intel").input_schema["properties"]["args"]["description"].as_str().unwrap_or("").to_string();
+        assert!(args.contains("enum-style names like ORE_EXTRACTOR are accepted"), "{args}");
+        assert!(args.contains("the attacker's own location"), "{args}");
     }
 }

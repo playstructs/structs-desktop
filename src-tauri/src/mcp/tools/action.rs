@@ -841,6 +841,12 @@ async fn action_update_primary_reactor(app_handle: &tauri::AppHandle, args: &Val
 /// stale after a slow load.
 async fn action_resync(app_handle: &tauri::AppHandle, args: &Value) -> Vec<Content> {
     let hard = args.get("hard").and_then(|v| v.as_bool()).unwrap_or(false);
+    let confirmed = args.get("confirm").and_then(|v| v.as_bool()).unwrap_or(false);
+    if hard && !confirmed {
+        return crate::mcp::handler::fail(
+            "Error: resync hard:true reloads the whole app page (it interrupts the game view and every window); not applied. Try the soft resync first, and send hard:true with confirm:true only if the user asked for a reload.".to_string(),
+        );
+    }
     if let Err(e) = crate::mcp::events::emit(app_handle, crate::mcp::events::AppEvent::ForceResync { hard }) {
         return crate::mcp::handler::fail(format!("Resync failed to dispatch: {}", e));
     }
