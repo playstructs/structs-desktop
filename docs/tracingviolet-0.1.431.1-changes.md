@@ -5,10 +5,12 @@ September sweep ran on), carrying **only** the twelve fixes from the Agent
 Readiness Diagnostic plus one logged item (the `wait_secs` clamp). Nothing else
 from our main line is on this branch, so a retest delta is attributable.
 
-Git tag: **`v0.1.431-1`** (semver pre-release form; the release workflow and
-Cargo reject a four-part `0.1.431.1`). The app reports itself as `0.1.431-1`.
-Because it is a pre-release of 0.1.431, a 0.1.431 install will never auto-update
-to it; install it deliberately. Hold auto-update on the audit machine with
+Git tag: **`v0.1.431.1`** (branch `0.1.431.1`). The release workflow derives the
+app version from the tag; because Cargo and the bundlers require semver, the
+branch's `scripts/sync-version.py` maps the four-part tag to the pre-release form
+**`0.1.431-1`**, which is what the app reports and what `latest.json` carries.
+Since `0.1.431-1` sorts below `0.1.431`, a 0.1.431 install never auto-updates
+onto it; install it deliberately. Hold auto-update on the audit machine with
 `STRUCTS_NO_AUTO_UPDATE=1` (present since v0.1.385).
 
 ## Fix-by-fix: what changed, how to confirm
