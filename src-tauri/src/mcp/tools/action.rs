@@ -84,7 +84,7 @@ pub async fn execute(
         "deploy" => action_deploy(app_handle, &params.args).await,
         "raid" => action_raid(app_handle, registry, &params.args).await,
         "update_primary_reactor" => action_update_primary_reactor(app_handle, &params.args).await,
-        "resync" => action_resync(app_handle, &params.args),
+        "resync" => action_resync(app_handle, &params.args).await,
         other => vec![Content::text(format!(
             "Unknown action '{}'. Available: explore, mine, refine, build, activate, deactivate, attack, defend, move_fleet, transfer, deploy, raid, update_primary_reactor, resync",
             other
@@ -839,15 +839,33 @@ async fn action_update_primary_reactor(app_handle: &tauri::AppHandle, args: &Val
 /// triggers a full page reload (nuclear option for a badly stale map); otherwise
 /// it re-runs the sync + grass-resume path. Helps when the app's data layer looks
 /// stale after a slow load.
-fn action_resync(app_handle: &tauri::AppHandle, args: &Value) -> Vec<Content> {
+async fn action_resync(app_handle: &tauri::AppHandle, args: &Value) -> Vec<Content> {
     let hard = args.get("hard").and_then(|v| v.as_bool()).unwrap_or(false);
-    match crate::mcp::events::emit(app_handle, crate::mcp::events::AppEvent::ForceResync { hard }) {
-        Ok(()) => vec![Content::text(format!(
-            "Resync requested ({}). The app will {}.",
-            if hard { "hard" } else { "soft" },
-            if hard { "reload the page" } else { "re-sync game state and reconnect its event stream" }
-        ))],
-        Err(e) => vec![Content::text(format!("Resync failed to dispatch: {}", e))],
+    if let Err(e) = crate::mcp::events::emit(app_handle, crate::mcp::events::AppEvent::ForceResync { hard }) {
+        return crate::mcp::handler::fail(format!("Resync failed to dispatch: {}", e));
+    }
+    if hard {
+        return vec![Content::text(
+            "Resync requested (hard). The app will reload the page; call structs_dashboard afterwards to confirm the new state.".to_string(),
+        )];
+    }
+    // Soft: the stream reconnect was dispatched above; the perception snapshot
+    // is refreshed here (joining a refresh already in flight) so the reply
+    // reports a real, fresh age instead of a promise.
+    let client = crate::mcp::cosmos_client::CosmosClient::new();
+    match crate::mcp::perception::refresh(&client).await {
+        Ok(snapshot) => vec![Content::text(
+            serde_json::to_string_pretty(&json!({
+                "refreshed": true,
+                "stream_reconnect_requested": true,
+                "snapshot": snapshot,
+            }))
+            .unwrap_or_default(),
+        )],
+        Err(e) => crate::mcp::handler::fail(format!(
+            "Resync (soft): stream reconnect requested, but the snapshot refresh did not complete: {}",
+            e
+        )),
     }
 }
 

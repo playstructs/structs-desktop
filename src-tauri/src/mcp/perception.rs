@@ -1063,6 +1063,9 @@ static CURRENT: LazyLock<RwLock<Option<Snapshot>>> = LazyLock::new(|| RwLock::ne
 /// onto the NEW snapshot (guarded by height), so a refresh never loses the
 /// changes that landed during its own ~8 s fetch.
 static REFRESHING: AtomicBool = AtomicBool::new(false);
+/// Woken when a full refresh finishes (either way), so a request that
+/// arrives mid-refresh can join it instead of being refused.
+static REFRESH_DONE: tokio::sync::Notify = tokio::sync::Notify::const_new();
 static PENDING: LazyLock<Mutex<Vec<(String, String, Value)>>> = LazyLock::new(|| Mutex::new(Vec::new()));
 const PENDING_CAP: usize = 20_000;
 
@@ -2001,7 +2004,7 @@ async fn walk_store(
 /// concurrently. Returns the new snapshot's summary.
 pub async fn refresh(client: &CosmosClient) -> Result<Value, String> {
     if REFRESHING.swap(true, Ordering::SeqCst) {
-        return Err("refresh already in flight".into());
+        return join_running_refresh().await;
     }
     let t0 = crate::hasher::types::now_millis();
     let mut fed = "lcd";
@@ -2056,7 +2059,35 @@ pub async fn refresh(client: &CosmosClient) -> Result<Value, String> {
         }
     };
     REFRESHING.store(false, Ordering::SeqCst);
+    REFRESH_DONE.notify_waiters();
     summary
+}
+
+/// A refresh is already running: wait for it (bounded) and answer with the
+/// snapshot it installed, marked `joined_running_refresh`, so a caller never
+/// reads a stale snapshot as "refreshed". Past the bound, say the refresh is
+/// still running and how old the current snapshot is.
+async fn join_running_refresh() -> Result<Value, String> {
+    const MAX_WAIT: std::time::Duration = std::time::Duration::from_secs(90);
+    let deadline = tokio::time::Instant::now() + MAX_WAIT;
+    while REFRESHING.load(Ordering::SeqCst) {
+        let notified = REFRESH_DONE.notified();
+        if !REFRESHING.load(Ordering::SeqCst) {
+            break;
+        }
+        if tokio::time::timeout_at(deadline, notified).await.is_err() {
+            let age = summary().get("age_s").cloned().unwrap_or(Value::Null);
+            return Err(format!(
+                "refresh still running after {}s; the current snapshot is {} s old — retry shortly",
+                MAX_WAIT.as_secs(), age
+            ));
+        }
+    }
+    let mut s = summary();
+    if let Some(obj) = s.as_object_mut() {
+        obj.insert("joined_running_refresh".into(), Value::Bool(true));
+    }
+    Ok(s)
 }
 
 #[cfg(test)]

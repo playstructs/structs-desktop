@@ -130,13 +130,17 @@ fn build_sync(
 ) -> Result<SyncOutput, Vec<Content>> {
     let gs = GAME_STATE.read().unwrap();
 
+    // An empty player_id is the same as none: the dashboard always renders the
+    // signed-in player (the schema no longer requires the argument).
     let player_id = params
         .player_id
         .clone()
+        .filter(|p| !p.trim().is_empty())
         .or_else(|| gs.player_id.clone())
         .unwrap_or_default();
 
     if player_id.is_empty() {
+        crate::mcp::handler::mark_error();
         return Err(vec![Content::text(
             "No player yet — nothing to show.\n\
             \n\
@@ -393,6 +397,7 @@ fn build_sync(
             }
         }
     } else {
+        crate::mcp::handler::mark_error();
         out.push_str(&format!(
             "Player {} is not the logged-in player, so the dashboard (which renders local game state) can't show it.\n",
             player_id
@@ -405,7 +410,7 @@ fn build_sync(
         if is_vplayer {
             out.push_str("→ It's one of your virtual players: use structs_players state {player} for its full state, or structs_players roster for the whole team.\n");
         } else {
-            out.push_str("→ For another player use structs_intel scout / structs_query player; for your own virtual players use structs_players state.\n");
+            out.push_str(&format!("→ For another player read structs_intel {{query:\"query\", args:{{type:\"player\", id:\"{}\"}}}} (or structs_intel scout with their planet); for your own virtual players use structs_players state. Call structs_dashboard with no arguments for the signed-in player.\n", player_id));
         }
     }
 

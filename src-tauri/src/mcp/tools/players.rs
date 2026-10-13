@@ -1809,8 +1809,20 @@ pub async fn execute(
                         (sid.clone(), "REFINE", TaskParams::for_ore(&sid, "REFINE", block, dt("difficulty_target", 28000)))
                     }
                     "raid" => {
-                        let (Some(fleet), Some(target)) = (s("fleet_id"), s("target_id")) else {
-                            return vec![Content::text("raid: fleet_id (this player's fleet) and target_id (planet) required.".to_string())];
+                        let Some(target) = s("target_id") else {
+                            return crate::mcp::handler::fail("raid: target_id (the planet to raid) required; fleet_id is optional and defaults to this player's own fleet.".to_string());
+                        };
+                        // fleet_id defaults to the acting player's own fleet, read
+                        // from its on-chain player record.
+                        let fleet = match s("fleet_id") {
+                            Some(f) => f,
+                            None => match client.query_entity("player", &player_id).await {
+                                Ok(v) => match v.get("Player").and_then(|p| p.get("fleetId")).and_then(|f| f.as_str()) {
+                                    Some(f) if !f.is_empty() => f.to_string(),
+                                    _ => return crate::mcp::handler::fail(format!("raid: player {} has no fleet on record; pass fleet_id explicitly.", player_id)),
+                                },
+                                Err(e) => return crate::mcp::handler::fail(format!("raid: could not read player {} to find its fleet: {}", player_id, e)),
+                            },
                         };
                         // Raid proof anchors on the TARGET planet's blockStartRaid (the
                         // defender's vulnerability clock), not the current block.
