@@ -214,6 +214,21 @@ pub async fn execute(params: SystemParams) -> Vec<Content> {
 
         "config" => {
             if let Some(set) = &params.set {
+                // The infrastructure keys can degrade the whole app (the audit saw
+                // a model switch grass_source and freeze local state for hours while
+                // answering a question). They need an explicit confirm:true from the
+                // caller; tuning keys (remediate, tx_gate_cap) do not.
+                const GUARDED: [&str; 4] = ["sign_mode", "verify_source", "snapshot_source", "grass_source"];
+                let touched: Vec<&str> = GUARDED.iter().copied().filter(|k| set.get(*k).is_some()).collect();
+                let confirmed = set.get("confirm").and_then(|v| v.as_bool()).unwrap_or(false);
+                if !touched.is_empty() && !confirmed {
+                    crate::mcp::handler::mark_error();
+                    return err(format!(
+                        "config: {} can degrade the app's connection or signing and {} not applied. Send the same set with confirm:true only if the user asked for this change.",
+                        touched.join(", "),
+                        if touched.len() == 1 { "was" } else { "were" }
+                    ));
+                }
                 let mut applied = Vec::new();
                 if let Some(remediate) = set.get("remediate").and_then(|v| v.as_bool()) {
                     if let Ok(mut engine) = crate::mcp::policy::POLICY_ENGINE.write() {

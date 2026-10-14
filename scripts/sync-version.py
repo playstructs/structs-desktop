@@ -5,7 +5,7 @@ Used by the release workflow to derive the version from the git tag, so
 `tauri.conf.json`, `src-tauri/Cargo.toml`, `src-tauri/Cargo.lock`, and the root
 `package.json` stay in sync without manual bumps before tagging.
 
-Usage: scripts/sync-version.py 0.24.0
+Usage: scripts/sync-version.py 0.24.0   (a four-part 0.1.431.1 becomes 0.1.431-1)
 """
 import json
 import re
@@ -50,6 +50,14 @@ def main() -> int:
         print("usage: sync-version.py <version>", file=sys.stderr)
         return 2
     version = sys.argv[1]
+    # A four-part tag (0.1.431.1 = "0.1.431, revision 1", used for retest builds
+    # cut from a released tag) is not semver, which Cargo and the bundlers
+    # require. Map it to the pre-release form 0.1.431-1: same ordering intent
+    # (a revision of 0.1.431 that no 0.1.431 install auto-updates onto), valid
+    # everywhere the version is written.
+    m = re.fullmatch(r"(\d+\.\d+\.\d+)\.(\d+)", version)
+    if m:
+        version = f"{m.group(1)}-{m.group(2)}"
     if not re.fullmatch(r"\d+\.\d+\.\d+(?:[-+][\w.\-]+)?", version):
         print(f"invalid semver: {version}", file=sys.stderr)
         return 2

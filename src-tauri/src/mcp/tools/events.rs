@@ -416,7 +416,13 @@ pub async fn poll_team_threats_by_planet(since: f64) -> (f64, Vec<(Option<String
 pub async fn execute(params: EventParams) -> Vec<Content> {
     let since = params.since.unwrap_or(0.0);
     let limit = params.limit.unwrap_or(30);
-    let wait = params.wait_secs.unwrap_or(0).min(55);
+    let requested_wait = params.wait_secs.unwrap_or(0);
+    let wait = requested_wait.min(55);
+    let clamp_note = if requested_wait > 55 {
+        format!("(wait_secs {} clamped to the 55 s maximum)\n", requested_wait)
+    } else {
+        String::new()
+    };
     let threats_only = params.threats_only;
     let restrict = params.mine_only || threats_only;
 
@@ -489,7 +495,7 @@ pub async fn execute(params: EventParams) -> Vec<Content> {
             out.push_str(&format!("\nnext_cursor: {} (pass as 'since' to page forward)\n", next_cursor));
             out.push_str("Respond: structs_intel scout/valid_targets/simulate → structs_action attack/defend/move_fleet (primary) or structs_players act {player,…} (a virtual player).\n");
         }
-        return vec![Content::text(out)];
+        return vec![Content::text(format!("{}{}", clamp_note, out))];
     }
 
     let shown: Vec<&GameEvent> = fresh.iter().rev().take(limit).collect();
@@ -513,7 +519,7 @@ pub async fn execute(params: EventParams) -> Vec<Content> {
         }
         out.push_str(&format!("\nnext_cursor: {} (pass as 'since' to page forward)\n", next_cursor));
     }
-    vec![Content::text(out)]
+    vec![Content::text(format!("{}{}", clamp_note, out))]
 }
 
 #[cfg(test)]

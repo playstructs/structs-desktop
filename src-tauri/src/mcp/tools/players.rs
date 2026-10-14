@@ -33,6 +33,7 @@ pub struct PlayerParams {
     #[serde(default)]
     pub index: Option<u32>,
     /// role: "bait" | "productive" — sets a virtual player's purpose.
+    /// roster: list only virtual players with this role.
     #[serde(default)]
     pub role: Option<String>,
     /// create: guild the new player must join. Signup always goes through the
@@ -40,6 +41,12 @@ pub struct PlayerParams {
     /// switch the active guild first (apply_guild_switch) for cross-guild signup.
     #[serde(default)]
     pub guild_id: Option<String>,
+    /// roster: how many players to list (default 50, max 500).
+    #[serde(default)]
+    pub limit: Option<usize>,
+    /// roster: how many players to skip before listing (paging).
+    #[serde(default)]
+    pub offset: Option<usize>,
 }
 
 fn now_ms() -> f64 {
@@ -91,6 +98,8 @@ pub async fn mcp_players(
             index,
             role,
             guild_id,
+            limit: None,
+            offset: None,
         },
     )
     .await;
@@ -166,6 +175,8 @@ pub async fn struct_act_impl(
             index: None,
             role: None,
             guild_id: None,
+            limit: None,
+            offset: None,
         },
     )
     .await;
@@ -234,79 +245,8 @@ pub async fn execute(
         // Team overview: the primary player + every virtual player in one view,
         // so an agent commanding a team sees everyone's planet/fleet/structs/
         // resources at a glance (otherwise it's dashboard + N separate states).
-        "roster" => {
-            let mut out = String::new();
-            {
-                let gs = crate::game_state::GAME_STATE.read().unwrap();
-                let charge = gs.get_charge();
-                out.push_str(&format!(
-                    "Team roster\n  ★ {} {} (you) — planet {} · fleet {} · {} structs · charge {} · alpha {} ore {}\n",
-                    gs.player_id.clone().unwrap_or_else(|| "?".to_string()),
-                    gs.player_name.clone().unwrap_or_default(),
-                    gs.planet_id.clone().unwrap_or_else(|| "none".to_string()),
-                    gs.fleet_id.clone().unwrap_or_else(|| "none".to_string()),
-                    gs.structs.len(),
-                    charge,
-                    gs.alpha
-                        .map(crate::mcp::tools::format::format_alpha_whole)
-                        .unwrap_or_else(|| "?".to_string()),
-                    gs.ore
-                        .map(crate::mcp::tools::format::format_ore)
-                        .unwrap_or_else(|| "?".to_string()),
-                ));
-            }
-            let vplayers: Vec<(u32, String, Option<String>, VPlayerRole)> = {
-                let reg = REGISTRY.read().unwrap();
-                reg.players
-                    .iter()
-                    .map(|p| (p.index, p.name.clone(), p.player_id.clone(), p.role))
-                    .collect()
-            };
-            if vplayers.is_empty() {
-                out.push_str("  (no virtual players — create with structs_players create {name})\n");
-            }
-            for (index, name, player_id, role) in vplayers {
-                let Some(pid) = player_id else {
-                    out.push_str(&format!("    [idx {}] {} ({}) — signup pending\n", index, name, role.as_str()));
-                    continue;
-                };
-                let (planet, fleet, alpha, ore) = match client.query_entity("player", &pid).await {
-                    Ok(v) => {
-                        let player = v.get("Player");
-                        let grid = v.get("gridAttributes");
-                        let inv = v.get("playerInventory");
-                        let id_or = |val: Option<&Value>| {
-                            val.and_then(|x| x.as_str())
-                                .filter(|s| !s.is_empty())
-                                .unwrap_or("none")
-                                .to_string()
-                        };
-                        let num = |val: Option<&Value>| match val {
-                            Some(Value::String(s)) => s.clone(),
-                            Some(Value::Number(n)) => n.to_string(),
-                            _ => "0".to_string(),
-                        };
-                        (
-                            id_or(player.and_then(|p| p.get("planetId"))),
-                            id_or(player.and_then(|p| p.get("fleetId"))),
-                            num(inv.and_then(|i| i.get("rocks")).and_then(|r| r.get("amount"))),
-                            num(grid.and_then(|g| g.get("ore"))),
-                        )
-                    }
-                    Err(_) => ("?".to_string(), "?".to_string(), "?".to_string(), "?".to_string()),
-                };
-                let nstructs = match client.guild.struct_list_by_owner(&pid, 1).await {
-                    Ok(page) => page.items.len().to_string(),
-                    Err(_) => "?".to_string(),
-                };
-                out.push_str(&format!(
-                    "    [idx {}] {} {} ({}) — planet {} · fleet {} · {} structs · alpha {} ore {}\n",
-                    index, pid, name, role.as_str(), planet, fleet, nstructs, alpha, ore
-                ));
-            }
-            out.push_str("\nAct as any player: structs_players act {player, …} or structs_sequence {as, steps}.\n");
-            vec![Content::text(out)]
-        }
+        // Served from local caches only — see `roster`.
+        "roster" => roster(app_handle, &params),
 
         // Read-only power-budget view: how much the guild substation can still
         // power, salvaged from the bash bot's capacity/(connections+1) heuristic.
@@ -1809,8 +1749,20 @@ pub async fn execute(
                         (sid.clone(), "REFINE", TaskParams::for_ore(&sid, "REFINE", block, dt("difficulty_target", 28000)))
                     }
                     "raid" => {
-                        let (Some(fleet), Some(target)) = (s("fleet_id"), s("target_id")) else {
-                            return vec![Content::text("raid: fleet_id (this player's fleet) and target_id (planet) required.".to_string())];
+                        let Some(target) = s("target_id") else {
+                            return crate::mcp::handler::fail("raid: target_id (the planet to raid) required; fleet_id is optional and defaults to this player's own fleet.".to_string());
+                        };
+                        // fleet_id defaults to the acting player's own fleet, read
+                        // from its on-chain player record.
+                        let fleet = match s("fleet_id") {
+                            Some(f) => f,
+                            None => match client.query_entity("player", &player_id).await {
+                                Ok(v) => match v.get("Player").and_then(|p| p.get("fleetId")).and_then(|f| f.as_str()) {
+                                    Some(f) if !f.is_empty() => f.to_string(),
+                                    _ => return crate::mcp::handler::fail(format!("raid: player {} has no fleet on record; pass fleet_id explicitly.", player_id)),
+                                },
+                                Err(e) => return crate::mcp::handler::fail(format!("raid: could not read player {} to find its fleet: {}", player_id, e)),
+                            },
                         };
                         // Raid proof anchors on the TARGET planet's blockStartRaid (the
                         // defender's vulnerability clock), not the current block.
@@ -2101,6 +2053,425 @@ fn build_virtual_msg(action: &str, args: &Value, player_id: &str) -> Result<(Str
             "action '{}' not supported as a named action. Direct: explore, build, activate, deactivate, deploy, defend, attack, fleet_move, planet_update_name, build_cancel, defense_clear, stealth_activate, stealth_deactivate, storage_stash, storage_recall, generator_infuse, player_send, player_resume, player_update_name. PoW: mine, refine, raid, complete_build. For ANY other message use action \"tx\" {{type_url, msg}}.",
             other
         )),
+    }
+}
+
+// ── roster ──────────────────────────────────────────────────────────────────
+
+/// Default and ceiling for the roster's per-player list.
+const ROSTER_DEFAULT_LIMIT: usize = 50;
+const ROSTER_MAX_LIMIT: usize = 500;
+/// The roster cache (alpha) is re-swept in the background past this age.
+const ROSTER_CACHE_MAX_AGE_MS: f64 = 5.0 * 60_000.0;
+/// Charge a mine/refine needs — the "ready" bar the totals count against.
+const ROSTER_READY_CHARGE: u64 = 20;
+
+/// One virtual player's roster line, gathered from local caches only.
+#[derive(Debug, Clone, Default, PartialEq)]
+struct RosterLine {
+    index: u32,
+    name: String,
+    role: &'static str,
+    player_id: Option<String>,
+    planet: Option<String>,
+    fleet: Option<String>,
+    structs: Option<usize>,
+    alpha_ualpha: Option<f64>,
+    ore: Option<f64>,
+    charge: Option<u64>,
+}
+
+/// Where the roster's numbers came from, for its freshness line.
+#[derive(Debug, Clone, Default)]
+struct RosterSources {
+    /// Perception snapshot (height, age ms); None before the first refresh.
+    snapshot: Option<(u64, f64)>,
+    /// Roster-cache age in ms; None before its first sweep.
+    cache_age_ms: Option<f64>,
+    sweep_running: bool,
+}
+
+/// The team overview. At ~3,000 virtual players the old walk read the LCD
+/// player entity and the guild struct list once per player, serially, and
+/// never finished inside a client's 300 s timeout. Every number here comes
+/// from a local cache instead: the perception snapshot (planet, fleet,
+/// structs, ore, charge — GRASS-fed, so fresher than any sweep) and the Fleet
+/// page's roster cache (alpha: a bank balance no bulk store carries, swept in
+/// bulk from the Guild API). A stale roster cache starts a background sweep;
+/// this call never waits on it, so there is nothing slow to report progress on.
+fn roster(app: &tauri::AppHandle, params: &PlayerParams) -> Vec<Content> {
+    use crate::mcp::{perception, roster_cache};
+
+    let role_filter = match params.role.as_deref().filter(|s| !s.is_empty()) {
+        None => None,
+        Some(r) => match VPlayerRole::parse(r) {
+            Some(role) => Some(role),
+            None => {
+                return crate::mcp::handler::fail(format!(
+                    "roster: unknown role '{}'. Use {}.",
+                    r,
+                    VPlayerRole::ALL.iter().map(|r| r.as_str()).collect::<Vec<_>>().join(" | ")
+                ))
+            }
+        },
+    };
+    let limit = params.limit.unwrap_or(ROSTER_DEFAULT_LIMIT).clamp(1, ROSTER_MAX_LIMIT);
+    let offset = params.offset.unwrap_or(0);
+
+    let primary = {
+        let gs = crate::game_state::GAME_STATE.read().unwrap();
+        format!(
+            "  ★ {} {} (you) — planet {} · fleet {} · {} structs · charge {} · alpha {} ore {}\n",
+            gs.player_id.clone().unwrap_or_else(|| "?".to_string()),
+            gs.player_name.clone().unwrap_or_default(),
+            gs.planet_id.clone().unwrap_or_else(|| "none".to_string()),
+            gs.fleet_id.clone().unwrap_or_else(|| "none".to_string()),
+            gs.structs.len(),
+            gs.get_charge(),
+            gs.alpha
+                .map(crate::mcp::tools::format::format_alpha_whole)
+                .unwrap_or_else(|| "?".to_string()),
+            gs.ore
+                .map(crate::mcp::tools::format::format_ore)
+                .unwrap_or_else(|| "?".to_string()),
+        )
+    };
+    let vplayers: Vec<(u32, String, Option<String>, VPlayerRole)> = {
+        let reg = REGISTRY.read().unwrap();
+        reg.players
+            .iter()
+            .map(|p| (p.index, p.name.clone(), p.player_id.clone(), p.role))
+            .collect()
+    };
+
+    roster_cache::trigger_sweep(app.clone(), ROSTER_CACHE_MAX_AGE_MS);
+    let cache: std::collections::HashMap<String, roster_cache::RosterRow> = roster_cache::all_rows()
+        .into_iter()
+        .map(|r| (r.player_id.clone(), r))
+        .collect();
+    let refreshed = roster_cache::refreshed_at_ms();
+    let height = roster_cache::chain_height();
+
+    let gather = |snap: Option<&perception::Snapshot>| -> Vec<RosterLine> {
+        let mut lines: Vec<RosterLine> = vplayers
+            .iter()
+            .map(|(index, name, pid, role)| {
+                roster_line(*index, name, pid.as_deref(), *role, snap, pid.as_deref().and_then(|p| cache.get(p)), height)
+            })
+            .collect();
+        lines.sort_by_key(|l| l.index);
+        lines
+    };
+    let (lines, snapshot) = perception::with_snapshot(|s| (gather(Some(s)), Some((s.height, s.age_ms()))))
+        .unwrap_or_else(|| (gather(None), None));
+
+    let sources = RosterSources {
+        snapshot,
+        cache_age_ms: (refreshed > 0.0).then(|| now_ms() - refreshed),
+        sweep_running: roster_cache::is_sweeping(),
+    };
+    vec![Content::text(render_roster(&primary, &lines, role_filter, limit, offset, &sources))]
+}
+
+/// One player's line from the snapshot first (GRASS-fed), the roster cache
+/// for what the snapshot does not hold (alpha) or when it has no row yet.
+fn roster_line(
+    index: u32,
+    name: &str,
+    pid: Option<&str>,
+    role: VPlayerRole,
+    snap: Option<&crate::mcp::perception::Snapshot>,
+    cached: Option<&crate::mcp::roster_cache::RosterRow>,
+    height: u64,
+) -> RosterLine {
+    let mut line = RosterLine { index, name: name.to_string(), role: role.as_str(), ..Default::default() };
+    let Some(pid) = pid else { return line };
+    line.player_id = Some(pid.to_string());
+    let snap = snap.filter(|s| s.player_row(pid).is_some());
+    match snap {
+        Some(s) => {
+            let row = s.player_row(pid);
+            let id_of = |k: &str| {
+                row.and_then(|r| r.get(k))
+                    .and_then(|v| v.as_str())
+                    .filter(|v| !v.is_empty())
+                    .map(String::from)
+            };
+            line.planet = id_of("planetId");
+            line.fleet = id_of("fleetId");
+            line.structs = Some(
+                s.player_struct_ids(pid)
+                    .iter()
+                    .filter(|id| {
+                        s.struct_exists(id)
+                            && s.struct_status(id) & crate::mcp::perception::status::DESTROYED == 0
+                    })
+                    .count(),
+            );
+            line.ore = s.grid_attr(pid, "ore").map(|v| v as f64);
+        }
+        None => {
+            line.planet = cached.and_then(|c| c.planet_id.clone());
+            line.fleet = cached.and_then(|c| c.fleet_id.clone());
+            line.ore = cached.map(|c| c.ore);
+        }
+    }
+    // A player row with no grid row reads lastAction 0, which would show a
+    // full battery; that is "unknown", so the cache answers instead.
+    let last_action = snap
+        .and_then(|s| s.grid_attr(pid, "lastAction"))
+        .filter(|la| *la > 0)
+        .or_else(|| cached.map(|c| c.last_action_block));
+    line.charge = last_action.filter(|_| height > 0).map(|la| height.saturating_sub(la));
+    line.alpha_ualpha = cached.map(|c| c.alpha_ualpha);
+    line
+}
+
+/// "12s" / "4m" / "3h" — how old a cache is.
+fn fmt_age(ms: f64) -> String {
+    let s = (ms.max(0.0) / 1000.0) as u64;
+    match s {
+        0..=89 => format!("{s}s"),
+        90..=5399 => format!("{}m", (s + 30) / 60),
+        _ => format!("{}h", (s + 1800) / 3600),
+    }
+}
+
+/// The roster text: team-wide counts, aggregates over the (optionally
+/// role-filtered) set, then one page of per-player lines. Pure.
+fn render_roster(
+    primary: &str,
+    lines: &[RosterLine],
+    role_filter: Option<VPlayerRole>,
+    limit: usize,
+    offset: usize,
+    sources: &RosterSources,
+) -> String {
+    use crate::mcp::tools::format::{format_alpha, format_ore};
+    let q = |o: Option<String>| o.unwrap_or_else(|| "?".to_string());
+    let mut out = String::new();
+
+    let pending = lines.iter().filter(|l| l.player_id.is_none()).count();
+    out.push_str(&format!(
+        "Team roster — you + {} virtual players ({} on-chain, {} signup pending)\n",
+        lines.len(),
+        lines.len() - pending,
+        pending
+    ));
+    let roles = VPlayerRole::ALL
+        .iter()
+        .map(|r| format!("{} {}", lines.iter().filter(|l| l.role == r.as_str()).count(), r.as_str()))
+        .collect::<Vec<_>>()
+        .join(" · ");
+    out.push_str(&format!("  roles: {}\n", roles));
+    out.push_str(primary);
+
+    if lines.is_empty() {
+        out.push_str("  (no virtual players — create with structs_players create {name})\n");
+        return out;
+    }
+
+    let scope: Vec<&RosterLine> = lines
+        .iter()
+        .filter(|l| role_filter.map_or(true, |r| l.role == r.as_str()))
+        .collect();
+    let live: Vec<&&RosterLine> = scope.iter().filter(|l| l.player_id.is_some()).collect();
+    let alpha_known: Vec<f64> = live.iter().filter_map(|l| l.alpha_ualpha).collect();
+    let ore: f64 = live.iter().filter_map(|l| l.ore).sum();
+    let structs: usize = live.iter().filter_map(|l| l.structs).sum();
+    let mut charges: Vec<u64> = live.iter().filter_map(|l| l.charge).collect();
+    charges.sort_unstable();
+
+    out.push_str(&format!(
+        "\n{}: {} players\n",
+        match role_filter {
+            Some(r) => format!("Role {}", r.as_str()),
+            None => "Virtual players".to_string(),
+        },
+        scope.len()
+    ));
+    let unread_alpha = live.len() - alpha_known.len();
+    out.push_str(&format!(
+        "  totals: alpha {}{} · ore {} · {} structs\n",
+        format_alpha(alpha_known.iter().sum()),
+        if unread_alpha > 0 { format!(" ({} not yet read)", unread_alpha) } else { String::new() },
+        format_ore(ore),
+        structs
+    ));
+    let no_planet = live.iter().filter(|l| l.planet.is_none()).count();
+    let no_fleet = live.iter().filter(|l| l.fleet.is_none()).count();
+    if no_planet > 0 || no_fleet > 0 {
+        out.push_str(&format!("  gaps: {} without a planet · {} without a fleet\n", no_planet, no_fleet));
+    }
+    if !charges.is_empty() {
+        out.push_str(&format!(
+            "  charge: {} at ≥{} (mine/refine-ready) · median {}\n",
+            charges.iter().filter(|c| **c >= ROSTER_READY_CHARGE).count(),
+            ROSTER_READY_CHARGE,
+            charges[charges.len() / 2]
+        ));
+    }
+    let snap = match sources.snapshot {
+        Some((h, age)) => format!("perception snapshot @ block {} ({} old)", h, fmt_age(age)),
+        None => "no perception snapshot yet (planet/fleet/ore from the roster cache)".to_string(),
+    };
+    let cache = match sources.cache_age_ms {
+        Some(age) => format!("alpha from roster cache ({} old)", fmt_age(age)),
+        None => "alpha not read yet".to_string(),
+    };
+    out.push_str(&format!(
+        "  sources: {} · {}{}\n",
+        snap,
+        cache,
+        if sources.sweep_running { ", refreshing in background" } else { "" }
+    ));
+
+    if offset >= scope.len() {
+        out.push_str(&format!("\nNo players at offset {} ({} in scope).\n", offset, scope.len()));
+        return out;
+    }
+    let end = (offset + limit).min(scope.len());
+    out.push_str(&format!("\nPlayers {}–{} of {} (by HD index):\n", offset + 1, end, scope.len()));
+    for l in &scope[offset..end] {
+        let Some(pid) = &l.player_id else {
+            out.push_str(&format!("    [idx {}] {} ({}) — signup pending\n", l.index, l.name, l.role));
+            continue;
+        };
+        out.push_str(&format!(
+            "    [idx {}] {} {} ({}) — planet {} · fleet {} · {} structs · charge {} · alpha {} ore {}\n",
+            l.index,
+            pid,
+            l.name,
+            l.role,
+            l.planet.clone().unwrap_or_else(|| "none".to_string()),
+            l.fleet.clone().unwrap_or_else(|| "none".to_string()),
+            q(l.structs.map(|n| n.to_string())),
+            q(l.charge.map(|c| c.to_string())),
+            q(l.alpha_ualpha.map(format_alpha)),
+            q(l.ore.map(format_ore)),
+        ));
+    }
+    if end < scope.len() {
+        out.push_str(&format!(
+            "More: structs_players {{command:\"roster\", offset:{}, limit:{}{}}}.\n",
+            end,
+            limit,
+            role_filter.map(|r| format!(", role:\"{}\"", r.as_str())).unwrap_or_default()
+        ));
+    }
+    out.push_str("Act as any player: structs_players act {player, …} or structs_sequence {as, steps}.\n");
+    out
+}
+
+#[cfg(test)]
+mod roster_tests {
+    use super::*;
+
+    fn line(index: u32, role: VPlayerRole, live: bool) -> RosterLine {
+        RosterLine {
+            index,
+            name: format!("p{index}"),
+            role: role.as_str(),
+            player_id: live.then(|| format!("1-{}", 1000 + index)),
+            planet: live.then(|| format!("2-{}", 1000 + index)),
+            fleet: live.then(|| format!("9-{}", 1000 + index)),
+            structs: live.then_some(3),
+            alpha_ualpha: live.then_some(2_000_000.0),
+            ore: live.then_some(5.0),
+            charge: live.then_some(index as u64),
+        }
+    }
+
+    fn fleet(n: u32) -> Vec<RosterLine> {
+        (1..=n)
+            .map(|i| line(i, if i % 3 == 0 { VPlayerRole::Raider } else { VPlayerRole::Bait }, i % 100 != 0))
+            .collect()
+    }
+
+    #[test]
+    fn roster_at_fleet_scale_is_bounded() {
+        let lines = fleet(2970);
+        let out = render_roster("  ★ primary\n", &lines, None, ROSTER_DEFAULT_LIMIT, 0, &RosterSources::default());
+        let player_rows = out.lines().filter(|l| l.trim_start().starts_with("[idx")).count();
+        assert_eq!(player_rows, ROSTER_DEFAULT_LIMIT);
+        assert!(out.contains("you + 2970 virtual players (2941 on-chain, 29 signup pending)"), "{out}");
+        assert!(out.contains("Players 1–50 of 2970"), "{out}");
+        assert!(out.contains("offset:50, limit:50"), "{out}");
+        assert!(out.len() < 10_000, "roster page is {} bytes", out.len());
+    }
+
+    #[test]
+    fn roster_pages_and_filters_by_role() {
+        let lines = fleet(30);
+        let out = render_roster("", &lines, Some(VPlayerRole::Raider), 4, 8, &RosterSources::default());
+        assert!(out.contains("Role raider: 10 players"), "{out}");
+        assert!(out.contains("Players 9–10 of 10"), "{out}");
+        assert!(out.contains("[idx 27]") && out.contains("[idx 30]"), "{out}");
+        assert!(!out.contains("More:"), "{out}");
+        let past = render_roster("", &lines, None, 10, 99, &RosterSources::default());
+        assert!(past.contains("No players at offset 99 (30 in scope)"), "{past}");
+    }
+
+    #[test]
+    fn roster_totals_count_unread_alpha() {
+        let mut lines = fleet(4);
+        lines[1].alpha_ualpha = None;
+        let out = render_roster("", &lines, None, 10, 0, &RosterSources::default());
+        assert!(out.contains("(1 not yet read)"), "{out}");
+        assert!(out.contains("12 structs"), "{out}");
+        // charges 1..=4: none ready at 20, median of [1,2,3,4] is the upper middle.
+        assert!(out.contains("charge: 0 at ≥20 (mine/refine-ready) · median 3"), "{out}");
+    }
+
+    #[test]
+    fn roster_line_reads_the_snapshot_and_alpha_from_the_cache() {
+        let mut snap = crate::mcp::perception::Snapshot::default();
+        snap.players.insert("1-7".into(), json!({"id":"1-7","planetId":"2-7","fleetId":"9-7"}));
+        snap.planets.insert("2-7".into(), json!({"id":"2-7","land":["5-1","5-2"]}));
+        for sid in ["5-1", "5-2"] {
+            snap.structs.insert(sid.into(), crate::mcp::perception::StructRow { id: sid.into(), owner: "1-7".into(), ..Default::default() });
+        }
+        let cached = crate::mcp::roster_cache::RosterRow {
+            index: Some(7),
+            player_id: "1-7".into(),
+            name: "x".into(),
+            role: "bait".into(),
+            planet_id: Some("2-STALE".into()),
+            fleet_id: None,
+            alpha_ualpha: 3_000_000.0,
+            ore: 0.0,
+            load: 0.0,
+            capacity: 0.0,
+            structs_load: 0.0,
+            charge: 0,
+            last_action_block: 90,
+            fetched_at_ms: 0.0,
+            pfp_attrs: None,
+            chain_name: None,
+            planet_ore: None,
+            mine_eta_s: None,
+            refine_eta_s: None,
+            err: None,
+        };
+        let l = roster_line(7, "x", Some("1-7"), VPlayerRole::Bait, Some(&snap), Some(&cached), 100);
+        assert_eq!(l.planet.as_deref(), Some("2-7"));
+        assert_eq!(l.fleet.as_deref(), Some("9-7"));
+        assert_eq!(l.structs, Some(2));
+        assert_eq!(l.alpha_ualpha, Some(3_000_000.0));
+        // Snapshot holds the player but no grid row: the cache's lastAction.
+        assert_eq!(l.charge, Some(10));
+        snap.grid.insert("1-7".into(), {
+            let mut g = [0u64; 15];
+            g[crate::mcp::perception::GRID_ATTRS.iter().position(|n| *n == "lastAction").unwrap()] = 95;
+            g
+        });
+        let fresh = roster_line(7, "x", Some("1-7"), VPlayerRole::Bait, Some(&snap), Some(&cached), 100);
+        assert_eq!(fresh.charge, Some(5));
+
+        let none = roster_line(7, "x", Some("1-7"), VPlayerRole::Bait, None, Some(&cached), 100);
+        assert_eq!(none.planet.as_deref(), Some("2-STALE"));
+        assert_eq!(none.structs, None);
+        assert_eq!(none.charge, Some(10));
     }
 }
 

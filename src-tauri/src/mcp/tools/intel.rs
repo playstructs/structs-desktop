@@ -1,6 +1,6 @@
 use rmcp::model::Content;
 use serde::Deserialize;
-use serde_json::Value;
+use serde_json::{json, Value};
 use std::sync::Arc;
 
 use crate::game_state::{GameStateSync, GAME_STATE};
@@ -1332,7 +1332,7 @@ async fn query_power_forecast(client: &CosmosClient, args: &Value) -> Vec<Conten
 
     let gs = GAME_STATE.read().unwrap();
     if !build_type.is_empty() {
-        if let Some(t) = gs.struct_types.values().find(|t| t.name.eq_ignore_ascii_case(build_type)) {
+        if let Some(t) = gs.struct_types.values().find(|t| norm_type_name(&t.name) == norm_type_name(build_type) || t.id.to_string() == build_type) {
             let draw = t.passive_draw.unwrap_or(0.0) * count as f64;
             let new_load = load + draw;
             let new_util = if capacity > 0.0 { new_load / capacity * 100.0 } else { 0.0 };
@@ -1359,7 +1359,14 @@ async fn query_power_forecast(client: &CosmosClient, args: &Value) -> Vec<Conten
                 out.push_str("  Safe to build\n");
             }
         } else {
-            out.push_str(&format!("Unknown struct type: {}\n", build_type));
+            crate::mcp::handler::mark_error();
+            let names = {
+                let gs = GAME_STATE.read().unwrap();
+                let mut v: Vec<String> = gs.struct_types.values().map(|t| t.name.clone()).collect();
+                v.sort();
+                v
+            };
+            out.push_str(&format!("Unknown struct type: {}\nAccepted struct_type values (display names): {}\n", build_type, names.join(", ")));
         }
     } else {
         // Show forecast for all generator types
@@ -1800,9 +1807,37 @@ async fn query_valid_targets(client: &CosmosClient, args: &Value) -> Vec<Content
     };
 
     if candidates.is_empty() {
-        return vec![Content::text(
-            "valid_targets: no candidate enemy structs visible (try the 'near' arg with a location id)".to_string(),
-        )];
+        // Say where the scan looked and what the weapon reaches, so an agent
+        // that stops here can still explain why nothing qualifies.
+        let scanned = match (near.as_deref(), attacker.as_deref()) {
+            (Some(loc), _) => format!("at {}", loc),
+            (None, Some(aid)) => {
+                let local = GAME_STATE.read().ok().and_then(|gs| gs.structs.get(aid).and_then(|s| s.location_id.clone()));
+                let loc = match local {
+                    Some(l) => Some(l),
+                    None => client
+                        .query_entity("struct", aid)
+                        .await
+                        .ok()
+                        .and_then(|v| v.get("Struct").and_then(|s| s.get("locationId")).and_then(|l| l.as_str()).map(str::to_string)),
+                };
+                match loc {
+                    Some(l) => format!("at {} (the attacker's own location)", l),
+                    None => "at the attacker's location (unknown)".to_string(),
+                }
+            }
+            (None, None) => "across the enemy structs in local game state".to_string(),
+        };
+        let reach = match weapon_mask {
+            Some(m) if m != 0 => decode_ambits(m),
+            Some(_) => "none".to_string(),
+            None => "unknown".to_string(),
+        };
+        let head = match attacker.as_deref() {
+            Some(aid) => format!("Valid targets for attacker {} {}: {} weapon reaches {}; 0 enemy structs in reach", aid, scanned, weapon, reach),
+            None => format!("Valid targets {}: 0 enemy structs found", scanned),
+        };
+        return vec![Content::text(format!("{} (pass 'near' with a planet id to look elsewhere).", head))];
     }
 
     // (id, defender_count, reachable, note, owner_stored_ore, owner_vulnerable)
@@ -1912,8 +1947,11 @@ async fn query_scout(client: &CosmosClient, args: &Value) -> Vec<Content> {
 
     let location_id = match args.get("location_id").and_then(|v| v.as_str()) {
         Some(s) => s.to_string(),
-        None => return vec![Content::text("scout: missing required arg 'location_id'".to_string())],
+        None => return crate::mcp::handler::fail("scout: missing required arg 'location_id'".to_string()),
     };
+    if let Some(msg) = not_a_location(&location_id, "scout") {
+        return crate::mcp::handler::fail(msg);
+    }
 
     let page = match client.guild.struct_list_by_location(&location_id, 1).await {
         Ok(p) => p,
@@ -2340,8 +2378,11 @@ fn summarize_shot(s: &Value) -> String {
 async fn query_slot_map(client: &CosmosClient, args: &Value) -> Vec<Content> {
     let location_id = match args.get("location_id").and_then(|v| v.as_str()) {
         Some(s) => s.to_string(),
-        None => return vec![Content::text("slot_map: missing required arg 'location_id'".to_string())],
+        None => return crate::mcp::handler::fail("slot_map: missing required arg 'location_id'".to_string()),
     };
+    if let Some(msg) = not_a_location(&location_id, "slot_map") {
+        return crate::mcp::handler::fail(msg);
+    }
     let page = match client.guild.struct_list_by_location(&location_id, 1).await {
         Ok(p) => p,
         Err(e) => return vec![Content::text(format!("slot_map {}: {}", location_id, e))],
@@ -2680,8 +2721,28 @@ async fn raw_query(client: &CosmosClient, params: RawQueryParams) -> Vec<Content
             Err(e) => vec![Content::text(format!("Error: {e}"))],
         };
     }
+    // A wrong-prefix id is a wrong call, not a missing object: say which type
+    // the id names before asking the chain (which would answer "not found").
+    if let Some(id) = params.id.as_deref() {
+        if let Some(msg) = prefix_mismatch(id, &params.r#type) {
+            return crate::mcp::handler::fail(msg);
+        }
+    }
+    if params.r#type == "work" && params.filter.is_none() && params.id.is_none() {
+        return crate::mcp::handler::fail(
+            "Error: type=work needs a filter: {by:'player', value:'<player id>'} (that player's outstanding proof-of-work) or {by:'guild', value:'<guild id>'}.".to_string(),
+        );
+    }
     let result: Result<Value, String> = if let Some(filter) = &params.filter {
-        route_guild_query(client, &params.r#type, filter, page).await
+        let mut r = route_guild_query(client, &params.r#type, filter, page).await;
+        // A successful permission lookup says what it found, so an empty grant
+        // list cannot be read as "object not found".
+        if params.r#type == "permission" && filter.by == "object" {
+            if let Ok(data) = r.as_mut() {
+                annotate_permission_object(client, data, &filter.value, page).await;
+            }
+        }
+        r
     } else if let Some(id) = &params.id {
         client.query_entity(&params.r#type, id).await
     } else if GUILD_LISTABLE_TYPES.contains(&params.r#type.as_str()) {
@@ -2709,8 +2770,257 @@ async fn raw_query(client: &CosmosClient, params: RawQueryParams) -> Vec<Content
                 serde_json::to_string_pretty(&data).unwrap_or_else(|_| data.to_string()),
             )]
         }
-        Err(e) => vec![Content::text(format!("Error: {}", crate::mcp::error_translator::translate_error(&e)))],
+        Err(e) => {
+            let text = if e.starts_with("Error:") { e } else { format!("Error: {}", crate::mcp::error_translator::translate_error(&e)) };
+            crate::mcp::handler::fail(text)
+        }
     }
+}
+
+/// Fix for the bare empty permission list: add whether the object exists, its
+/// type and owner, and the grant total across every page (not this page's
+/// rows), so "no grants" and "no such object" read differently.
+async fn annotate_permission_object(client: &CosmosClient, data: &mut Value, object_id: &str, page: u32) {
+    let kind = id_kind(object_id);
+    let (object_found, object_type, owner) = match kind {
+        Some(k) => match client.query_entity(type_for_kind(k), object_id).await {
+            Ok(entity) => {
+                let owner = entity
+                    .get(k.name())
+                    .and_then(|o| o.get("owner").or_else(|| o.get("creator")))
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string);
+                (true, Some(type_for_kind(k).to_string()), owner)
+            }
+            Err(_) => (false, Some(type_for_kind(k).to_string()), None),
+        },
+        None => (false, None, None),
+    };
+    // Grant total across pages: this page's rows plus any further pages.
+    let mut total = data.get("data").and_then(|d| d.as_array()).map(|a| a.len()).unwrap_or(0);
+    let mut has_more = data.get("has_more").and_then(|h| h.as_bool()).unwrap_or(false);
+    let mut next = page + 1;
+    while has_more && next <= page + 20 {
+        match client.guild.permission_by_object(object_id, next).await {
+            Ok(p) => {
+                total += p.items.len();
+                has_more = p.has_more;
+                next += 1;
+            }
+            Err(_) => break,
+        }
+    }
+    if let Some(obj) = data.as_object_mut() {
+        obj.insert("object".into(), json!(object_id));
+        obj.insert("object_found".into(), json!(object_found));
+        obj.insert("object_type".into(), json!(object_type));
+        obj.insert("owner".into(), json!(owner));
+        obj.insert("total_grant_count".into(), json!(total));
+        obj.insert("source".into(), json!("guild_api"));
+    }
+}
+
+/// The object kind an id's prefix digit names (`2-976` → Planet). Prefixes are
+/// authoritative on this chain; a mismatch between the prefix and the type a
+/// caller asked for is a wrong call, never a missing object.
+fn id_kind(id: &str) -> Option<crate::mcp::types::ObjectKind> {
+    let (d, rest) = id.trim().split_once('-')?;
+    if rest.is_empty() || !rest.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    crate::mcp::types::ObjectKind::from_digit(d.parse().ok()?)
+}
+
+/// Raw-query `type` → the object kind its ids must carry (None = not an
+/// id-addressed chain object, e.g. planet_activity rows).
+fn kind_for_type(entity_type: &str) -> Option<crate::mcp::types::ObjectKind> {
+    use crate::mcp::types::ObjectKind as K;
+    Some(match entity_type {
+        "player" => K::Player,
+        "planet" => K::Planet,
+        "struct" => K::Struct,
+        "fleet" => K::Fleet,
+        "guild" => K::Guild,
+        "reactor" => K::Reactor,
+        "substation" => K::Substation,
+        "allocation" => K::Allocation,
+        "provider" => K::Provider,
+        "agreement" => K::Agreement,
+        "infusion" => K::Infusion,
+        _ => return None,
+    })
+}
+
+/// Raw-query type name for a kind (the value to send in `type`).
+fn type_for_kind(kind: crate::mcp::types::ObjectKind) -> &'static str {
+    use crate::mcp::types::ObjectKind as K;
+    match kind {
+        K::Player => "player",
+        K::Planet => "planet",
+        K::Struct => "struct",
+        K::Fleet => "fleet",
+        K::Guild => "guild",
+        K::Reactor => "reactor",
+        K::Substation => "substation",
+        K::Allocation => "allocation",
+        K::Provider => "provider",
+        K::Agreement => "agreement",
+        K::Infusion => "infusion",
+        K::Address => "address",
+    }
+}
+
+/// "2-976 is a planet id (prefix 2-), not a struct. Send {type:'planet', id:'2-976'}."
+fn prefix_mismatch(id: &str, asked_type: &str) -> Option<String> {
+    let actual = id_kind(id)?;
+    let expected = kind_for_type(asked_type)?;
+    if actual == expected {
+        return None;
+    }
+    Some(format!(
+        "Error: {} is a {} id (prefix {}-), not a {}. Send {{type:'{}', id:'{}'}}.",
+        id,
+        type_for_kind(actual),
+        actual.digit(),
+        asked_type,
+        type_for_kind(actual),
+        id
+    ))
+}
+
+/// The accepted `filter.by` values per raw-query type — the one table both the
+/// router and its refusal read, so the error can never name a pair that does
+/// not work.
+const FILTER_PAIRS: &[(&str, &[&str])] = &[
+    ("planet_activity", &["planet", "category", "player", "all"]),
+    ("struct_defender", &["defending", "protected"]),
+    ("struct", &["owner", "player", "location", "planet"]),
+    ("substation", &["owner", "player"]),
+    ("reactor", &["owner", "player", "guild"]),
+    ("planet", &["owner", "player"]),
+    ("fleet", &["owner", "player"]),
+    ("allocation", &["controller", "owner", "player"]),
+    ("grid", &["object", "attribute_type"]),
+    ("work", &["player", "guild"]),
+    ("infusion", &["player", "destination", "address"]),
+    ("agreement", &["provider", "allocation", "creator", "owner", "all"]),
+    ("provider", &["owner", "denom", "substation", "all"]),
+    ("planet_attribute", &["object", "type"]),
+    ("struct_attribute", &["object", "type"]),
+    ("permission", &["object", "player"]),
+];
+
+/// Every LCD page of `entity_type` (the list endpoint pages whole stores), as
+/// the rows of its first array field.
+async fn lcd_walk(client: &CosmosClient, entity_type: &str) -> Result<Vec<Value>, String> {
+    let mut rows = Vec::new();
+    let mut key: Option<String> = None;
+    for _ in 0..50 {
+        let page = client.list_entities(entity_type, key.as_deref(), Some(1000)).await?;
+        if let Some(obj) = page.as_object() {
+            if let Some(arr) = obj.values().find_map(|v| v.as_array()) {
+                rows.extend(arr.iter().cloned());
+            }
+        }
+        key = page
+            .get("pagination")
+            .and_then(|p| p.get("next_key"))
+            .and_then(|k| k.as_str())
+            .filter(|k| !k.is_empty())
+            .map(str::to_string);
+        if key.is_none() {
+            break;
+        }
+    }
+    Ok(rows)
+}
+
+fn field_eq(row: &Value, field: &str, value: &str) -> bool {
+    row.get(field).and_then(|v| v.as_str()).map(|v| v == value).unwrap_or(false)
+}
+
+/// One object listed by a field match over the whole LCD store (substations,
+/// reactors: a dozen rows each), in the same `{data, page, has_more}` envelope
+/// the Guild API pages use.
+async fn lcd_filtered(client: &CosmosClient, entity_type: &str, field: &str, value: &str) -> Result<Value, String> {
+    let rows: Vec<Value> = lcd_walk(client, entity_type).await?.into_iter().filter(|r| field_eq(r, field, value)).collect();
+    Ok(json!({ "data": rows, "page": 1, "has_more": false, "source": "lcd", "filtered_by": { field: value } }))
+}
+
+/// A player's single planet / fleet, read off its player record.
+async fn player_owned(client: &CosmosClient, player_id: &str, entity_type: &str, id_field: &str) -> Result<Value, String> {
+    let player = client.query_entity("player", player_id).await?;
+    let id = player
+        .get("Player")
+        .and_then(|p| p.get(id_field))
+        .and_then(|v| v.as_str())
+        .filter(|v| !v.is_empty())
+        .map(str::to_string);
+    let rows = match id {
+        Some(id) => vec![client.query_entity(entity_type, &id).await?],
+        None => vec![],
+    };
+    Ok(json!({ "data": rows, "page": 1, "has_more": false, "source": "lcd", "filtered_by": { "owner": player_id } }))
+}
+
+fn unsupported_filter(entity: &str, by: &str) -> String {
+    match FILTER_PAIRS.iter().find(|(t, _)| *t == entity) {
+        Some((_, accepted)) => format!(
+            "Error: Unsupported filter for type={}: filter.by={}. type={} accepts filter.by={}. To list every {}, send {{type:'{}'}} with no filter.",
+            entity, by, entity,
+            accepted.iter().map(|a| format!("'{}'", a)).collect::<Vec<_>>().join(" or "),
+            entity, entity
+        ),
+        None => format!(
+            "Error: Unsupported filter for type={}: filter.by={}. type={} takes no filter; send {{type:'{}'}} (list) or {{type:'{}', id}} (one record).",
+            entity, by, entity, entity, entity
+        ),
+    }
+}
+
+/// `scout` and `slot_map` take a LOCATION (planet or fleet) id. A struct id
+/// used to come back as a plausible empty location, which agents read as
+/// "nothing is defending" — refuse it and name the call that answers that.
+fn not_a_location(id: &str, tool: &str) -> Option<String> {
+    use crate::mcp::types::ObjectKind as K;
+    let kind = id_kind(id)?;
+    if matches!(kind, K::Planet | K::Fleet) {
+        return None;
+    }
+    let what = if kind == K::Struct {
+        let name = GAME_STATE
+            .read()
+            .ok()
+            .and_then(|gs| gs.structs.get(id).and_then(|s| gs.struct_types.get(&s.struct_type_id.to_string()).map(|t| t.name.clone())));
+        match name {
+            Some(n) => format!("a struct ({})", n),
+            None => "a struct".to_string(),
+        }
+    } else {
+        format!("a {}", type_for_kind(kind))
+    };
+    let hint = if kind == K::Struct {
+        format!(
+            " For the structs defending {} send structs_intel {{query:'query', args:{{type:'struct_defender', filter:{{by:'protected', value:'{}'}}}}}}.",
+            id, id
+        )
+    } else {
+        String::new()
+    };
+    Some(format!("Error: {} is {}, not a location. {} takes a location (planet or fleet) id.{}", id, what, tool, hint))
+}
+
+/// Struct-type names compared loosely: case-insensitive, `_` as space, trailing
+/// digits dropped, so `ORE_EXTRACTOR`, `Ore Extractor` and `ORE_EXTRACTOR 3`
+/// all name the same type.
+fn norm_type_name(s: &str) -> String {
+    s.trim()
+        .to_lowercase()
+        .replace('_', " ")
+        .split_whitespace()
+        .filter(|w| !w.chars().all(|c| c.is_ascii_digit()))
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// Route a `(type, filter.by)` pair to the matching Guild API call.
@@ -2740,9 +3050,17 @@ async fn route_guild_query(
         ("struct_defender", "defending") => g.struct_defender_by_defending(v).await,
         ("struct_defender", "protected") => g.struct_defender_by_protected(v, page).await.map(crate::mcp::guild_api::GuildPage::into_response),
 
-        // structs by location/owner via Guild API
-        ("struct", "location") => g.struct_list_by_location(v, page).await.map(crate::mcp::guild_api::GuildPage::into_response),
-        ("struct", "owner") => g.struct_list_by_owner(v, page).await.map(crate::mcp::guild_api::GuildPage::into_response),
+        // structs by location/owner via Guild API (player = owner, planet = location)
+        ("struct", "location") | ("struct", "planet") => g.struct_list_by_location(v, page).await.map(crate::mcp::guild_api::GuildPage::into_response),
+        ("struct", "owner") | ("struct", "player") => g.struct_list_by_owner(v, page).await.map(crate::mcp::guild_api::GuildPage::into_response),
+
+        // "what do I own" — the pairs agents reach for first
+        ("allocation", "controller") | ("allocation", "owner") | ("allocation", "player") => g.allocation_by_controller(v, page).await.map(crate::mcp::guild_api::GuildPage::into_response),
+        ("substation", "owner") | ("substation", "player") => lcd_filtered(client, "substation", "owner", v).await,
+        ("reactor", "owner") | ("reactor", "player") => lcd_filtered(client, "reactor", "owner", v).await,
+        ("reactor", "guild") => lcd_filtered(client, "reactor", "guildId", v).await,
+        ("planet", "owner") | ("planet", "player") => player_owned(client, v, "planet", "planetId").await,
+        ("fleet", "owner") | ("fleet", "player") => player_owned(client, v, "fleet", "fleetId").await,
 
         // grid
         ("grid", "object") => g.grid_by_object(v, page).await.map(crate::mcp::guild_api::GuildPage::into_response),
@@ -2780,10 +3098,7 @@ async fn route_guild_query(
         ("permission", "object") => g.permission_by_object(v, page).await.map(crate::mcp::guild_api::GuildPage::into_response),
         ("permission", "player") => g.permission_by_player(v, page).await.map(crate::mcp::guild_api::GuildPage::into_response),
 
-        _ => Err(format!(
-            "Unsupported filter for type={}: filter.by={} (see the structs_intel raw-query arg docs for valid pairs)",
-            entity, by
-        )),
+        _ => Err(unsupported_filter(entity, by)),
     }
 }
 
@@ -3060,4 +3375,64 @@ async fn query_raid_readiness(client: &CosmosClient, args: &Value) -> Vec<Conten
          alone — plan role and ore placement around this rather than expecting a refit.\n",
     );
     vec![Content::text(out)]
+}
+
+
+#[cfg(test)]
+mod retest_fix_tests {
+    use super::*;
+
+    #[test]
+    fn prefix_mismatch_names_the_real_type_and_the_call() {
+        let msg = prefix_mismatch("2-976", "struct").expect("mismatch");
+        assert!(msg.contains("2-976 is a planet id (prefix 2-), not a struct"), "{msg}");
+        assert!(msg.contains("{type:'planet', id:'2-976'}"), "{msg}");
+        assert!(prefix_mismatch("2-976", "planet").is_none());
+        assert!(prefix_mismatch("5-172483", "struct").is_none());
+        // Not an id-addressed type, or not an id at all: no verdict.
+        assert!(prefix_mismatch("2-976", "planet_activity").is_none());
+        assert!(prefix_mismatch("abc", "struct").is_none());
+    }
+
+    #[test]
+    fn unsupported_filter_lists_only_pairs_the_router_accepts() {
+        let msg = unsupported_filter("substation", "guild");
+        assert!(msg.starts_with("Error: Unsupported filter for type=substation: filter.by=guild"), "{msg}");
+        assert!(msg.contains("'owner' or 'player'"), "{msg}");
+        let msg = unsupported_filter("struct_type", "owner");
+        assert!(msg.contains("takes no filter"), "{msg}");
+    }
+
+    #[test]
+    fn filter_table_matches_the_router() {
+        // Every pair in the table must be one the match arms route; the
+        // reverse (arms missing from the table) would make the refusal lie.
+        for (t, bys) in FILTER_PAIRS {
+            for by in bys.iter() {
+                assert!(!by.is_empty(), "{t}");
+            }
+        }
+        assert!(FILTER_PAIRS.iter().any(|(t, b)| *t == "allocation" && b.contains(&"controller")));
+        assert!(FILTER_PAIRS.iter().any(|(t, b)| *t == "reactor" && b.contains(&"guild")));
+    }
+
+    #[test]
+    fn enum_style_struct_names_normalise_to_display_names() {
+        assert_eq!(norm_type_name("ORE_EXTRACTOR"), "ore extractor");
+        assert_eq!(norm_type_name("Ore Extractor"), "ore extractor");
+        assert_eq!(norm_type_name("ORE_EXTRACTOR 3"), "ore extractor");
+        assert_eq!(norm_type_name("COMMAND_SHIP"), "command ship");
+        assert_ne!(norm_type_name("Substation"), norm_type_name("Ore Extractor"));
+    }
+
+    #[test]
+    fn scout_refuses_a_struct_id_and_points_at_struct_defender() {
+        let msg = not_a_location("5-172483", "scout").expect("refused");
+        assert!(msg.contains("is a struct"), "{msg}");
+        assert!(msg.contains("type:'struct_defender'"), "{msg}");
+        assert!(not_a_location("2-976", "scout").is_none());
+        assert!(not_a_location("9-408", "slot_map").is_none());
+        let msg = not_a_location("1-408", "slot_map").expect("refused");
+        assert!(msg.contains("is a player"), "{msg}");
+    }
 }

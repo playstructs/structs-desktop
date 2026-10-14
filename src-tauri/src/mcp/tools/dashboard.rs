@@ -128,15 +128,24 @@ fn build_sync(
     registry: &Arc<TaskRegistry>,
     params: &DashboardParams,
 ) -> Result<SyncOutput, Vec<Content>> {
+    // Who owns each queued task's object, read from the perception snapshot
+    // BEFORE the GAME_STATE guard is taken so the two locks never nest.
+    let task_ids: Vec<String> = registry.tasks.iter().map(|e| e.key().clone()).collect();
+    let snapshot_owners = snapshot_owners(&task_ids);
+
     let gs = GAME_STATE.read().unwrap();
 
+    // An empty player_id is the same as none: the dashboard always renders the
+    // signed-in player (the schema no longer requires the argument).
     let player_id = params
         .player_id
         .clone()
+        .filter(|p| !p.trim().is_empty())
         .or_else(|| gs.player_id.clone())
         .unwrap_or_default();
 
     if player_id.is_empty() {
+        crate::mcp::handler::mark_error();
         return Err(vec![Content::text(
             "No player yet — nothing to show.\n\
             \n\
@@ -152,6 +161,34 @@ fn build_sync(
     }
 
     let mut out = String::new();
+
+    // The hasher registry is the whole install's PoW queue: at fleet scale
+    // that is thousands of virtual-player tasks. Split it into the signed-in
+    // player's own work and everyone else's before rendering anything.
+    let me_id = gs.player_id.clone().unwrap_or_default();
+    let is_own = |oid: &str| -> bool {
+        gs.structs.contains_key(oid)
+            || gs.fleet_id.as_deref() == Some(oid)
+            || gs.planet_id.as_deref() == Some(oid)
+            || crate::hasher::vplayer_hash(oid).map(|(i, _)| i == 0).unwrap_or(false)
+            || snapshot_owners.get(oid).map(|o| *o == me_id).unwrap_or(false)
+    };
+    let mut own_task_count = 0usize;
+    let mut own_external = Vec::new();
+    let mut team: Vec<(String, String)> = Vec::new();
+    for entry in registry.tasks.iter() {
+        let oid = entry.key();
+        if !is_own(oid) {
+            let snap = entry.value().snapshot();
+            team.push((snap.task_type.unwrap_or_else(|| "?".into()), snap.status));
+            continue;
+        }
+        own_task_count += 1;
+        // Own struct tasks print inline under Structs.
+        if !gs.structs.contains_key(oid) {
+            own_external.push(entry.value().snapshot());
+        }
+    }
 
     if gs.player_id.as_deref() == Some(&player_id) {
         // ── Header ──
@@ -330,16 +367,13 @@ fn build_sync(
         }
 
         // ── Hash Tasks (not tied to structs) ──
-        let orphan_tasks: Vec<_> = registry
-            .tasks
-            .iter()
-            .filter(|entry| !gs.structs.contains_key(entry.key()))
-            .collect();
-        if !orphan_tasks.is_empty() {
+        // Only the signed-in player's own objects are listed; everyone else's
+        // collapses into one count.
+        if !own_external.is_empty() || !team.is_empty() {
             out.push('\n');
             out.push_str("Hash Tasks (external):\n");
-            for entry in &orphan_tasks {
-                let snap = entry.value().snapshot();
+            own_external.sort_by(|a, b| a.object_id.cmp(&b.object_id));
+            for snap in &own_external {
                 let task_type = snap.task_type.as_deref().unwrap_or("?");
                 let hr = if snap.estimated_hashrate > 1000.0 {
                     format!("{:.0}M h/s", snap.estimated_hashrate / 1000.0)
@@ -350,6 +384,9 @@ fn build_sync(
                     "  {} {} — {} ({})\n",
                     snap.object_id, task_type, snap.status, hr
                 ));
+            }
+            if !team.is_empty() {
+                out.push_str(&format!("  {}\n", team_queue_line(&team)));
             }
         }
 
@@ -393,6 +430,7 @@ fn build_sync(
             }
         }
     } else {
+        crate::mcp::handler::mark_error();
         out.push_str(&format!(
             "Player {} is not the logged-in player, so the dashboard (which renders local game state) can't show it.\n",
             player_id
@@ -405,7 +443,7 @@ fn build_sync(
         if is_vplayer {
             out.push_str("→ It's one of your virtual players: use structs_players state {player} for its full state, or structs_players roster for the whole team.\n");
         } else {
-            out.push_str("→ For another player use structs_intel scout / structs_query player; for your own virtual players use structs_players state.\n");
+            out.push_str(&format!("→ For another player read structs_intel {{query:\"query\", args:{{type:\"player\", id:\"{}\"}}}} (or structs_intel scout with their planet); for your own virtual players use structs_players state. Call structs_dashboard with no arguments for the signed-in player.\n", player_id));
         }
     }
 
@@ -423,7 +461,7 @@ fn build_sync(
         .into_iter()
         .collect();
     let me = gs.player_id.clone();
-    let local_task_count = registry.tasks.len();
+    let local_task_count = own_task_count;
 
     Ok(SyncOutput {
         out,
@@ -431,6 +469,91 @@ fn build_sync(
         owned_planets,
         local_task_count,
     })
+}
+
+/// Owner player id of each object the perception snapshot holds a row for
+/// (struct, fleet or planet). Objects it has no row for are simply absent.
+fn snapshot_owners(ids: &[String]) -> std::collections::HashMap<String, String> {
+    crate::mcp::perception::with_snapshot(|s| {
+        ids.iter()
+            .filter_map(|id| {
+                let owner = match s.structs.get(id) {
+                    Some(row) => row.owner.clone(),
+                    None => s
+                        .fleets
+                        .get(id)
+                        .or_else(|| s.planets.get(id))
+                        .and_then(|r| r.get("owner"))
+                        .and_then(|o| o.as_str())
+                        .unwrap_or_default()
+                        .to_string(),
+                };
+                (!owner.is_empty()).then(|| (id.clone(), owner))
+            })
+            .collect()
+    })
+    .unwrap_or_default()
+}
+
+/// One line for everyone else's PoW queue: total, then each status with its
+/// task-type split, largest first — e.g.
+/// `team queue: 1370 tasks — 1370 waiting [668 MINE, 702 REFINE]`.
+fn team_queue_line(tasks: &[(String, String)]) -> String {
+    use std::collections::BTreeMap;
+    let mut by_status: BTreeMap<&str, BTreeMap<&str, usize>> = BTreeMap::new();
+    for (task_type, status) in tasks {
+        *by_status.entry(status.as_str()).or_default().entry(task_type.as_str()).or_default() += 1;
+    }
+    let mut groups: Vec<(&str, usize, String)> = by_status
+        .into_iter()
+        .map(|(status, types)| {
+            let n: usize = types.values().sum();
+            let split = types
+                .iter()
+                .map(|(t, c)| format!("{} {}", c, t))
+                .collect::<Vec<_>>()
+                .join(", ");
+            (status, n, split)
+        })
+        .collect();
+    groups.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(b.0)));
+    let parts = groups
+        .iter()
+        .map(|(status, n, split)| format!("{} {} [{}]", n, status, split))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "team queue: {} tasks — {} (virtual players' work; structs_hash list for detail)",
+        tasks.len(),
+        parts
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::team_queue_line;
+
+    fn t(kind: &str, status: &str, n: usize) -> Vec<(String, String)> {
+        vec![(kind.to_string(), status.to_string()); n]
+    }
+
+    #[test]
+    fn team_queue_collapses_to_one_line() {
+        let mut tasks = t("MINE", "waiting", 668);
+        tasks.extend(t("REFINE", "waiting", 702));
+        let line = team_queue_line(&tasks);
+        assert!(line.starts_with("team queue: 1370 tasks — 1370 waiting [668 MINE, 702 REFINE]"), "{line}");
+        assert!(!line.contains('\n'));
+    }
+
+    #[test]
+    fn team_queue_orders_statuses_by_size() {
+        let mut tasks = t("REFINE", "running", 2);
+        tasks.extend(t("MINE", "waiting", 5));
+        tasks.extend(t("MINE", "running", 1));
+        let line = team_queue_line(&tasks);
+        assert!(line.contains("8 tasks — 5 waiting [5 MINE], 3 running [1 MINE, 2 REFINE]"), "{line}");
+    }
 }
 
 // Alpha / ore / power all print through the shared ladder in

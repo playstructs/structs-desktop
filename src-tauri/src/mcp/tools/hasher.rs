@@ -24,6 +24,8 @@ pub struct HashParams {
     // ── config command ──
     /// Master on/off for the whole hashing system.
     pub enabled: Option<bool>,
+    /// Required (true) with `enabled: false`, which cancels every running task.
+    pub confirm: Option<bool>,
     /// Engine preference: "auto" | "cpu" | "gpu".
     pub engine: Option<String>,
     /// DIFFICULTY_START — the difficulty a worker waits for before grinding.
@@ -256,6 +258,12 @@ pub async fn execute(
             // tasks, and pause the webapp TaskManager so it stops spawning. On
             // enable: lift the gate and resume the manager.
             if let Some(enabled) = params.enabled {
+                if !enabled && params.confirm != Some(true) {
+                    return crate::mcp::handler::fail(format!(
+                        "Error: config enabled:false stops all hashing and cancels {} running task(s); not applied. Send it again with confirm:true only if the user asked for that.",
+                        registry.tasks.len()
+                    ));
+                }
                 hasher::set_hash_enabled(enabled);
                 if !enabled {
                     let n = registry.tasks.len();
