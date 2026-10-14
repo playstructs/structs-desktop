@@ -152,6 +152,8 @@ pub async fn execute(
                             index: None,
                             role: None,
                             guild_id: None,
+                            limit: None,
+                            offset: None,
                         },
                     )
                     .await

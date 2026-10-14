@@ -1790,6 +1790,8 @@ pub async fn terminal_fleet_move(
             index: None,
             role: None,
             guild_id: None,
+            limit: None,
+            offset: None,
         },
     )
     .await;
@@ -1842,6 +1844,8 @@ pub async fn terminal_player_explore(
             index: None,
             role: None,
             guild_id: None,
+            limit: None,
+            offset: None,
         },
     )
     .await;

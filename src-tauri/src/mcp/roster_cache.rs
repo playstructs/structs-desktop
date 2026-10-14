@@ -421,7 +421,7 @@ pub fn snapshot_json() -> Value {
 /// and `charge = height - lastAction` then clamps to 0 for EVERY player: a
 /// roster of full batteries drawn empty. The perception snapshot carries the
 /// LCD's height and is refreshed regardless of sign-in, so it is the fallback.
-fn chain_height() -> u64 {
+pub fn chain_height() -> u64 {
     let session = crate::game_state::GAME_STATE
         .read()
         .map(|g| g.current_block_height)
@@ -430,6 +430,11 @@ fn chain_height() -> u64 {
         return session;
     }
     crate::mcp::perception::with_snapshot(|s| s.height).unwrap_or(0)
+}
+
+/// Whether a sweep is running right now.
+pub fn is_sweeping() -> bool {
+    SWEEP_IN_FLIGHT.load(Ordering::Relaxed)
 }
 
 /// Look up a cached row (for mass-action planning).
