@@ -1,4 +1,23 @@
-# Structs.app 0.1.431.1 — retest build notes for tracingviolet
+# Structs.app 0.1.431.x — retest build notes for tracingviolet
+
+## 0.1.431.2 (tag `v0.1.431.2`, app version `0.1.431-2`) — two completions
+
+Your retest feedback on `0.1.431-1` found two gaps; both are closed here and
+nothing else changed:
+
+- **Fix 2:** five `structs_intel` missing-argument refusals (`planet_history`,
+  `simulate`, `is_active`, and both `metric_trend` ones) returned without
+  `isError: true`. They now set it directly, and the backstop also matches the
+  generic "missing required arg" / "missing '…'" shapes.
+  Done-when: `structs_intel planet_history` with no `planet_id` returns
+  `isError: true`.
+- **Fix 7:** `player_id` is removed from the published `structs_dashboard`
+  schema (`properties: {}`), as your ticket proposed. The server still accepts
+  it for older clients and still refuses a foreign id with `isError: true`.
+  Done-when: `tools/list` shows no `player_id` on `structs_dashboard`.
+
+Everything below describes 0.1.431.1 and still applies.
+
 
 Branch `0.1.431.1`, cut from the exact commit tagged `v0.1.431` (the build the
 September sweep ran on), carrying **only** the twelve fixes from the Agent
