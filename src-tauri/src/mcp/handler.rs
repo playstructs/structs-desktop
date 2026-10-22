@@ -62,9 +62,7 @@ impl StructsMcpHandler {
                 "Full player overview for the signed-in player: state, power, structs, fleet, active hash tasks, resources. Takes no arguments. For another player use structs_intel {query:\"query\", args:{type:\"player\", id:\"<player id>\"}}; for your own virtual players use structs_players state.",
                 schema(serde_json::json!({
                     "type": "object",
-                    "properties": {
-                        "player_id": { "type": "string", "description": "Optional. Omit it: the dashboard always shows the signed-in player and ignores other ids." }
-                    }
+                    "properties": {}
                 })),
             ).annotate(ToolAnnotations { read_only_hint: Some(true), ..Default::default() }),
             Tool::new(
@@ -301,6 +299,8 @@ fn looks_like_refusal(content: &[Content]) -> bool {
     content.first().and_then(|c| c.as_text()).map(|t| {
         let s = t.text.trim_start();
         PREFIXES.iter().any(|p| s.starts_with(p))
+            || s.contains("missing required arg")
+            || s.contains(": missing '")
             || s.contains("is not the logged-in player")
             || s.contains("isn't raidable")
             || s.contains("no roster player matches")
@@ -568,6 +568,8 @@ mod is_error_tests {
         assert!(looks_like_refusal(&text("Player 1-18 is not the logged-in player, so the dashboard can't show it.")));
         assert!(looks_like_refusal(&text("raid: fleet_id (this player's fleet) and target_id (planet) required.")));
         assert!(looks_like_refusal(&text("planet 2-1 isn't raidable right now")));
+        assert!(looks_like_refusal(&text("planet_history: missing required arg 'planet_id' (e.g. '2-5')")));
+        assert!(looks_like_refusal(&text("metric_trend: missing 'metric'")));
     }
 
     #[test]
@@ -608,6 +610,8 @@ mod surface_tests {
     fn dashboard_takes_no_required_arguments() {
         let t = tool("structs_dashboard");
         assert!(t.input_schema.get("required").is_none(), "player_id must not be required");
+        let props = t.input_schema.get("properties").and_then(|p| p.as_object()).cloned().unwrap_or_default();
+        assert!(props.is_empty(), "the published dashboard schema must expose no arguments: {props:?}");
         assert!(desc("structs_dashboard").contains("Takes no arguments"));
         assert!(!desc("structs_dashboard").contains("1-18"));
     }

@@ -354,7 +354,7 @@ async fn query_simulate(client: &CosmosClient, args: &Value) -> Vec<Content> {
 
     let attacker_id = match args.get("attacker").and_then(|v| v.as_str()) {
         Some(s) => s,
-        None => return vec![Content::text("simulate: missing required arg 'attacker' (a struct id — yours or a virtual player's).".to_string())],
+        None => return crate::mcp::handler::fail("simulate: missing required arg 'attacker' (a struct id — yours or a virtual player's).".to_string()),
     };
 
     // Resolve the attacker's (struct type id, operating ambit). Prefer the synced
@@ -1569,7 +1569,7 @@ fn format_power(milliwatts: f64) -> String {
 async fn query_planet_history(client: &CosmosClient, args: &Value) -> Vec<Content> {
     let planet_id = match args.get("planet_id").and_then(|v| v.as_str()) {
         Some(s) => s.to_string(),
-        None => return vec![Content::text("planet_history: missing required arg 'planet_id' (e.g. '2-5')".to_string())],
+        None => return crate::mcp::handler::fail("planet_history: missing required arg 'planet_id' (e.g. '2-5')".to_string()),
     };
     let window_minutes = args.get("window_minutes").and_then(|v| v.as_u64()).unwrap_or(60);
 
@@ -2417,7 +2417,7 @@ async fn query_slot_map(client: &CosmosClient, args: &Value) -> Vec<Content> {
 async fn query_is_active(client: &CosmosClient, args: &Value) -> Vec<Content> {
     let player_id = match args.get("player_id").and_then(|v| v.as_str()) {
         Some(s) => s.to_string(),
-        None => return vec![Content::text("is_active: missing required arg 'player_id'".to_string())],
+        None => return crate::mcp::handler::fail("is_active: missing required arg 'player_id'".to_string()),
     };
     let current_block = GAME_STATE.read().unwrap().current_block_height;
     match client.guild.player_last_action_block(&player_id).await {
@@ -2514,11 +2514,11 @@ async fn query_market(client: &CosmosClient, args: &Value) -> Vec<Content> {
 async fn query_metric_trend(client: &CosmosClient, args: &Value) -> Vec<Content> {
     let metric = match args.get("metric").and_then(|v| v.as_str()) {
         Some(s) => s.to_string(),
-        None => return vec![Content::text("metric_trend: missing 'metric'".to_string())],
+        None => return crate::mcp::handler::fail("metric_trend: missing 'metric'".to_string()),
     };
     let object = match args.get("object").and_then(|v| v.as_str()) {
         Some(s) => s.to_string(),
-        None => return vec![Content::text("metric_trend: missing 'object'".to_string())],
+        None => return crate::mcp::handler::fail("metric_trend: missing 'object'".to_string()),
     };
     let window = args.get("window_blocks").and_then(|v| v.as_u64()).unwrap_or(100) as i64;
 
