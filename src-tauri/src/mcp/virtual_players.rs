@@ -96,29 +96,131 @@ fn default_auto_name() -> bool {
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct VirtualPlayerStore {
+    /// The primary player these virtual players were created under. They are
+    /// HD-derived from THAT account's mnemonic, so they mean nothing to any
+    /// other account signed into the same install — the registry is scoped
+    /// per account (`virtual_players.<player id>.json`), and the legacy
+    /// unscoped file is adopted once, by the account it belongs to.
+    #[serde(default)]
+    pub owner: Option<String>,
     pub players: Vec<VirtualPlayer>,
+}
+
+/// Which account the app is signed into right now, if any.
+fn current_owner() -> Option<String> {
+    crate::game_state::GAME_STATE
+        .read()
+        .ok()
+        .and_then(|g| g.player_id.clone())
+        .filter(|p| !p.trim().is_empty())
+}
+
+/// The registry file for an account; the legacy unscoped name when none.
+fn filename_for(owner: Option<&str>) -> String {
+    match owner {
+        Some(o) => format!("virtual_players.{o}.json"),
+        None => FILENAME.to_string(),
+    }
+}
+
+/// What to do with the legacy unscoped `virtual_players.json` when an
+/// account loads for the first time. `key_matches` is whether every entry's
+/// address re-derives from the signed-in mnemonic (`None` = no key loaded, so
+/// it cannot be checked).
+#[derive(Debug, PartialEq, Eq)]
+enum Legacy {
+    Adopt,
+    Ignore,
+}
+
+fn legacy_disposition(legacy_owner: Option<&str>, current: Option<&str>, key_matches: Option<bool>) -> Legacy {
+    match (legacy_owner, current) {
+        // Already claimed by another account: never adopt.
+        (Some(l), Some(c)) if l != c => Legacy::Ignore,
+        // Claimed by this account, or unclaimed: adopt unless the mnemonic
+        // proves the entries were derived from a different key.
+        _ => match key_matches {
+            Some(false) => Legacy::Ignore,
+            _ => Legacy::Adopt,
+        },
+    }
+}
+
+/// Does every registry entry's address re-derive from the key the native
+/// signer holds? `None` when no key is loaded (or nothing to check).
+fn entries_match_loaded_key(players: &[VirtualPlayer]) -> Option<bool> {
+    if !crate::mcp::native_signer::is_ready() || players.is_empty() {
+        return None;
+    }
+    Some(players.iter().all(|p| {
+        crate::mcp::native_signer::address(p.index).map(|a| a == p.address).unwrap_or(false)
+    }))
+}
+
+/// Re-read the registry for the account that is signed in NOW. Called when
+/// the game window's sign-in changes, so switching accounts never leaves the
+/// previous account's virtual players on the roster.
+pub fn rescope_to_current() {
+    let fresh = VirtualPlayerStore::load();
+    let mut reg = REGISTRY.write().unwrap_or_else(|e| e.into_inner());
+    if reg.owner != fresh.owner || reg.players.len() != fresh.players.len() {
+        eprintln!(
+            "[Structs VPlayers] registry scoped to {} ({} virtual players)",
+            fresh.owner.as_deref().unwrap_or("no account"),
+            fresh.players.len()
+        );
+    }
+    *reg = fresh;
 }
 
 pub static REGISTRY: std::sync::LazyLock<RwLock<VirtualPlayerStore>> =
     std::sync::LazyLock::new(|| RwLock::new(VirtualPlayerStore::load()));
 
 impl VirtualPlayerStore {
-    fn path() -> Option<PathBuf> {
-        crate::mcp::config_store::config_path(FILENAME)
+    fn path_for(owner: Option<&str>) -> Option<PathBuf> {
+        crate::mcp::config_store::config_path(&filename_for(owner))
     }
-
+    fn read_file(path: &PathBuf) -> Option<Self> {
+        let contents = std::fs::read_to_string(path).ok()?;
+        serde_json::from_str(&contents).ok()
+    }
+    /// The registry of the signed-in account. Before any sign-in this is the
+    /// legacy unscoped file (read-only in practice: nothing creates players
+    /// without an account).
     pub fn load() -> Self {
-        let Some(path) = Self::path() else {
-            return Self::default();
-        };
-        match std::fs::read_to_string(&path) {
-            Ok(contents) => serde_json::from_str(&contents).unwrap_or_default(),
-            Err(_) => Self::default(),
-        }
+        let owner = current_owner();
+        Self::load_for(owner.as_deref())
     }
-
+    fn load_for(owner: Option<&str>) -> Self {
+        let Some(o) = owner else {
+            return Self::path_for(None).and_then(|p| Self::read_file(&p)).unwrap_or_default();
+        };
+        if let Some(mut found) = Self::path_for(Some(o)).and_then(|p| Self::read_file(&p)) {
+            found.owner = Some(o.to_string());
+            return found;
+        }
+        // First load for this account: decide what the legacy file is to it.
+        let legacy_path = Self::path_for(None);
+        let legacy = legacy_path.as_ref().and_then(Self::read_file);
+        let mut store = Self { owner: Some(o.to_string()), players: Vec::new() };
+        if let Some(mut legacy) = legacy {
+            if legacy_disposition(legacy.owner.as_deref(), Some(o), entries_match_loaded_key(&legacy.players)) == Legacy::Adopt {
+                store.players = std::mem::take(&mut legacy.players);
+                // Claim the legacy file for this account so the next account to
+                // sign in on this install does not adopt it too.
+                legacy.owner = Some(o.to_string());
+                legacy.players = store.players.clone();
+                if let Some(lp) = &legacy_path {
+                    let _ = serde_json::to_string_pretty(&legacy).map(|j| std::fs::write(lp, j));
+                }
+                let _ = store.save();
+            }
+        }
+        store
+    }
     pub fn save(&self) -> Result<(), String> {
-        let path = Self::path().ok_or("no config dir")?;
+        let owner = self.owner.clone().or_else(current_owner);
+        let path = Self::path_for(owner.as_deref()).ok_or("no config dir")?;
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
         }
@@ -518,4 +620,29 @@ pub async fn spawn_one(
         tlog("launch", Sev::Warn, format!("{name} created; player id pending — the backfill adopts it"));
     }
     Ok(Spawned { index, name, address, player_id, explored })
+}
+
+
+#[cfg(test)]
+mod scope_tests {
+    use super::*;
+
+    #[test]
+    fn registry_file_is_named_per_account() {
+        assert_eq!(filename_for(Some("1-408")), "virtual_players.1-408.json");
+        assert_eq!(filename_for(None), "virtual_players.json");
+    }
+
+    #[test]
+    fn legacy_file_is_adopted_once_and_never_by_another_account() {
+        // Unclaimed legacy file, no key to check: the first account adopts it.
+        assert_eq!(legacy_disposition(None, Some("1-408"), None), Legacy::Adopt);
+        // Claimed by the same account: still its own.
+        assert_eq!(legacy_disposition(Some("1-408"), Some("1-408"), None), Legacy::Adopt);
+        // Claimed by another account: a new account on the same install must not inherit it.
+        assert_eq!(legacy_disposition(Some("1-408"), Some("1-2708"), None), Legacy::Ignore);
+        // Unclaimed, but the signed-in mnemonic does not derive those addresses.
+        assert_eq!(legacy_disposition(None, Some("1-2708"), Some(false)), Legacy::Ignore);
+        assert_eq!(legacy_disposition(None, Some("1-2708"), Some(true)), Legacy::Adopt);
+    }
 }

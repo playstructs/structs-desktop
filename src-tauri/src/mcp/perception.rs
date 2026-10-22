@@ -1335,7 +1335,11 @@ pub fn fed_by() -> &'static str {
 }
 
 pub const GUILD_PAGE_LIMIT: usize = 10_000;
-const GUILD_MAX_PAGES: u32 = 60;
+/// Upper bound on pages per catalog walk — a runaway guard, not a size
+/// estimate. The struct-attribute store passed 600,000 rows in October 2026
+/// (60 pages × 10,000), which turned the old cap of 60 into a hard refusal
+/// of every refresh; a galaxy grows, so the bound must stay well clear of it.
+const GUILD_MAX_PAGES: u32 = 500;
 
 pub(crate) fn snake_to_camel(key: &str) -> String {
     let mut out = String::with_capacity(key.len());
@@ -2084,12 +2088,30 @@ async fn walk_store(
     let mut key: Option<String> = start_key.map(|k| base64::engine::general_purpose::STANDARD.encode(k));
     let mut height = 0;
     let mut server_time = 0.0;
+    let mut limit = PAGE_LIMIT;
     loop {
         let q = match &key {
-            Some(k) => format!("{path}?pagination.limit={PAGE_LIMIT}&pagination.key={}", super::cosmos_client::encode_pagination_key(k)),
-            None => format!("{path}?pagination.limit={PAGE_LIMIT}"),
+            Some(k) => format!("{path}?pagination.limit={limit}&pagination.key={}", super::cosmos_client::encode_pagination_key(k)),
+            None => format!("{path}?pagination.limit={limit}"),
         };
-        let (body, h, st) = client.lcd_get_bulk(&q).await?;
+        let (body, h, st) = match client.lcd_get_bulk(&q).await {
+            Ok(x) => x,
+            // A page too big for the node's query-gas budget is not a dead
+            // store: shrink the page and ask again for the same key.
+            Err(e) if is_query_gas_error(&e) => match next_page_limit_after_gas(limit) {
+                Some(smaller) => {
+                    crate::mcp::telemetry::tlog(
+                        "perception",
+                        crate::mcp::telemetry::Sev::Warn,
+                        format!("{path}: page of {limit} rows exceeded the node's query gas; retrying at {smaller}"),
+                    );
+                    limit = smaller;
+                    continue;
+                }
+                None => return Err(e),
+            },
+            Err(e) => return Err(e),
+        };
         height = height.max(h);
         server_time = f64::max(server_time, st);
         if let Some(arr) = body.get(list_key).and_then(|v| v.as_array()) {
@@ -2106,6 +2128,24 @@ async fn walk_store(
         }
     }
     Ok((rows, height, server_time))
+}
+
+/// The node refused the page for its query-gas budget (not a transport or
+/// not-found failure).
+fn is_query_gas_error(e: &str) -> bool {
+    let l = e.to_ascii_lowercase();
+    l.contains("out of gas") || l.contains("gas limit exceeded")
+}
+
+/// The next, smaller LCD page to try after a query-gas refusal; `None` once
+/// the page is already at the floor (then the store really is unreadable).
+fn next_page_limit_after_gas(limit: u32) -> Option<u32> {
+    const FLOOR: u32 = 2_000;
+    if limit <= FLOOR {
+        None
+    } else {
+        Some((limit / 2).max(FLOOR))
+    }
 }
 
 /// Pull a whole-galaxy snapshot and install it. ~11 requests; the pages run
@@ -2201,6 +2241,22 @@ async fn join_running_refresh() -> Result<Value, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lcd_page_shrinks_on_query_gas_and_stops_at_the_floor() {
+        assert!(is_query_gas_error("rpc error: code = ResourceExhausted desc = out of gas: Query gas limit exceeded"));
+        assert!(!is_query_gas_error("codespace structs code 1050: object not found"));
+        assert_eq!(next_page_limit_after_gas(60_000), Some(30_000));
+        assert_eq!(next_page_limit_after_gas(3_000), Some(2_000));
+        assert_eq!(next_page_limit_after_gas(2_000), None);
+    }
+
+    #[test]
+    fn guild_walk_cap_clears_the_october_2026_store_size() {
+        // 600,000 struct-attribute rows is where the old cap of 60 refused every
+        // refresh; the bound must sit well above the galaxy, not at it.
+        assert!(GUILD_MAX_PAGES as usize * GUILD_PAGE_LIMIT >= 5 * 600_000);
+    }
 
     // Live LCD shapes, captured 2026-09-02 (struct 5-1, player 1-194, planet 2-223).
     fn struct_row_5_1() -> Value {

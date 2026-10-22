@@ -430,6 +430,14 @@ pub async fn sync_game_state(
             .and_then(|engine| engine.assess_threats(&events, &state))
     };
 
+    // An account switch in the game window must re-scope everything keyed by
+    // the signed-in player (the virtual-player registry); detect it here, act
+    // after the lock is released.
+    let new_pid = state.player_id.clone();
+    let account_changed = {
+        let prev = GAME_STATE.read().ok().and_then(|g| g.player_id.clone());
+        new_pid.is_some() && prev != new_pid
+    };
     {
         let mut gs = GAME_STATE.write().map_err(|e| e.to_string())?;
         // The webview's copy of the head is a ~10 s poll; the block heartbeat
@@ -439,6 +447,9 @@ pub async fn sync_game_state(
         if gs.current_block_height < live {
             gs.current_block_height = live;
         }
+    }
+    if account_changed {
+        crate::mcp::virtual_players::rescope_to_current();
     }
 
     if let Some(assess) = assessment {
