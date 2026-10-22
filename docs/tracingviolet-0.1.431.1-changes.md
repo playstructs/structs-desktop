@@ -1,5 +1,21 @@
 # Structs.app 0.1.431.x — retest build notes for tracingviolet
 
+## 0.1.431.3 (tag `v0.1.431.3`, app version `0.1.431-3`) — perception refresh unblocked
+
+Only one change: the per-catalog page cap on the guild snapshot walk rises
+from 60 to 500 pages (`GUILD_MAX_PAGES`, `perception.rs`). The
+struct-attribute store had grown past 600,000 rows, so every refresh refused
+with `walk capped at 60 pages (600000 rows) — refusing a truncated store` and
+the snapshot froze (~block 3090149 from 2026-10-14). The cap is a runaway
+guard, not a size estimate; 500 pages is 5,000,000 rows at the current page
+size. Done-when: `structs_system {command:"perception", set:{refresh:true}}`
+returns `refreshed: true` with a current height, and `fed_by: "guild"`.
+
+The LCD fallback's separate failure (`out of gas: Query gas limit exceeded` on
+the 60,000-row struct-attribute page) is not touched here, as requested; it is
+fixed on our main line by shrinking the page on a gas error.
+
+
 ## 0.1.431.2 (tag `v0.1.431.2`, app version `0.1.431-2`) — two completions
 
 Your retest feedback on `0.1.431-1` found two gaps; both are closed here and

@@ -1335,7 +1335,11 @@ pub fn fed_by() -> &'static str {
 }
 
 pub const GUILD_PAGE_LIMIT: usize = 10_000;
-const GUILD_MAX_PAGES: u32 = 60;
+/// Upper bound on pages per catalog walk — a runaway guard, not a size
+/// estimate. The struct-attribute store passed 600,000 rows in October 2026
+/// (60 pages × 10,000), which turned the old cap of 60 into a hard refusal
+/// of every refresh; a galaxy grows, so the bound must stay well clear of it.
+const GUILD_MAX_PAGES: u32 = 500;
 
 pub(crate) fn snake_to_camel(key: &str) -> String {
     let mut out = String::with_capacity(key.len());
