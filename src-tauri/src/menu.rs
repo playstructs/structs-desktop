@@ -1,5 +1,8 @@
-use tauri::menu::{AboutMetadataBuilder, Menu, MenuBuilder, SubmenuBuilder};
+use tauri::menu::{AboutMetadataBuilder, Menu, MenuBuilder, MenuItemBuilder, SubmenuBuilder};
 use tauri::{AppHandle, Runtime};
+
+/// Menu id for the tutorial launcher. Handled in main.rs `on_menu_event`.
+pub const TUTORIAL_MENU_ID: &str = "launch_tutorial";
 
 const ABOUT_COMMENTS: &str = "In the distant future the species of the galaxy are embroiled in a race for Alpha Matter, the rare and dangerous substance that fuels galactic civilization. Players take command of Structs, a race of sentient machines, and must forge alliances, conquer enemies and expand their influence to control Alpha Matter and the fate of the galaxy.\n\nStructs is a decentralized game in the Cosmos ecosystem, operated and governed by our community of players — ensuring Structs remains online as long as there are players to play it.";
 
@@ -46,14 +49,30 @@ pub fn build<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
             .close_window()
             .build()?;
 
+        // The webapp only offers Combat Training once, at the end of signup
+        // (OrientationEndViewModel). Anyone who skipped it — or who signed up
+        // before it existed — has no way back in, so the desktop app carries
+        // its own entry point.
+        let tutorial_item = MenuItemBuilder::with_id(TUTORIAL_MENU_ID, "Combat Training")
+            .build(app)?;
+        let help_menu = SubmenuBuilder::new(app, "Help")
+            .item(&tutorial_item)
+            .build()?;
+
         return MenuBuilder::new(app)
-            .items(&[&app_menu, &edit_menu, &view_menu, &window_menu])
+            .items(&[&app_menu, &edit_menu, &view_menu, &window_menu, &help_menu])
             .build();
     }
 
     #[cfg(not(target_os = "macos"))]
     {
-        let help_menu = SubmenuBuilder::new(app, "Help").about(Some(about)).build()?;
+        let tutorial_item = MenuItemBuilder::with_id(TUTORIAL_MENU_ID, "Combat Training")
+            .build(app)?;
+        let help_menu = SubmenuBuilder::new(app, "Help")
+            .item(&tutorial_item)
+            .separator()
+            .about(Some(about))
+            .build()?;
         MenuBuilder::new(app).items(&[&help_menu]).build()
     }
 }

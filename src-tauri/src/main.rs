@@ -69,6 +69,25 @@ fn main() {
                 .build(),
         )
         .menu(menu::build)
+        .on_menu_event(|app, event| {
+            use tauri::Manager;
+            if event.id() == menu::TUTORIAL_MENU_ID {
+                // Mirrors the webapp's TutorialMode.launch(): set the session
+                // flag it reads at boot, clear any "just exited" flag, reload.
+                // sessionStorage (not local) so the tutorial never outlives the
+                // app session, matching the webapp's own semantics.
+                if let Some(window) = app.get_webview_window("main") {
+                    let script = r#"try {
+                        sessionStorage.setItem('tutorialActive', '1');
+                        sessionStorage.removeItem('tutorialExited');
+                    } catch (e) {}
+                    location.reload();"#;
+                    if let Err(e) = window.eval(script) {
+                        eprintln!("[Structs Menu] tutorial launch failed: {e}");
+                    }
+                }
+            }
+        })
         .invoke_handler(tauri::generate_handler![
             guild_config::get_active_guild_config,
             guild_config::get_guild_configs,
