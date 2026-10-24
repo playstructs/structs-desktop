@@ -844,6 +844,30 @@ TXQ_EOF
 grep -q "__STRUCTS_TXQ__" "$BUILD_DIR/js/index.js" \
   || { echo "ERROR: txq façade patch did not apply"; exit 1; }
 
+# ── Combat Training offer contract ──
+# frontend/structs-config.js re-offers the tutorial to players who never went
+# through it. It cannot import the webapp's own constants (the bundle keeps them
+# module-private), so it mirrors them by value. If upstream renames any of
+# these, the offer silently never fires — this turns that into a build failure.
+echo "    Verifying Combat Training offer contract..."
+verify_contract() {
+  local file="$1" needle="$2" desc="$3"
+  [ -f "$file" ] || { echo "ERROR: $desc — $file is gone (webapp refactor?); update frontend/structs-config.js"; exit 1; }
+  grep -qF "$needle" "$file" \
+    || { echo "ERROR: $desc — '$needle' not found in $file; update frontend/structs-config.js"; exit 1; }
+}
+TUT="$BUILD_DIR/js/tutorial/TutorialMode.js"
+verify_contract "$TUT" "ACTIVE_KEY = 'tutorialActive'" "TutorialMode active flag"
+verify_contract "$TUT" "EXITED_KEY = 'tutorialExited'" "TutorialMode exited flag"
+TEL="$BUILD_DIR/js/telemetry/OnboardingTelemetry.js"
+verify_contract "$TEL" "SESSION_ID: 'onboardingSessionId'" "onboarding session key"
+verify_contract "$TEL" "'orientation.tutorial_offer'" "tutorial offer step key"
+verify_contract "$BUILD_DIR/js/index.js" "'tutorial.end.ftl_jump'" "tutorial completion step key"
+OFR="$BUILD_DIR/js/view_models/signup/OrientationEndViewModel.js"
+verify_contract "$OFR" "launchTutorial" "offer page Launch button id"
+verify_contract "$OFR" "skipTutorial" "offer page Skip button id"
+verify_contract "$BUILD_DIR/js/controllers/AuthController.js" "orientationEnd()" "Auth.orientationEnd route"
+
 # Clean up .bak files
 find "$BUILD_DIR" -name "*.bak" -delete
 
