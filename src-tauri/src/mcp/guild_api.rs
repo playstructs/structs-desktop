@@ -1292,6 +1292,34 @@ impl GuildApiClient {
     }
     /// Members with identity: `{id, username, pfp, pfp_client_render_attributes,
     /// guild_name, tag, alpha}` — the only bulk source of usernames + alpha.
+    // -- onboarding telemetry (each guild's own database, not chain data) --
+    /// The step catalog of one tutorial design; `[]` for a version the guild
+    /// has never had.
+    pub async fn onboarding_catalog(&self, content_version: &str) -> Result<Value, String> {
+        self.get(&format!("/api/onboarding/catalog/{}", query_esc(content_version))).await
+    }
+    /// Per-step reached / skipped / dropped for one phase (`signup`, `tutorial`).
+    pub async fn onboarding_funnel(&self, content_version: &str, phase: &str, idle_hours: u32) -> Result<Value, String> {
+        self.get(&format!(
+            "/api/onboarding/funnel/{}/{}?idle_hours={idle_hours}",
+            query_esc(content_version),
+            query_esc(phase)
+        ))
+        .await
+    }
+    /// `{offered, completed, declined, left_during_tutorial, in_progress}`.
+    pub async fn onboarding_tutorial_outcome(&self, content_version: &str, idle_hours: u32) -> Result<Value, String> {
+        self.get(&format!(
+            "/api/onboarding/tutorial/outcome/{}?idle_hours={idle_hours}",
+            query_esc(content_version)
+        ))
+        .await
+    }
+    /// Every event of the session in which this player's signup finished.
+    pub async fn onboarding_player(&self, player_id: &str) -> Result<Value, String> {
+        self.get(&format!("/api/onboarding/player/{}", query_esc(player_id))).await
+    }
+
     pub async fn guild_roster(&self, guild_id: &str) -> Result<Value, String> {
         self.get(&format!("/api/guild/{}/roster", guild_id)).await
     }

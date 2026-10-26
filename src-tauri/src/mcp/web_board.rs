@@ -992,6 +992,15 @@ async fn board_invoke(
             )
             .await,
         ),
+        // The Onboarding card: one read over every guild's telemetry.
+        "terminal_onboarding" => from_result(
+            crate::mcp::onboarding::terminal_onboarding(
+                s("version"),
+                body.get("idleHours").and_then(|v| v.as_u64()).map(|n| n as u32),
+                body.get("fresh").and_then(|v| v.as_bool()),
+            )
+            .await,
+        ),
         // The Energy card: a read, the share write, the keep-powered switch.
         "terminal_energy" => from_result(
             crate::mcp::energy_card::terminal_energy(body.get("fresh").and_then(|v| v.as_bool())).await,

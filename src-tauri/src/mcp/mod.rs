@@ -29,6 +29,7 @@ pub mod auto_infuse;
 pub mod auto_sweep;
 pub mod auto_replicate;
 pub mod energy_card;
+pub mod onboarding;
 pub mod rates;
 pub mod game_stats;
 pub mod grass_native;

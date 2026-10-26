@@ -28,6 +28,14 @@
 //! successful [`recover`] when it sees the auth-required answer. Single
 //! flight, rate limited, and never a substitute for the webapp's own login —
 //! the game window keeps doing what it does.
+//!
+//! The same login opens a session on ANY guild's server, not only our own:
+//! the server looks the address up in `player_address` under the guild id the
+//! message names, and that table is chain-indexed, so every guild knows every
+//! player's address. The guild id signed is always OUR guild's. That is how
+//! the onboarding telemetry card reads each guild's own database. Rate limits
+//! are therefore kept per server: a fresh login to one host says nothing
+//! about the session on another.
 
 use serde_json::{json, Value};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -41,7 +49,9 @@ use crate::mcp::telemetry::{tlog, Sev};
 /// retry, instead of the first caller logging in and the rest failing over
 /// to the LCD 70 ms too early (observed on the first build).
 static LOGIN_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-static LAST_ATTEMPT_MS: AtomicU64 = AtomicU64::new(0);
+/// Per guild server (the client's base URL): (last attempt, last success).
+static HOSTS: Mutex<Option<std::collections::HashMap<String, (u64, u64)>>> = Mutex::new(None);
+/// The most recent success on any server, for `health`.
 static LAST_OK_MS: AtomicU64 = AtomicU64::new(0);
 static LOGINS_OK: AtomicU64 = AtomicU64::new(0);
 static LOGINS_FAILED: AtomicU64 = AtomicU64::new(0);
@@ -118,32 +128,44 @@ pub async fn recover(client: &GuildApiClient) -> bool {
     }
     let _guard = LOGIN_LOCK.lock().await;
     let now = now_ms();
+    let host = client.base_url();
+    let (last_attempt, last_ok) = host_state(&host);
     // A login that just succeeded (possibly while we waited for the lock)
     // is our answer: the session is fresh, retry.
-    if now.saturating_sub(LAST_OK_MS.load(Ordering::Relaxed)) < MIN_GAP_MS {
+    if now.saturating_sub(last_ok) < MIN_GAP_MS {
         return true;
     }
     // A login that just FAILED is not retried in a burst.
-    if now.saturating_sub(LAST_ATTEMPT_MS.load(Ordering::Relaxed)) < MIN_GAP_MS {
+    if now.saturating_sub(last_attempt) < MIN_GAP_MS {
         return false;
     }
-    LAST_ATTEMPT_MS.store(now, Ordering::Relaxed);
+    set_host_state(&host, |s| s.0 = now);
     let result = login(client).await;
     match result {
         Ok(()) => {
             LOGINS_OK.fetch_add(1, Ordering::Relaxed);
             LAST_OK_MS.store(now_ms(), Ordering::Relaxed);
+            set_host_state(&host, |s| s.1 = now_ms());
             *LAST_ERROR.lock().unwrap_or_else(|p| p.into_inner()) = None;
-            tlog("guild_auth", Sev::Info, "guild session renewed natively (device key)");
+            tlog("guild_auth", Sev::Info, format!("guild session renewed natively (device key) on {host}"));
             true
         }
         Err(e) => {
             LOGINS_FAILED.fetch_add(1, Ordering::Relaxed);
             *LAST_ERROR.lock().unwrap_or_else(|p| p.into_inner()) = Some(e.clone());
-            tlog("guild_auth", Sev::Warn, format!("native guild login failed: {e}"));
+            tlog("guild_auth", Sev::Warn, format!("native guild login failed on {host}: {e}"));
             false
         }
     }
+}
+
+fn host_state(host: &str) -> (u64, u64) {
+    HOSTS.lock().unwrap_or_else(|p| p.into_inner()).as_ref().and_then(|m| m.get(host).copied()).unwrap_or((0, 0))
+}
+
+fn set_host_state(host: &str, f: impl FnOnce(&mut (u64, u64))) {
+    let mut g = HOSTS.lock().unwrap_or_else(|p| p.into_inner());
+    f(g.get_or_insert_with(Default::default).entry(host.to_string()).or_insert((0, 0)));
 }
 
 pub fn health() -> Value {

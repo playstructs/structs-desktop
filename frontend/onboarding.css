@@ -1,0 +1,69 @@
+/* The onboarding telemetry card (board-terminal-onboarding.js). Tokens only. */
+.ob { text-align: left; display: flex; flex-direction: column; gap: var(--spacing-md); }
+.ob-controls { display: flex; flex-wrap: wrap; gap: var(--spacing-sm) var(--spacing-xxl); align-items: flex-end; }
+#board-layout .ob-controls label.sui-input-text.cfg-field {
+  flex-direction: column; align-items: stretch; justify-content: flex-start; gap: var(--spacing-xs); width: auto; min-width: 0; padding: 0;
+}
+/* The header: the game's status-bar readouts, as the Sounds card draws them. */
+.ob-hud { display: flex; flex-wrap: wrap; align-items: flex-start; gap: var(--spacing-md) var(--spacing-xxxl); padding: var(--spacing-xs) 0; }
+.ob-hud .ob-tile { align-items: flex-start; }
+.ob-hud .ob-tile .fstat-v { font-family: 'ExtremeHazard', sans-serif; font-size: 16px; line-height: 24px; }
+.ob-durations .ob-tile .fstat-v { font-size: 8px; line-height: 16px; }
+.ob-view { display: flex; flex-direction: column; gap: var(--spacing-xl); }
+.ob-block { display: flex; flex-direction: column; gap: var(--spacing-sm); }
+.ob-title { color: var(--text-body); }
+
+/* Tables are rows of cells on one grid per table, so the columns line up
+   without a <table> (and wrap as rows of their own when the card is narrow). */
+.ob-table { display: flex; flex-direction: column; }
+.ob-row { display: grid; align-items: center; gap: var(--spacing-md); padding: var(--spacing-xs) var(--spacing-xs); border-bottom: 1px solid var(--border-subtle); }
+.ob-head { border-bottom: 1px solid var(--border-strong); }
+.ob-funnel .ob-row { grid-template-columns: minmax(18ch, 1.6fr) minmax(8ch, 1fr) repeat(6, minmax(6ch, .5fr)); }
+.ob-slow .ob-row { grid-template-columns: minmax(20ch, 1.6fr) minmax(10ch, 1.4fr) repeat(3, minmax(6ch, .5fr)); }
+.ob-daily .ob-row { grid-template-columns: minmax(11ch, 1fr) repeat(4, minmax(6ch, .5fr)) minmax(8ch, 1fr) minmax(6ch, .5fr); }
+.ob-guilds .ob-row { grid-template-columns: minmax(18ch, 1.6fr) repeat(6, minmax(6ch, .5fr)) minmax(12ch, .8fr); }
+.ob-recent .ob-row { grid-template-columns: minmax(15ch, 1.2fr) minmax(5ch, .4fr) minmax(6ch, .5fr) minmax(7ch, .5fr) minmax(15ch, 1.4fr) repeat(2, minmax(6ch, .4fr)); }
+.ob-c { min-width: 0; color: var(--text-body); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ob-n { text-align: right; font-variant-numeric: tabular-nums; }
+.ob-head .ob-c { color: var(--text-hint); white-space: normal; }
+.ob-step { display: flex; flex-direction: column; }
+.ob-sub { color: var(--text-hint); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ob-link { cursor: pointer; text-decoration: none; }
+.ob-link:hover > span:first-child { color: var(--accent-primary-active); }
+.ob-row.is-quiet .ob-c { color: var(--text-hint); }
+.ob-c.is-bad { color: var(--text-enemy-primary); }
+.ob-c.is-slow { color: var(--text-warning); }
+.ob-out-completed { color: var(--text-player-primary); }
+.ob-out-left { color: var(--text-enemy-primary); }
+.ob-out-declined { color: var(--text-hint); }
+
+/* A bar is the meter's track and fill (structs-cards.css .sc-meter). */
+.ob-bar { position: relative; display: block; height: var(--spacing-md); background: var(--surface-default); border: 1px solid var(--border-subtle); }
+.ob-bar-fill { position: absolute; left: 0; top: 0; bottom: 0; background: var(--accent-primary); }
+.ob-bar.is-time .ob-bar-fill { background: var(--text-warning); }
+.ob-bar.is-aside .ob-bar-fill { background: var(--accent-secondary); }
+
+/* The tutorial's outcome: one stacked strip and its key. */
+.ob-outcome { display: flex; flex-direction: column; gap: var(--spacing-xs); }
+.ob-stack { display: flex; height: var(--spacing-lg); border: 1px solid var(--border-subtle); background: var(--surface-default); }
+.ob-seg { flex: 0 1 0; min-width: var(--spacing-xs); }
+.ob-legend { display: flex; flex-wrap: wrap; gap: var(--spacing-xs) var(--spacing-xl); }
+.ob-key { display: inline-flex; align-items: center; gap: var(--spacing-xs); }
+.ob-swatch { display: inline-block; width: var(--spacing-md); height: var(--spacing-md); }
+.ob-seg-completed { background: var(--accent-primary); }
+.ob-seg-declined { background: var(--accent-secondary); }
+.ob-seg-left_during_tutorial { background: var(--accent-destructive); }
+.ob-seg-in_progress { background: var(--text-warning); }
+.ob-foot { color: var(--text-hint); }
+
+/* A one-wide card (a ⌘K pop-out) keeps the figures that answer "how far, and
+   where do they stop": the bars, Skipped and p90 step aside. */
+.ob { container-type: inline-size; }
+@container (max-width: 600px) {
+  .ob-funnel .ob-row, .ob-slow .ob-row { column-gap: var(--spacing-lg); }
+  .ob-funnel .ob-row { grid-template-columns: minmax(0, 1fr) repeat(4, auto); }
+  .ob-funnel .ob-row > :nth-child(2), .ob-funnel .ob-row > :nth-child(6), .ob-funnel .ob-row > :nth-child(8) { display: none; }
+  .ob-slow .ob-row { grid-template-columns: minmax(0, 1fr) repeat(3, auto); }
+  .ob-slow .ob-row > :nth-child(2) { display: none; }
+  .ob-hud { gap: var(--spacing-md) var(--spacing-xl); }
+}

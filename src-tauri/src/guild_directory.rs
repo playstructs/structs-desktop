@@ -333,6 +333,62 @@ async fn fetch_and_validate_guild(chain: &ChainGuild) -> Result<GuildConfig, Str
     validate_guild_doc(chain, &body)
 }
 
+/// One on-chain guild and the guild API it publishes, for reads that must ask
+/// EVERY guild's own server (onboarding telemetry lives in each guild's
+/// database, not on chain). Looser than `validate_guild_doc` on purpose: a
+/// guild with no GRASS endpoint is refused as game infrastructure, but its
+/// API still answers.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct GuildApiEntry {
+    pub id: String,
+    pub name: String,
+    pub tag: String,
+    /// `None` when the guild publishes no usable API; `error` says why.
+    pub guild_api: Option<String>,
+    pub error: Option<String>,
+}
+
+fn guild_api_entry(chain: &ChainGuild, body: Result<Vec<u8>, String>) -> GuildApiEntry {
+    let mut e = GuildApiEntry { id: chain.id.clone(), name: String::new(), tag: String::new(), guild_api: None, error: None };
+    let doc = body.and_then(|b| serde_json::from_slice::<GuildDoc>(&b).map_err(|err| format!("invalid guild.json: {err}")));
+    match doc {
+        Err(err) => e.error = Some(err),
+        Ok(doc) if doc.guild.id != chain.id => {
+            e.error = Some(format!("guild.json id '{}' does not match chain id '{}'", doc.guild.id, chain.id));
+        }
+        Ok(doc) => {
+            e.name = sanitize_label(&doc.guild.name, 64);
+            e.tag = sanitize_label(&doc.guild.tag, 8);
+            let api = doc.guild.services.guild_api.trim();
+            if api.is_empty() {
+                e.error = Some("no guild API published".into());
+            } else if let Err(err) = validate_service_url(api, &["http", "https"], "guild_api") {
+                e.error = Some(err);
+            } else {
+                e.guild_api = Some(api.trim_end_matches('/').to_string());
+            }
+        }
+    }
+    e
+}
+
+/// Every guild on chain with its published API (or why it has none).
+pub async fn guild_api_directory() -> Result<Vec<GuildApiEntry>, String> {
+    let chain_guilds = fetch_guild_list().await?;
+    let futs = chain_guilds.iter().take(MAX_ENDPOINTS_PER_REFRESH).map(|chain| async move {
+        let body = if chain.endpoint.trim().is_empty() {
+            Err("no endpoint declared".to_string())
+        } else {
+            match validate_service_url(&chain.endpoint, &["http", "https"], "endpoint") {
+                Ok(()) => fetch_capped(&chain.endpoint, "endpoint doc").await,
+                Err(e) => Err(e),
+            }
+        };
+        guild_api_entry(chain, body)
+    });
+    Ok(futures_util::future::join_all(futs).await)
+}
+
 // ── Upsert into persisted configs ───────────────────────────────────────────
 
 /// Merge discovered configs into the persisted set. Matches by guild_id;
@@ -652,6 +708,25 @@ mod tests {
                 "grass_nats_websocket":"{grass}"}}}}}}"#
         )
         .into_bytes()
+    }
+
+    /// Kilgore Crabla (0-4) publishes an API but no GRASS endpoint: refused as
+    /// game infra, still listed for API reads. Imperial One (0-2) publishes
+    /// camelCase `guildApi: ""`, i.e. none.
+    #[test]
+    fn the_api_directory_keeps_guilds_the_infra_check_refuses() {
+        let crab = guild_api_entry(&chain("0-4"), Ok(doc_json("0-4", "https://shell.crab.la/api/", "")));
+        assert!(validate_guild_doc(&chain("0-4"), &doc_json("0-4", "https://shell.crab.la/api/", "")).is_err());
+        assert_eq!(crab.guild_api.as_deref(), Some("https://shell.crab.la/api"));
+        assert_eq!(crab.error, None);
+        let one = guild_api_entry(&chain("0-2"), Ok(br#"{"guild":{"id":"0-2","name":"Imperial One","tag":"ONE","services":{"guildApi":"","reactorApi":""}}}"#.to_vec()));
+        assert_eq!(one.guild_api, None);
+        assert_eq!(one.name, "Imperial One");
+        assert!(one.error.unwrap().contains("no guild API"));
+        let liar = guild_api_entry(&chain("0-3"), Ok(doc_json("0-9", "https://x.example/api", "wss://x.example")));
+        assert_eq!(liar.guild_api, None, "a document claiming another id is not trusted");
+        let down = guild_api_entry(&chain("0-6"), Err("endpoint doc: HTTP 502".into()));
+        assert_eq!(down.error.as_deref(), Some("endpoint doc: HTTP 502"));
     }
 
     /// Verbatim `services` block from https://beta.playstructs.com/guild.json

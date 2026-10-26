@@ -71,7 +71,7 @@
    * fails on it: a new card that nobody filed is a card nobody will find. */
   var CARD_GROUPS = [
     ['Command', ['help', 'next', 'alerts', 'watchlist', 'feed']],
-    ['Explore', ['player', 'record', 'guild', 'members', 'planet', 'map', 'inspector', 'sheet', 'chart', 'people', 'stats']],
+    ['Explore', ['player', 'record', 'guild', 'members', 'planet', 'map', 'inspector', 'sheet', 'chart', 'people', 'stats', 'onboarding']],
     ['Armada', ['replication', 'armada', 'ops', 'build', 'fleet', 'pow', 'tasks', 'solve', 'queue', 'results', 'crew', 'crewpay']],
     ['Industry', ['energy', 'grid', 'brownout', 'halt', 'allocations', 'fuel', 'market', 'book', 'ore', 'banks', 'gt', 'bank', 'wallet', 'deliver']],
     ['War', ['scout', 'tally', 'posture', 'targets', 'raids', 'log', 'grudges', 'vetoes', 'incidents']],
@@ -1575,6 +1575,9 @@
     // One number, one bar, one button. ENERGY used to open the guild grid;
     // GRID still does.
     ENERGY: ['energy'], POWER: ['energy'], HEADROOM: ['energy'],
+    // How far new players get through signup and Combat Training, over
+    // every guild. TELEMETRY because that is what the data is called.
+    ONBOARDING: ['onboarding'], TELEMETRY: ['onboarding'], FUNNEL: ['onboarding'], SIGNUPS: ['onboarding'],
     INVENTORY: ['wallet', 'optid'], OPS: ['health'], CONFIG: ['page', 'config'],
     // What a player has DONE (the tiles) and what their hulls have done (the
     // table). `AWARDS` and `HULLS` because that is what each is called out loud.

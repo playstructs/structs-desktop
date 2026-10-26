@@ -532,6 +532,66 @@ cat > "$FIX" <<'EOF'
       config: { enabled: true, interval_secs: 300, max_per_round: 5, min_share_mw: 4000000, cpu_ceiling: 0.85, pending_per_worker: 4, ceiling: 0, dry_run: false, random_rounds: true, weights: {} },
       snapshots: [{ id: 'bait', weight: 25, n: 40 }, { id: 'productive', weight: 60, n: 120 }, { id: 'raider', weight: 15, n: 22 }],
     },
+    /* The Onboarding card: two guilds answering, one with no API, and a
+     * sample that has timed a few hundred players. Step keys are the real
+     * tutorial-4 catalog (structs-pg onboarding_step). */
+    terminal_onboarding: (function () {
+      function chain(keys, start, keep) {
+        var out = [], n = start;
+        keys.forEach(function (k, i) {
+          var next = keys[i + 1] || null;
+          var reached = Math.round(n);
+          var nextN = next ? Math.round(n * keep(i)) : null;
+          out.push({ key: k, order: i + 1, previous: i ? keys[i - 1] : null, next: next, reached: reached,
+            skipped: k === 'orientation.tutorial_offer' ? 182 : 0,
+            dropped: next ? reached - nextN : null, retained: reached / start, by_guild: { '0-5': reached } });
+          if (next) n = nextN;
+        });
+        return out;
+      }
+      var signup = ['signup.connecting', 'signup.connected', 'signup.incoming_call', 'signup.hr_greeting', 'signup.orientation_brief',
+        'signup.profile', 'signup.profile_confirmed', 'signup.recovery_key_intro', 'signup.recovery_key_create',
+        'signup.recovery_key_confirm', 'signup.submit', 'signup.employee_record'];
+      var tutorial = ['orientation.tutorial_offer', 'tutorial.loading', 'tutorial.intro.welcome', 'tutorial.raid.raiders_attack',
+        'tutorial.raid.cmd_ship_destroyed', 'tutorial.rebuild.deploy_cmd_ship', 'tutorial.defend.press_defend',
+        'tutorial.first_attack.combat', 'tutorial.bomber.combat', 'tutorial.end.completed', 'tutorial.end.ftl_jump'];
+      var s = chain(signup, 2140, function (i) { return [0.99, 0.97, 0.95, 0.98, 0.93, 0.96, 0.9, 0.99, 0.84, 0.97, 0.88][i]; });
+      s.unshift({ key: 'signup.recovery_key_faq', order: 0, previous: null, next: null, reached: 61, skipped: 0, dropped: null, retained: 61 / 2140, by_guild: {} });
+      var t = chain(tutorial, 1102, function (i) { return [0.83, 0.97, 0.9, 0.88, 0.93, 0.95, 0.86, 0.94, 0.99, 1][i]; });
+      var dwell = {};
+      signup.concat(tutorial).forEach(function (k, i) { dwell[k] = { n: 300 - i * 6, p50: 3 + (i * 7) % 41, p90: 9 + (i * 13) % 160, mean: 6 + i }; });
+      dwell['signup.recovery_key_create'] = { n: 288, p50: 74, p90: 310, mean: 120 };
+      dwell['tutorial.first_attack.combat'] = { n: 160, p50: 58, p90: 140, mean: 70 };
+      var now = Date.now(), day = 86400000;
+      return {
+        version: 'tutorial-4', versions: ['tutorial-4', 'tutorial-3'], idle_hours: 24, generated_ms: now,
+        guilds: [
+          { id: '0-1', name: 'Orbital Hydro', tag: 'OH', status: 'ok', error: null, started: 4, signed_up: 1, outcome: { offered: 1, completed: 0, declined: 0, left_during_tutorial: 1, in_progress: 0 }, sampled: 1, untracked: 0 },
+          { id: '0-2', name: 'Imperial One', tag: 'ONE', status: 'no_api', error: 'no guild API published', started: 0, signed_up: 0, outcome: null, sampled: 0, untracked: 0 },
+          { id: '0-5', name: 'SN Corp', tag: 'SN.C', status: 'ok', error: null, started: 2136, signed_up: 1101, outcome: { offered: 1101, completed: 402, declined: 182, left_during_tutorial: 471, in_progress: 46 }, sampled: 812, untracked: 2410 },
+        ],
+        phases: { signup: s, tutorial: t },
+        outcome: { offered: 1102, completed: 402, declined: 182, left_during_tutorial: 472, in_progress: 46 },
+        sample: {
+          sessions: 813,
+          durations: { signup: { n: 813, p50: 212, p90: 640, mean: 300 }, chain_wait: { n: 813, p50: 34, p90: 70, mean: 40 },
+            to_offer: { n: 790, p50: 49, p90: 120, mean: 60 }, decision: { n: 760, p50: 6, p90: 31, mean: 11 },
+            tutorial: { n: 301, p50: 742, p90: 1510, mean: 820 }, total: { n: 301, p50: 1020, p90: 2100, mean: 1180 } },
+          dwell: dwell,
+          stopped: { 'tutorial.first_attack.combat': 61 },
+          outcomes: { completed: 301, declined: 140, left: 330, playing: 30, deciding: 12 },
+          interfaces: { 'structs-webapp': 813 },
+          daily: [0, 1, 2, 3, 4, 5].map(function (i) { return { day: new Date(now - (5 - i) * day).toISOString().slice(0, 10), signed_up: 120 + i * 9, offered: 118 + i * 9, completed: 40 + i * 4, declined: 20 + i }; }),
+          recent: [
+            { player_id: '1-9584', name: 'Kestrel', guild_id: '0-5', started_ms: now - 1500000, last_ms: now - 600000, last_step: 'tutorial.first_attack.combat', outcome: 'playing', signup_s: 190, tutorial_s: null },
+            { player_id: '1-9580', name: '', guild_id: '0-5', started_ms: now - 4000000, last_ms: now - 2000000, last_step: 'tutorial.end.ftl_jump', outcome: 'completed', signup_s: 240, tutorial_s: 801 },
+            { player_id: '1-9571', name: 'Ozymandias', guild_id: '0-5', started_ms: now - 99000000, last_ms: now - 90000000, last_step: 'orientation.tutorial_offer', outcome: 'declined', signup_s: 160, tutorial_s: null },
+          ],
+        },
+        untracked: 2410,
+        crawl: { running: true, finished_ms: now - 200000, guilds: { '0-1': { candidates: 3, team_skipped: 1, fetched: 2, errors: 0, last_error: null }, '0-5': { candidates: 3810, team_skipped: 0, fetched: 1500, errors: 0, last_error: null } } },
+      };
+    })(),
     /* The Energy card. A THIN primary (0.7 kW of room) so the button reads
      * amber, one alpha-priced offer to rent, and a plan for going dark. */
     terminal_energy: {

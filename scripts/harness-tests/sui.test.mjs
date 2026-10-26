@@ -194,6 +194,11 @@ const BUDGET = {
   // Comms: the model is pure data and the cards build with tokens only.
   'board-terminal-chart.js': [0, 0],
   'board-terminal-ops.js': [0, 0],
+  // The Onboarding card: hairlines, the HUD's display-face metrics (the
+  // Sounds card's) and the one-wide container breakpoint; columns are in ch,
+  // bars and swatches on the spacing scale.
+  'board-terminal-onboarding.js': [0, 0],
+  'onboarding.css': [0, 9],
   'board-shim.js':      [0, 0],
   // The debug-tab patch INJECTED INTO THE GAME'S OWN WINDOW, so it renders
   // inches from the real UI — and it was the least audited file in the repo.
