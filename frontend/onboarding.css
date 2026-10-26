@@ -59,7 +59,8 @@
 .ob-seg-declined { background: var(--accent-secondary); }
 .ob-seg-left_during_tutorial { background: var(--accent-destructive); }
 .ob-seg-in_progress { background: var(--text-warning); }
-.ob-foot { color: var(--text-hint); }
+.ob-foot { color: var(--text-hint); display: flex; align-items: center; gap: var(--spacing-xs); }
+.ob-foot [class^="icon-"] { font-size: var(--icon-sm); }
 
 /* A one-wide card (a ⌘K pop-out) keeps the figures that answer "how far, and
    where do they stop": the bars, Skipped and p90 step aside. */

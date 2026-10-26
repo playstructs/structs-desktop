@@ -1,4 +1,4 @@
-// STRUCTS TERMINAL — the onboarding analytics card (⌘K → ONBOARDING).
+// STRUCTS TERMINAL — the Telemetry card (⌘K → TELEMETRY), onboarding analytics.
 //
 // How far new players get through signup and Combat Training, how long it
 // takes, where they stop or skip, and what players do afterwards — summed over
@@ -264,8 +264,8 @@
     var box = H.el('div', 'ob-view');
     var segs = (d.segments || []).filter(function (s) { return s.signup; });
     if (!segs.length) {
-      var why = (d.filters && (d.filters.activity || d.filters.compare === 'activity')) ? 'Activity is only known once signup finishes' : 'No signups recorded';
-      box.appendChild(H.stateBlock('empty', why));
+      if (d.filters && (d.filters.activity || d.filters.compare === 'activity')) box.appendChild(H.stateBlock('empty', 'Activity is only known once signup finishes'));
+      else box.appendChild(emptyOr(d, 'No signups recorded'));
       return box;
     }
     var b = block();
@@ -279,7 +279,7 @@
     var segs = d.segments || [];
     if (segs.length === 1) {
       var s = segs[0];
-      if (!s.tutorial || !s.tutorial.offered) { box.appendChild(H.stateBlock('empty', 'No tutorial sessions yet')); return box; }
+      if (!s.tutorial || !s.tutorial.offered) { box.appendChild(emptyOr(d, 'No tutorial sessions yet')); return box; }
       box.appendChild(outcomeBar(s.tutorial));
       box.appendChild(funnelSingle(s, s.tutorial.steps || [], true));
       return box;
@@ -390,7 +390,7 @@
     var dwell = (segs[0] && segs[0].dwell) || {};
     var keys = Object.keys(dwell).filter(function (k) { return dwell[k] && dwell[k].n >= 3; })
       .sort(function (a, b) { return dwell[b].p50 - dwell[a].p50; }).slice(0, 15);
-    if (!keys.length) { box.appendChild(H.stateBlock('empty', 'No step timings yet')); return box; }
+    if (!keys.length) { box.appendChild(emptyOr(d, 'No step timings yet')); return box; }
     var max = dwell[keys[0]].p90 || dwell[keys[0]].p50 || 1;
     var s = H.el('div', 'ob-table ob-slow');
     s.appendChild(headRow(['Slowest steps', '', 'Median', 'p90', 'Players'].concat(segs.length > 1 ? segs.slice(1).map(function (x) { return x.label; }) : [])));
@@ -417,7 +417,7 @@
     var days = {};
     segs.forEach(function (s, i) { (s.daily || []).forEach(function (x) { (days[x.day] = days[x.day] || {})[i] = x; }); });
     var order = Object.keys(days).sort().reverse();
-    if (!order.length) { box.appendChild(H.stateBlock('empty', 'No signups sampled yet')); return box; }
+    if (!order.length) { box.appendChild(emptyOr(d, 'No signups sampled yet')); return box; }
     if (segs.length === 1) {
       var t = H.el('div', 'ob-table ob-daily');
       t.appendChild(headRow(['Day', 'Signed up', 'Offered', 'Finished', 'Skipped', '', 'Finish rate']));
@@ -488,7 +488,7 @@
   function viewRecent(d) {
     var box = H.el('div', 'ob-view');
     var rows = d.recent || [];
-    if (!rows.length) { box.appendChild(H.stateBlock('empty', 'No sessions sampled yet')); return box; }
+    if (!rows.length) { box.appendChild(emptyOr(d, 'No sessions sampled yet')); return box; }
     var tags = {};
     (d.guilds || []).forEach(function (g) { tags[g.id] = g.tag || g.id; });
     var t = H.el('div', 'ob-table ob-recent');
@@ -514,6 +514,26 @@
     return box;
   }
 
+  // ── Loading ──
+  // A read answers at once with whatever the background crawls have so far, so
+  // an empty page means "not read yet" while they run and "nothing" after.
+  function reading(d) { return !!(d && d.crawl && d.crawl.running); }
+  function hasData(d) {
+    var p = (d.crawl && d.crawl.players) || {};
+    return (d.segments || []).some(function (s) { return s.sessions > 0; }) || p.known > 0;
+  }
+  function progress(d) {
+    var c = d.crawl || {}, g = c.guilds || {}, p = c.players || {};
+    var fetched = Object.keys(g).reduce(function (a, k) { return a + (Number(g[k].fetched) || 0); }, 0);
+    var parts = ['Reading every guild'];
+    if (fetched) parts.push(int(fetched) + ' sessions');
+    if (p.known) parts.push(int(p.known) + ' players');
+    return parts.join(' · ');
+  }
+  function emptyOr(d, text) { return reading(d) ? H.stateBlock('loading', progress(d)) : H.stateBlock('empty', text); }
+  // Pages folded from the crawls; Signup and Guilds come from the servers' own reads.
+  var CRAWLED = { overview: 1, tutorial: 1, players: 1, retention: 1, timing: 1, daily: 1, recent: 1 };
+
   function footLine(d) {
     var c = d.crawl || {}, p = c.players || {};
     var sessions = (d.segments || []).reduce(function (a, s) { return a + (s.sessions || 0); }, 0);
@@ -521,7 +541,10 @@
     if (p.known) parts.push('ledgers read for ' + int(p.ledgers) + ' of ' + int(p.known) + ' players');
     if (c.running) parts.push('reading…');
     else if (c.finished_ms) parts.push('read ' + H.ago(c.finished_ms) + ' ago');
-    return H.el('div', 'ob-foot fstat-l', parts.join(' · '));
+    var foot = H.el('div', 'ob-foot fstat-l');
+    if (c.running) foot.appendChild(H.el('i', H.iconClass('icon-in-progress', 'sui-icon-sm')));
+    foot.appendChild(H.el('span', null, parts.join(' · ')));
+    return foot;
   }
 
   // ── Controls ──
@@ -552,7 +575,7 @@
   var DRAW = { overview: viewOverview, signup: viewSignup, tutorial: viewTutorial, players: viewPlayers, retention: viewRetention,
     timing: viewTiming, daily: viewDaily, guilds: viewGuilds, recent: viewRecent };
   T.register('onboarding', {
-    label: 'Onboarding', describe: function (p) { return 'Onboarding' + (p && p.version ? ' · ' + p.version : ''); },
+    label: 'Telemetry', describe: function (p) { return 'Telemetry' + (p && p.version ? ' · ' + p.version : ''); },
     cadenceMs: 30000, defaultWidth: 3,
     params: [],
     render: function (host, p, ctx) {
@@ -567,15 +590,19 @@
         var wrap = H.el('div', 'ob');
         wrap.appendChild(controls(d, p, set));
         wrap.appendChild(H.navStrip(VIEWS.map(function (v) { return { key: v[0], label: v[1] }; }), st.view, function (k) { st.view = k; draw(st.last); }));
-        wrap.appendChild((DRAW[st.view] || viewOverview)(d));
+        if (CRAWLED[st.view] && reading(d) && !hasData(d)) wrap.appendChild(H.stateBlock('loading', progress(d)));
+        else wrap.appendChild((DRAW[st.view] || viewOverview)(d));
         wrap.appendChild(footLine(d));
         host.appendChild(wrap);
+        // The crawl fills in between reads: look again sooner than the cadence while it runs.
+        clearTimeout(st.soon);
+        if (reading(d)) st.soon = setTimeout(function () { T.refresh(ctx.id); }, 5000);
       }
       if (st.last && !host.firstChild) draw(st.last);
       else if (!st.last) host.appendChild(H.stateBlock('loading', 'Reading every guild'));
       return invoke('terminal_onboarding', args).then(draw).catch(function (e) {
         host.innerHTML = '';
-        host.appendChild(H.stateBlock('error', 'Onboarding unavailable: ' + e));
+        host.appendChild(H.stateBlock('error', 'Telemetry unavailable: ' + e));
       });
     },
     doors: function (c) {

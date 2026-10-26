@@ -1577,7 +1577,7 @@
     ENERGY: ['energy'], POWER: ['energy'], HEADROOM: ['energy'],
     // How far new players get through signup and Combat Training, over
     // every guild. TELEMETRY because that is what the data is called.
-    ONBOARDING: ['onboarding'], TELEMETRY: ['onboarding'], FUNNEL: ['onboarding'], SIGNUPS: ['onboarding'],
+    TELEMETRY: ['onboarding'], ONBOARDING: ['onboarding'], FUNNEL: ['onboarding'], SIGNUPS: ['onboarding'],
     INVENTORY: ['wallet', 'optid'], OPS: ['health'], CONFIG: ['page', 'config'],
     // What a player has DONE (the tiles) and what their hulls have done (the
     // table). `AWARDS` and `HULLS` because that is what each is called out loud.

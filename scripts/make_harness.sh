@@ -609,7 +609,7 @@ cat > "$FIX" <<'EOF'
         : f.compare === 'guild' ? [seg('0-1', 'OH', 0.05), seg('0-5', 'SN.C', 0.9)]
         : f.compare === 'interface' ? [seg('structs-webapp', 'structs-webapp', 0.4), seg('none', 'none', 0.6)]
         : [seg('all', 'All', 1)];
-      return {
+      var r = {
         version: 'tutorial-4', versions: ['tutorial-4', 'tutorial-3'], idle_hours: (a && a.idleHours) || 24, active_days: (a && a.activeDays) || 7, generated_ms: now,
         filters: { interface: f.interface || null, guild: f.guild || null, activity: f.activity || null, compare: f.compare || null },
         options: { interfaces: ['structs-webapp', 'none'], guilds: [{ id: '0-1', label: 'OH' }, { id: '0-2', label: 'ONE' }, { id: '0-5', label: 'SN.C' }] },
@@ -629,6 +629,15 @@ cat > "$FIX" <<'EOF'
           guilds: { '0-1': { candidates: 3, team_skipped: 1, fetched: 2, errors: 0, last_error: null }, '0-5': { candidates: 3810, team_skipped: 0, fetched: 3810, errors: 0, last_error: null } },
           players: { known: 9612, ledgers: 4100, refreshed_ms: now - 60000, round: { ledger_todo: 3000, ledger_read: 1200, ledger_errors: 0 } } },
       };
+      /* A first read before the crawls have found anything: 'reading' while
+       * they run, 'done' once they finished empty-handed. */
+      var cold = window.__HARNESS_OB_COLD__;
+      if (cold) {
+        r.segments = r.segments.map(function (s) { return Object.assign({}, s, { sessions: 0, tutorial: { offered: 0, steps: [] }, daily: [], dwell: {}, durations: {} }); });
+        r.recent = [];
+        r.crawl = { running: cold === 'reading', finished_ms: cold === 'reading' ? null : now - 1000, guilds: {}, players: { known: 0, ledgers: 0, refreshed_ms: null, round: null } };
+      }
+      return r;
     },
     /* The Energy card. A THIN primary (0.7 kW of room) so the button reads
      * amber, one alpha-priced offer to rent, and a plan for going dark. */

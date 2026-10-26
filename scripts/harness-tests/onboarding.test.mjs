@@ -1,4 +1,4 @@
-// The Onboarding card (board-terminal-onboarding.js) against the static harness.
+// The Telemetry card (board-terminal-onboarding.js) against the static harness.
 //
 //   bash scripts/make_harness.sh && node scripts/harness-tests/onboarding.test.mjs
 //
@@ -33,9 +33,9 @@ await until(() => w.Board && w.Board.Terminal && w.Board.Terminal.add && w.Board
 const T = w.Board.Terminal;
 
 // ── ⌘K ──
-check('ONBOARDING, TELEMETRY, FUNNEL and SIGNUPS open the card', ['ONBOARDING', 'TELEMETRY', 'FUNNEL', 'SIGNUPS'].every((x) => T.parse(x) && T.parse(x).type === 'onboarding'));
-const row = T.suggestFor('').find((o) => /\bONBOARDING\b/.test(String(o.words || '')));
-check('filed under Explore', row && row.group === 'Explore', JSON.stringify(row || null));
+check('TELEMETRY, ONBOARDING, FUNNEL and SIGNUPS open the card', ['TELEMETRY', 'ONBOARDING', 'FUNNEL', 'SIGNUPS'].every((x) => T.parse(x) && T.parse(x).type === 'onboarding'));
+const row = T.suggestFor('').find((o) => /\bTELEMETRY\b/.test(String(o.words || '')));
+check('filed under Explore as Telemetry', row && row.group === 'Explore' && row.what === 'Telemetry', JSON.stringify(row || null));
 
 // ── Pure pieces ──
 const O = T.onboarding;
@@ -122,7 +122,30 @@ if (host) {
   sel()[0].value = 'structs-webapp'; sel()[0].dispatchEvent(new w.Event('change'));
   const filtered = await until(() => calls().find((c) => c.args.filters.interface === 'structs-webapp'));
   check('a filter is a param too', !!filtered);
+  check('the card is titled Telemetry', /^Telemetry\b/.test(text(d.querySelector('#tm-grid .tm-card[data-card="' + id + '"] .tm-title'))), text(d.querySelector('#tm-grid .tm-card[data-card="' + id + '"] .tm-title')));
+  check('while the crawl runs the footer says so with the in-progress glyph', !!host.querySelector('.ob-foot .icon-in-progress') && /reading…/.test(text(host.querySelector('.ob-foot'))));
 }
+
+// ── Cold start: nothing read yet ──
+w.__HARNESS_OB_COLD__ = 'reading';
+const cold = T.add('onboarding', {}, 3);
+const coldId = (cold && cold.id) || 'onboarding-2';
+const coldHost = await until(() => {
+  const c = d.querySelector('#tm-grid .tm-card[data-card="' + coldId + '"] .tm-body');
+  return c && c.querySelector('.ob') ? c : null;
+});
+const coldView = () => coldHost && coldHost.querySelector('.ob-view, .ob > .sui-message-inline-alert');
+check('with nothing read and the crawl running, the page is a loading block, not zero tiles',
+  coldHost && !coldHost.querySelector('.ob-hud') && coldHost.querySelector('.ob > .sui-message-inline-alert .icon-in-progress') && /Reading every guild/.test(text(coldView())), coldHost && text(coldHost));
+const cgo = (label) => { [...coldHost.querySelectorAll('.ob .sui-screen-nav-item')].find((a) => text(a) === label).click(); };
+cgo('Signup');
+check('Signup still draws: it comes from the servers, not the crawl', coldHost && coldHost.querySelector('.ob-funnel .ob-row[data-step]'));
+w.__HARNESS_OB_COLD__ = 'done';
+T.refresh(coldId, true);
+cgo('Tutorial');
+const settled = await until(() => coldHost.querySelector('.ob-view .sui-message-inline-alert .icon-info') ? coldHost : null);
+check('once the crawl finished empty-handed, the page says there is nothing', settled && /No tutorial sessions yet/.test(text(coldHost.querySelector('.ob-view'))), coldHost && text(coldHost.querySelector('.ob-view')));
+delete w.__HARNESS_OB_COLD__;
 
 // ── Wiring ──
 check('the command is registered with Tauri', /onboarding::terminal_onboarding/.test(read('src-tauri/src/main.rs')));
