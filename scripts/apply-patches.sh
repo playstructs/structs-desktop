@@ -871,6 +871,14 @@ verify_contract() {
 TUT="$BUILD_DIR/js/tutorial/TutorialMode.js"
 verify_contract "$TUT" "ACTIVE_KEY = 'tutorialActive'" "TutorialMode active flag"
 verify_contract "$TUT" "EXITED_KEY = 'tutorialExited'" "TutorialMode exited flag"
+# The VALUES matter as much as the keys: EXITED_KEY held a bare '1' until the
+# Combat Training menu landed (webapp 7d950abc), which silently stopped the
+# offer seeing a finished tutorial. Pin the values and the energy hand-off too.
+verify_contract "$TUT" "EXIT_COMPLETED = 'completed'" "TutorialMode completed exit value"
+verify_contract "$TUT" "EXIT_ABANDONED = 'abandoned'" "TutorialMode abandoned exit value"
+verify_contract "$TUT" "PLAYER_ENERGY_KEY = 'tutorialPlayerEnergy'" "TutorialMode energy hand-off key"
+verify_contract "$TUT" "PLAYER_ENERGY_FIELDS = ['load', 'structs_load', 'capacity', 'connection_capacity']" \
+  "TutorialMode energy hand-off fields"
 TEL="$BUILD_DIR/js/telemetry/OnboardingTelemetry.js"
 verify_contract "$TEL" "SESSION_ID: 'onboardingSessionId'" "onboarding session key"
 verify_contract "$TEL" "'orientation.tutorial_offer'" "tutorial offer step key"
@@ -879,6 +887,10 @@ OFR="$BUILD_DIR/js/view_models/signup/OrientationEndViewModel.js"
 verify_contract "$OFR" "launchTutorial" "offer page Launch button id"
 verify_contract "$OFR" "skipTutorial" "offer page Skip button id"
 verify_contract "$BUILD_DIR/js/controllers/AuthController.js" "orientationEnd()" "Auth.orientationEnd route"
+# Help > Combat Training hands off to the webapp's own replay confirmation.
+verify_contract "$BUILD_DIR/js/controllers/AccountController.js" "startTutorial()" "Account.startTutorial route"
+verify_contract "$BUILD_DIR/js/view_models/account/AccountStartTutorialViewModel.js" "TutorialMode.launch()" \
+  "Account replay confirmation launches the tutorial"
 
 # Clean up .bak files
 find "$BUILD_DIR" -name "*.bak" -delete

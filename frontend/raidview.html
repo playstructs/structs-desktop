@@ -174,6 +174,12 @@
       background: url("img/focus/focus-move.gif") no-repeat center; image-rendering: pixelated;
     }
     .rv-cell.rv-move-target { cursor: crosshair; }
+    /* The burst that confirms a picked target — the game's
+       `.map-tile-target-selected`, over the focus ring rather than under it. */
+    .rv-target-selected {
+      position: absolute; inset: 0; z-index: 516; pointer-events: none;
+      image-rendering: pixelated;
+    }
     .rv-switch { display: inline-block; cursor: pointer; }
     /* The deploy list and the consume form are POPOVERS in the cheatsheet
        frame, beside the bar — never inside the chunk, which at the HUD's 2x

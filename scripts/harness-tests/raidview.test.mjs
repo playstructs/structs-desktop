@@ -1555,6 +1555,47 @@ check('pipRequestHide forgets the struct immediately (no stale re-show)', RV._pi
     wrong.length === 0, wrong.join(' · '));
 }
 
+// ── The target-selected burst (TargetSelectedIndicator parity) ─────────────
+// The game flashes art on a tile the moment a valid target is picked: red for
+// an attack, teal for a defend, yellow for a move. These pin the two things
+// that go wrong — mounting it where an animation will wipe it, and reusing one
+// URL for a non-looping gif (every play after the first then shows blank).
+{
+  const mount = RV._burstMountForStruct('5-3');
+  check('the burst mounts in the struct\'s own wrapper, not the animation layer',
+    !!mount && mount.classList.contains('rv-struct-wrap'), mount && mount.className);
+
+  RV._playBurst(mount, 'enemy');
+  const shots = () => mount.querySelectorAll('img.rv-target-selected');
+  check('a play adds one burst over the struct', shots().length === 1);
+  check('…pointing at the picked variant\'s art',
+    /target-selected-enemy\.gif$/.test(shots()[0].getAttribute('src') || ''), shots()[0] && shots()[0].getAttribute('src'));
+
+  const first = shots()[0];
+  RV._playBurst(mount, 'enemy');
+  check('a second play replaces the first rather than stacking', shots().length === 1 && shots()[0] !== first);
+
+  const rule = [...w.document.styleSheets].flatMap((sheet) => [...sheet.cssRules])
+    .find((r) => r.selectorText === '.rv-target-selected');
+  check('the burst has a rule of its own', !!rule);
+  const css = (rule && rule.style.cssText) || '';
+  check('…which fills the tile, ignores clicks and keeps the art crisp',
+    /position:\s*absolute/.test(css) && /inset:\s*0/.test(css)
+      && /pointer-events:\s*none/.test(css) && /image-rendering:\s*pixelated/.test(css), css);
+  const z = Number((/z-index:\s*(\d+)/.exec(css) || [])[1]);
+  check('…and sits above the focus ring, not under it', z > 515, String(z));
+
+  const src = readFileSync(resolve(repo, 'frontend', 'raidview.js'), 'utf8');
+  check('a defend plays the friendly variant, every other shot the enemy one',
+    /playBurst\(burstMountForStruct\(t\.id\), p\.action === 'defend' \? 'friendly' : 'enemy'\)/.test(src));
+  check('a move plays the neutral one, on the tile it moves to',
+    /playBurst\(anchors\[tile\.key\], 'neutral'\)/.test(src));
+  check('the art is fetched up front, and a context without fetch still boots',
+    /if \(typeof fetch !== 'function'\) return;/.test(src) && /preloadBursts\(\);/.test(src));
+  check('each play gets its own object URL, so a non-looping gif runs every time',
+    /URL\.createObjectURL\(blob\)/.test(src) && /URL\.revokeObjectURL/.test(src));
+}
+
 console.log(failures ? failures + ' failure(s)' : 'all checks passed');
 w.close();
 process.exit(failures ? 1 : 0);
@@ -1593,5 +1634,3 @@ process.exit(failures ? 1 : 0);
   check('a press over a tile does not start a native drag', drag.defaultPrevented);
   pd('pointerup', 200, 200, { on: d });
 }
-
-

@@ -56,7 +56,10 @@ function boot(opts = {}) {
   const w = dom.window;
   const calls = { goto: [], open: 0, preview: 0, dflt: 0, fetched: [], logs: [] };
 
-  w.gameState = { keyPlayers: { player: { id: opts.player === undefined ? '1-194' : opts.player } } };
+  w.gameState = { keyPlayers: { player: {
+    id: opts.player === undefined ? '1-194' : opts.player,
+    player: { load: '7', structs_load: 3, capacity: '12', connection_capacity: 0 },
+  } } };
   w.menuPage = {
     open: () => { calls.open++; },
     router: {
@@ -124,7 +127,7 @@ const cases = [
     assert: (c) => check('  not offered', c.goto.length === 0 && c.fetched.length === 0),
   },
   {
-    name: 'one unfinished attempt still offers it (the tutorial has no other exit)',
+    name: 'one unfinished attempt still offers it (they quit before either ending)',
     opts: { rows: [], local: { '1-194': { choice: 'launched', launches: 1 } } },
     assert: (c) => check('  offered', c.goto.join() === 'Auth.orientationEnd'),
   },
@@ -135,13 +138,31 @@ const cases = [
   },
   {
     name: 'coming back from a finished tutorial neither offers nor asks',
-    opts: { rows: [], session: { tutorialExited: '1' } },
+    opts: { rows: [], session: { tutorialExited: 'completed' } },
     assert: (c, w) => {
       check('  not offered', c.goto.length === 0 && c.fetched.length === 0);
       const store = JSON.parse(w.localStorage.getItem('structsTutorialChoice') || '{}');
-      check('  recorded as completed, since exit() only runs at the FTL jump',
-        store['1-194'] && store['1-194'].choice === 'completed', JSON.stringify(store));
+      check('  recorded as completed', store['1-194'] && store['1-194'].choice === 'completed', JSON.stringify(store));
     },
+  },
+  {
+    name: 'walking out through Abandon Tutorial is an answer too',
+    opts: { rows: [], session: { tutorialExited: 'abandoned' } },
+    assert: (c, w) => {
+      check('  not offered', c.goto.length === 0 && c.fetched.length === 0);
+      const store = JSON.parse(w.localStorage.getItem('structsTutorialChoice') || '{}');
+      check('  recorded as abandoned', store['1-194'] && store['1-194'].choice === 'abandoned', JSON.stringify(store));
+    },
+  },
+  {
+    name: 'a player who abandoned it earlier is not asked again',
+    opts: { rows: [], local: { '1-194': { choice: 'abandoned' } } },
+    assert: (c) => check('  not offered, and no request made', c.goto.length === 0 && c.fetched.length === 0),
+  },
+  {
+    name: 'a player who completed it earlier is not asked again',
+    opts: { rows: [], local: { '1-194': { choice: 'completed' } } },
+    assert: (c) => check('  not offered, and no request made', c.goto.length === 0 && c.fetched.length === 0),
   },
   {
     name: 'signup in this tab has already made the offer',
@@ -199,7 +220,13 @@ for (const { c, w, calls } of results) {
   w.document.getElementById('skipTutorial').click();
   const store = () => JSON.parse(w.localStorage.getItem('structsTutorialChoice') || '{}');
   check('  Skip Tutorial writes declined', store()['1-194'] && store()['1-194'].choice === 'declined', JSON.stringify(store()));
-  check('  and the router is put back in default mode', calls.dflt === 1);
+  // Skip walks on to a confirmation page, and that goto must not be saved as
+  // the restored page either — so preview mode outlives the click.
+  check('  the router is still in preview mode on the confirmation', calls.dflt === 0);
+  w.document.getElementById('menu-page-layout').classList.remove('hidden');
+  w.document.getElementById('menu-page-layout').classList.add('hidden');
+  await until(() => calls.dflt > 0, 2000);
+  check('  and back to default once the player is on the map again', calls.dflt === 1);
 
   w.localStorage.removeItem('structsTutorialChoice');
   w.document.getElementById('launchTutorial').click();
@@ -210,13 +237,22 @@ for (const { c, w, calls } of results) {
 // ── the Help menu entry point ──────────────────────────────────────────────
 {
   console.log('Help ▸ Combat Training (menu.rs) goes through StructsTutorial');
-  const { w } = boot({ rows: [], local: { '1-194': { choice: 'declined' } } });
-  check('  the helper the menu calls exists', typeof w.StructsTutorial.launch === 'function');
+  const { w, calls } = boot({ rows: [], local: { '1-194': { choice: 'declined' } } });
+  check('  the helper the menu calls exists', typeof w.StructsTutorial.replay === 'function');
+  check('  replay() opens the webapp\'s own confirmation, not a second launch path',
+    w.StructsTutorial.replay() === true && calls.goto.join() === 'Account.startTutorial' && calls.open === 1,
+    calls.goto.join());
+
+  // The direct launch is the fallback for a window with no menu wired up.
   w.StructsTutorial.launch();
-  check('  it raises the flag the webapp boots on', w.sessionStorage.getItem('tutorialActive') === '1');
-  check('  and clears the finished flag', w.sessionStorage.getItem('tutorialExited') === null);
+  check('  launch() raises the flag the webapp boots on', w.sessionStorage.getItem('tutorialActive') === '1');
+  check('  and clears the exit flag', w.sessionStorage.getItem('tutorialExited') === null);
+  check('  and hands the player\'s own energy to the simulation',
+    w.sessionStorage.getItem('tutorialPlayerEnergy')
+      === JSON.stringify({ load: 7, structs_load: 3, capacity: 12, connection_capacity: 0 }),
+    w.sessionStorage.getItem('tutorialPlayerEnergy'));
   const store = JSON.parse(w.localStorage.getItem('structsTutorialChoice') || '{}');
-  check('  a menu launch is counted too, so the offer stops asking',
+  check('  a launch from here is counted too, so the offer stops asking',
     store['1-194'].choice === 'launched' && store['1-194'].launches === 1, JSON.stringify(store));
   check('  forget() puts this player back in the offer', w.StructsTutorial.forget()
     && !JSON.parse(w.localStorage.getItem('structsTutorialChoice'))['1-194']);

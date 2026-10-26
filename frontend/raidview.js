@@ -1564,11 +1564,60 @@
   }
   /** A struct was clicked while an action waits on a target. Returns true
    * when the click was consumed. */
+  /* The burst that confirms a picked target — TargetSelectedIndicator: red
+   * for offensive actions, teal for defensive, yellow for a move.
+   *
+   * The gifs do not loop and end blank, and a gif only runs from its first
+   * frame the first time its URL is decoded — so every play gets its own
+   * object URL of the already downloaded file, exactly as the game does.
+   * Without that, the second selection onwards shows a blank last frame. */
+  var BURST_MS = 800;
+  var burstBlobs = {};
+  var burstPlays = {};
+  function burstPath(variant) { return 'img/focus/target-selected-' + variant + '.gif'; }
+  function preloadBursts() {
+    // Guarded as the game guards it: a context without fetch (the jsdom
+    // harness) must not take the whole window down on boot.
+    if (typeof fetch !== 'function') return;
+    ['enemy', 'friendly', 'neutral'].forEach(function (variant) {
+      fetch(burstPath(variant))
+        .then(function (r) { return r.ok ? r.blob() : null; })
+        .then(function (blob) { if (blob) burstBlobs[variant] = blob; })
+        // A play falls back to the path, which still runs the first time.
+        .catch(function () {});
+    });
+  }
+  /** @param {Element|null} mount @param {string} variant */
+  function playBurst(mount, variant) {
+    if (!mount) return;
+    var prev = burstPlays[variant];
+    if (prev) {
+      clearTimeout(prev.timer);
+      if (prev.el.parentNode) prev.el.remove();
+      if (prev.url) URL.revokeObjectURL(prev.url);
+    }
+    var blob = burstBlobs[variant];
+    var url = blob ? URL.createObjectURL(blob) : null;
+    var img = document.createElement('img');
+    img.className = 'rv-target-selected';
+    img.alt = '';
+    img.src = url || burstPath(variant);
+    mount.appendChild(img);
+    burstPlays[variant] = { el: img, url: url, timer: setTimeout(function () {
+      if (img.parentNode) img.remove();
+      if (url) URL.revokeObjectURL(url);
+      delete burstPlays[variant];
+    }, BURST_MS) };
+  }
+  /** The struct's own wrapper, which outlives the animation mount's clearing. */
+  function burstMountForStruct(id) { return document.getElementById(domId('slot', id)); }
+
   function targetStruct(t) {
     var p = state.pending;
     if (!p) return false;
     if (!validTarget(t)) { cancelPending(); return false; }
     var st = typeOf(p.struct) || {};
+    playBurst(burstMountForStruct(t.id), p.action === 'defend' ? 'friendly' : 'enemy');
     if (p.action === 'attack') {
       act(p.struct, 'attack', { attacker_id: p.struct.id, target_id: t.id, weapon: p.weapon || 'primary' },
         (p.struct.type_name || p.struct.id) + ' fires at ' + (t.type_name || t.id),
@@ -1593,6 +1642,7 @@
     var slot = parts[0] === 'cmd' ? 0 : (Number(parts[parts.length - 1]) || 0);
     var st = typeOf(p.struct) || {};
     var mover = p.struct;
+    playBurst(anchors[tile.key], 'neutral');
     act(p.struct, 'deploy', { struct_id: p.struct.id, ambit: ambit, slot: slot, location_type: p.struct.category === 'planet' ? 'planet' : 'fleet' },
       (p.struct.type_name || p.struct.id) + ' moves to ' + ambit + (parts[0] === 'cmd' ? '' : ' ' + (slot + 1)),
       { cost: st.move_charge, expect: function (s) {
@@ -3735,6 +3785,9 @@
     var LABEL = params.label || ('raid-' + (TARGET ? TARGET.id : 'none'));
     function scoped(name) { return name + '::' + LABEL; }
     wireMapPan();
+    // Fetched up front so the first target selection isn't kept waiting on the
+    // art (MapTileSelectionComponent preloads it in its constructor).
+    preloadBursts();
     // Who this install can sign for is the roster: the primary and every
     // virtual player with an on-chain id. The cache answers at once.
     var loadRoster = function () {
@@ -3843,6 +3896,8 @@
     _anchors: function () { return anchors; },
     _tileAnchors: function () { return tileAnchors; },
     cancelPending: cancelPending,
+    _playBurst: playBurst,
+    _burstMountForStruct: burstMountForStruct,
     COL: COL,
     domId: domId,
     _state: state,

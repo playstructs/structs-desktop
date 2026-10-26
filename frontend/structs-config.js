@@ -4384,21 +4384,27 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
     /** Quiet time on the map before the offer shows, so it never races the game in. */
     var SETTLE_MS = 1500;
 
-    // TutorialMode's own flags. The bundle keeps the class module-private, so
-    // the keys are mirrored here; scripts/apply-patches.sh fails the build if
-    // TutorialMode stops declaring them. This file runs before js/index.js,
-    // which consumes `tutorialExited` while booting — so the "just finished"
-    // flag is readable here and nowhere later.
+    // TutorialMode's own flags and energy hand-off. The bundle keeps the class
+    // module-private, so these are mirrored here; scripts/apply-patches.sh fails
+    // the build if TutorialMode stops declaring them. This file runs before
+    // js/index.js, which consumes `tutorialExited` while booting — so how the
+    // player left the tutorial is readable here and nowhere later.
     var ACTIVE_KEY = 'tutorialActive';
     var EXITED_KEY = 'tutorialExited';
+    var ENERGY_KEY = 'tutorialPlayerEnergy';
+    var ENERGY_FIELDS = ['load', 'structs_load', 'capacity', 'connection_capacity'];
+    var EXIT_COMPLETED = 'completed';
+    var EXIT_ABANDONED = 'abandoned';
 
     var inTutorial = false;
-    var justFinished = false;
+    var exitedHow = null;
     var signupSession = false;
     try {
       inTutorial = new URLSearchParams(document.location.search).has('tutorial')
         || sessionStorage.getItem(ACTIVE_KEY) === '1';
-      justFinished = sessionStorage.getItem(EXITED_KEY) === '1';
+      // 'completed' or 'abandoned' since the Combat Training menu landed; it was
+      // a bare '1' before, which is why this is read as a value, not a boolean.
+      exitedHow = sessionStorage.getItem(EXITED_KEY);
       // Signup ran in this tab, so the webapp's own offer has already been made.
       signupSession = !!sessionStorage.getItem('onboardingSessionId');
     } catch (e) {}
@@ -4495,12 +4501,13 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
      */
     function shouldOffer(pid) {
       var local = readChoice(pid);
-      if (local && (local.choice === 'completed' || local.choice === 'declined')) {
+      if (local && (local.choice === EXIT_COMPLETED || local.choice === EXIT_ABANDONED
+        || local.choice === 'declined')) {
         return Promise.resolve(false);
       }
-      // Launched but never finished: the tutorial's only exit is its own ending,
-      // so they quit the app part way through and still haven't been through it.
-      // The offer stands — but not forever.
+      // Launched, and gone before either ending: they quit the app part way
+      // through (walking out through Abandon Tutorial records that instead), so
+      // they still haven't been through it. The offer stands — but not forever.
       if (local && (Number(local.launches) || 0) >= MAX_LAUNCHES) {
         log(pid + ' started it ' + local.launches + 'x without finishing — not offering again');
         return Promise.resolve(false);
@@ -4531,6 +4538,7 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
         mp.router.enablePreviewMode();
         mp.router.goto('Auth', 'orientationEnd');
         mp.open();
+        restoreModeOnClose();
         return true;
       } catch (e) {
         log('offer failed: ' + e);
@@ -4538,27 +4546,45 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
       }
     }
 
-    // The page's own handlers reload (Launch Tutorial) or close the menu (Skip
-    // Tutorial), so the answer is recorded in the capture phase, ahead of them.
+    /**
+     * Preview mode has to outlive the offer page, because Skip Tutorial walks on
+     * to a confirmation and that goto must not be saved as the restored page
+     * either. It ends when the player is back on the map.
+     */
+    function restoreModeOnClose() {
+      var layout = document.getElementById('menu-page-layout');
+      if (!layout) return;
+      var watch = new MutationObserver(function () {
+        if (!layout.classList.contains('hidden')) return;
+        watch.disconnect();
+        try { window.menuPage.router.enableDefaultMode(); } catch (e) {}
+      });
+      watch.observe(layout, { attributes: true, attributeFilter: ['class'] });
+    }
+
+    // The page's own handlers reload (Launch Tutorial) or go to a confirmation
+    // (Skip Tutorial), so the answer is recorded in the capture phase, ahead of
+    // them. Skip is taken at its word rather than waiting for the confirmation:
+    // cancelling it comes straight back to this page, where any later answer
+    // overwrites this one, and the buttons' ids are the page's own while the
+    // confirmation shares `tutorial-confirm-btn` with restart and abandon.
     document.addEventListener('click', function (ev) {
       var el = ev.target && ev.target.closest
         ? ev.target.closest('#launchTutorial, #skipTutorial')
         : null;
       if (!el) return;
       writeChoice(playerId(), el.id === 'skipTutorial' ? 'declined' : 'launched');
-      if (offered) {
-        try { window.menuPage.router.enableDefaultMode(); } catch (e) {}
-      }
     }, true);
 
-    // Back from a finished tutorial. TutorialMode.exit() runs only on the FTL
-    // jump screen at the very end, so the flag means completed, not abandoned.
-    if (justFinished) {
-      whenPlayerKnown(function (pid) { writeChoice(pid, 'completed'); });
+    // Back from the tutorial, either way. The player left through the FTL jump
+    // (completed) or through Abandon Tutorial in its own menu (abandoned); both
+    // mean they have seen it and neither is asked again.
+    if (exitedHow === EXIT_COMPLETED || exitedHow === EXIT_ABANDONED) {
+      whenPlayerKnown(function (pid) { writeChoice(pid, exitedHow); });
     }
 
     function start() {
-      if (inTutorial || justFinished || signupSession) return;
+      if (inTutorial || exitedHow || signupSession) return;
 
       var pid = null;
       var decided = null;   // null until the history answers
@@ -4594,10 +4620,44 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
 
     // Help ▸ Combat Training (menu.rs) and the console reach the tutorial here.
     window.StructsTutorial = {
-      /** Starts the tutorial, as TutorialMode.launch() does. */
+      /**
+       * Opens the webapp's own replay confirmation (Account ▸ Combat Tutorial),
+       * so the menu entry and the in-game one are the same single path into
+       * TutorialMode.launch() — which carries the player's energy into the
+       * simulation. This is what Help ▸ Combat Training calls.
+       */
+      replay: function () {
+        var mp = window.menuPage;
+        if (!mp || !mp.router) return false;
+        try {
+          mp.router.enablePreviewMode();
+          mp.router.goto('Account', 'startTutorial');
+          mp.open();
+          restoreModeOnClose();
+          return true;
+        } catch (e) {
+          log('replay failed: ' + e);
+          return false;
+        }
+      },
+      /**
+       * Starts the tutorial directly, mirroring TutorialMode.launch() —
+       * including the energy hand-off, so the simulation shows the player's own
+       * figures rather than made-up ones. Prefer replay(); this is the fallback
+       * for a window where the game's menu is not wired up.
+       */
       launch: function () {
         writeChoice(playerId(), 'launched');
         try {
+          var p = (window.gameState && window.gameState.keyPlayers
+            && window.gameState.keyPlayers.player && window.gameState.keyPlayers.player.player) || null;
+          if (p) {
+            var energy = {};
+            ENERGY_FIELDS.forEach(function (f) { energy[f] = parseInt('' + (p[f] || 0), 10) || 0; });
+            sessionStorage.setItem(ENERGY_KEY, JSON.stringify(energy));
+          } else {
+            sessionStorage.removeItem(ENERGY_KEY);
+          }
           sessionStorage.setItem(ACTIVE_KEY, '1');
           sessionStorage.removeItem(EXITED_KEY);
         } catch (e) {}
@@ -4611,6 +4671,7 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
           player: pid,
           local: pid ? readChoice(pid) : null,
           inTutorial: inTutorial,
+          exitedHow: exitedHow,
           offered: offered
         };
       },

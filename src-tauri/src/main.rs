@@ -72,16 +72,17 @@ fn main() {
         .on_menu_event(|app, event| {
             use tauri::Manager;
             if event.id() == menu::TUTORIAL_MENU_ID {
-                // StructsTutorial.launch() (frontend/structs-config.js) also
-                // records the attempt, so the automatic offer stops asking a
-                // player who took the tutorial from here. The fallback mirrors
-                // the webapp's TutorialMode.launch(): set the session flag it
-                // reads at boot, clear any "just exited" flag, reload.
-                // sessionStorage (not local) so the tutorial never outlives the
-                // app session, matching the webapp's own semantics.
+                // StructsTutorial.replay() (frontend/structs-config.js) opens
+                // the webapp's own replay confirmation, so this menu entry and
+                // Account > Combat Tutorial are one path into TutorialMode's
+                // launch (which carries the player's energy into the
+                // simulation). The fallback mirrors that launch directly: set
+                // the session flag the webapp reads at boot, clear any "just
+                // exited" flag, reload. sessionStorage (not local) so the
+                // tutorial never outlives the app session.
                 if let Some(window) = app.get_webview_window("main") {
                     let script = r#"if (window.StructsTutorial) {
-                        window.StructsTutorial.launch();
+                        window.StructsTutorial.replay() || window.StructsTutorial.launch();
                     } else {
                         try {
                             sessionStorage.setItem('tutorialActive', '1');
