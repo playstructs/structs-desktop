@@ -8,8 +8,8 @@
 .ob-hud { display: flex; flex-wrap: wrap; align-items: flex-start; gap: var(--spacing-md) var(--spacing-xxxl); padding: var(--spacing-xs) 0; }
 .ob-hud .ob-tile { align-items: flex-start; }
 .ob-hud .ob-tile .fstat-v { font-family: 'ExtremeHazard', sans-serif; font-size: 16px; line-height: 24px; }
-.ob-durations .ob-tile .fstat-v { font-size: 8px; line-height: 16px; }
 .ob-view { display: flex; flex-direction: column; gap: var(--spacing-xl); }
+.ob-hud + .ob-hud { border-top: 1px solid var(--border-subtle); padding-top: var(--spacing-md); }
 .ob-block { display: flex; flex-direction: column; gap: var(--spacing-sm); }
 .ob-title { color: var(--text-body); }
 
@@ -18,10 +18,15 @@
 .ob-table { display: flex; flex-direction: column; }
 .ob-row { display: grid; align-items: center; gap: var(--spacing-md); padding: var(--spacing-xs) var(--spacing-xs); border-bottom: 1px solid var(--border-subtle); }
 .ob-head { border-bottom: 1px solid var(--border-strong); }
-.ob-funnel .ob-row { grid-template-columns: minmax(18ch, 1.6fr) minmax(8ch, 1fr) repeat(6, minmax(6ch, .5fr)); }
-.ob-slow .ob-row { grid-template-columns: minmax(20ch, 1.6fr) minmax(10ch, 1.4fr) repeat(3, minmax(6ch, .5fr)); }
+.ob-funnel .ob-row { grid-template-columns: minmax(18ch, 1.6fr) minmax(8ch, 1fr) repeat(7, minmax(6ch, .5fr)); }
+.ob-funnel-skips .ob-row { grid-template-columns: minmax(18ch, 1.6fr) minmax(8ch, 1fr) repeat(10, minmax(6ch, .5fr)); }
+/* Comparison and distribution tables set their own columns (one or more per
+   segment) on the table; every row takes them. */
+.ob-compare .ob-row, .ob-dist .ob-row { grid-template-columns: var(--ob-cols); }
+.ob-hist .ob-row { grid-template-columns: minmax(12ch, 1.2fr) minmax(10ch, 2fr) repeat(2, minmax(6ch, .5fr)); }
+.ob-slow .ob-row { grid-template-columns: var(--ob-cols, minmax(20ch, 1.6fr) minmax(10ch, 1.4fr) repeat(3, minmax(6ch, .5fr))); }
 .ob-daily .ob-row { grid-template-columns: minmax(11ch, 1fr) repeat(4, minmax(6ch, .5fr)) minmax(8ch, 1fr) minmax(6ch, .5fr); }
-.ob-guilds .ob-row { grid-template-columns: minmax(18ch, 1.6fr) repeat(6, minmax(6ch, .5fr)) minmax(12ch, .8fr); }
+.ob-guilds .ob-row { grid-template-columns: minmax(18ch, 1.6fr) repeat(8, minmax(6ch, .5fr)) minmax(12ch, .8fr); }
 .ob-recent .ob-row { grid-template-columns: minmax(15ch, 1.2fr) minmax(5ch, .4fr) minmax(6ch, .5fr) minmax(7ch, .5fr) minmax(15ch, 1.4fr) repeat(2, minmax(6ch, .4fr)); }
 .ob-c { min-width: 0; color: var(--text-body); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ob-n { text-align: right; font-variant-numeric: tabular-nums; }
@@ -61,8 +66,12 @@
 .ob { container-type: inline-size; }
 @container (max-width: 600px) {
   .ob-funnel .ob-row, .ob-slow .ob-row { column-gap: var(--spacing-lg); }
-  .ob-funnel .ob-row { grid-template-columns: minmax(0, 1fr) repeat(4, auto); }
-  .ob-funnel .ob-row > :nth-child(2), .ob-funnel .ob-row > :nth-child(6), .ob-funnel .ob-row > :nth-child(8) { display: none; }
+  .ob-funnel .ob-row, .ob-funnel-skips .ob-row { grid-template-columns: minmax(0, 1fr) repeat(4, auto); }
+  /* Kept · Lost so far · Step drop · Median stay. */
+  .ob-funnel .ob-row > :nth-child(2), .ob-funnel .ob-row > :nth-child(3), .ob-funnel .ob-row > :nth-child(6),
+  .ob-funnel:not(.ob-funnel-skips) .ob-row > :nth-child(9),
+  .ob-funnel-skips .ob-row > :nth-child(8), .ob-funnel-skips .ob-row > :nth-child(9),
+  .ob-funnel-skips .ob-row > :nth-child(10), .ob-funnel-skips .ob-row > :nth-child(12) { display: none; }
   .ob-slow .ob-row { grid-template-columns: minmax(0, 1fr) repeat(3, auto); }
   .ob-slow .ob-row > :nth-child(2) { display: none; }
   .ob-hud { gap: var(--spacing-md) var(--spacing-xl); }

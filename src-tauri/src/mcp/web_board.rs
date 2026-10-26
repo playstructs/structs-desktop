@@ -997,6 +997,8 @@ async fn board_invoke(
             crate::mcp::onboarding::terminal_onboarding(
                 s("version"),
                 body.get("idleHours").and_then(|v| v.as_u64()).map(|n| n as u32),
+                body.get("activeDays").and_then(|v| v.as_u64()).map(|n| n as u32),
+                body.get("filters").cloned().and_then(|v| serde_json::from_value(v).ok()),
                 body.get("fresh").and_then(|v| v.as_bool()),
             )
             .await,

@@ -56,8 +56,9 @@ pub const DEFAULT_IDLE_HOURS: u32 = 24;
 /// created after the recorder shipped (2026-10-19 20:56 UTC, local mirror).
 /// A little lower, so a clock skew costs a few empty reads and never a player.
 const TELEMETRY_FLOOR_INDEX: u64 = 5_700;
-/// Per guild per crawl. A first crawl of a busy guild takes a few rounds.
-const CRAWL_BUDGET: usize = 1_500;
+/// Per guild per crawl: enough for every post-telemetry player of the
+/// busiest guild in one round (0-5 had ~3,800 on 2026-10-26).
+const CRAWL_BUDGET: usize = 8_000;
 const CRAWL_CONCURRENCY: usize = 6;
 /// A guild whose reads keep failing is left for the next crawl.
 const CRAWL_MAX_ERRORS: usize = 20;
@@ -218,6 +219,8 @@ struct Directory {
     at: Instant,
     entries: Vec<GuildApiEntry>,
     versions: Vec<String>,
+    /// Each version's step catalog, from the first guild that has it.
+    catalogs: HashMap<String, Vec<Value>>,
 }
 static DIRECTORY: LazyLock<tokio::sync::Mutex<Option<Directory>>> = LazyLock::new(|| tokio::sync::Mutex::new(None));
 
@@ -236,7 +239,7 @@ pub fn sort_versions(mut v: Vec<String>) -> Vec<String> {
     v
 }
 
-async fn probe_versions(entries: &[GuildApiEntry]) -> Vec<String> {
+async fn probe_versions(entries: &[GuildApiEntry]) -> HashMap<String, Vec<Value>> {
     let mut asks = Vec::new();
     for e in entries {
         let Some(api) = e.guild_api.clone() else { continue };
@@ -245,27 +248,31 @@ async fn probe_versions(entries: &[GuildApiEntry]) -> Vec<String> {
             asks.push(async move {
                 let v = format!("{VERSION_PREFIX}{n}");
                 match client_for(&api).onboarding_catalog(&v).await {
-                    Ok(Value::Array(a)) if !a.is_empty() => Some(v),
+                    Ok(Value::Array(a)) if !a.is_empty() => Some((v, a)),
                     _ => None,
                 }
             });
         }
     }
-    let found: Vec<String> = futures_util::future::join_all(asks).await.into_iter().flatten().collect();
-    sort_versions(found)
+    let mut found = HashMap::new();
+    for (v, rows) in futures_util::future::join_all(asks).await.into_iter().flatten() {
+        found.entry(v).or_insert(rows);
+    }
+    found
 }
 
-async fn directory(fresh: bool) -> Result<(Vec<GuildApiEntry>, Vec<String>), String> {
+async fn directory(fresh: bool) -> Result<(Vec<GuildApiEntry>, Vec<String>, HashMap<String, Vec<Value>>), String> {
     let mut g = DIRECTORY.lock().await;
     if let Some(d) = g.as_ref() {
         if !fresh && d.at.elapsed() < DIRECTORY_TTL {
-            return Ok((d.entries.clone(), d.versions.clone()));
+            return Ok((d.entries.clone(), d.versions.clone(), d.catalogs.clone()));
         }
     }
     let entries = crate::guild_directory::guild_api_directory().await?;
-    let versions = probe_versions(&entries).await;
-    *g = Some(Directory { at: Instant::now(), entries: entries.clone(), versions: versions.clone() });
-    Ok((entries, versions))
+    let catalogs = probe_versions(&entries).await;
+    let versions = sort_versions(catalogs.keys().cloned().collect());
+    *g = Some(Directory { at: Instant::now(), entries: entries.clone(), versions: versions.clone(), catalogs: catalogs.clone() });
+    Ok((entries, versions, catalogs))
 }
 
 // ── Aggregates (every session, every guild) ─────────────────────────────────
@@ -277,15 +284,16 @@ struct GuildAggregate {
     error: Option<String>,
 }
 
-static AGGREGATES: LazyLock<Mutex<HashMap<(String, String, u32), (Instant, GuildAggregate)>>> =
+type AggregateKey = (String, String, u32, Option<String>);
+static AGGREGATES: LazyLock<Mutex<HashMap<AggregateKey, (Instant, GuildAggregate)>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
 fn missing_route(e: &str) -> bool {
     e.starts_with("Guild API 404 ")
 }
 
-async fn guild_aggregate(guild: &str, api: &str, version: &str, idle_hours: u32, fresh: bool) -> GuildAggregate {
-    let key = (guild.to_string(), version.to_string(), idle_hours);
+async fn guild_aggregate(guild: &str, api: &str, version: &str, idle_hours: u32, interface: Option<&str>, fresh: bool) -> GuildAggregate {
+    let key = (guild.to_string(), version.to_string(), idle_hours, interface.map(String::from));
     if !fresh {
         if let Some((at, a)) = AGGREGATES.lock().unwrap_or_else(|p| p.into_inner()).get(&key) {
             if at.elapsed() < AGGREGATE_TTL {
@@ -295,9 +303,9 @@ async fn guild_aggregate(guild: &str, api: &str, version: &str, idle_hours: u32,
     }
     let c = client_for(api);
     let (signup, tutorial, outcome) = tokio::join!(
-        c.onboarding_funnel(version, PHASES[0], idle_hours),
-        c.onboarding_funnel(version, PHASES[1], idle_hours),
-        c.onboarding_tutorial_outcome(version, idle_hours),
+        c.onboarding_funnel(version, PHASES[0], idle_hours, interface),
+        c.onboarding_funnel(version, PHASES[1], idle_hours, interface),
+        c.onboarding_tutorial_outcome(version, idle_hours, interface),
     );
     let mut a = GuildAggregate { funnels: BTreeMap::new(), outcome: Value::Null, error: None };
     for (phase, r) in [(PHASES[0], signup), (PHASES[1], tutorial)] {
@@ -358,24 +366,40 @@ pub fn merge_funnels(per_guild: &[(String, Vec<Value>)]) -> Vec<Value> {
     }
     let mut out: Vec<Value> = order.into_iter().filter_map(|k| steps.remove(&k)).collect();
     out.sort_by(|a, b| a["order"].as_f64().unwrap_or(0.0).total_cmp(&b["order"].as_f64().unwrap_or(0.0)));
-    let first = out
+    with_rates(out)
+}
+
+/// The rates every funnel row carries, individual and cumulative:
+/// `retained` and `lost` (1 − retained) against the phase's first step,
+/// `step_drop` = quit here / reached, `skip_rate` = skipped / reached,
+/// `cum_skip` = skipped up to and including here / first step. The first step
+/// is the one nothing precedes that has a successor — that excludes off-line
+/// steps such as the Recovery Key FAQ.
+pub fn with_rates(mut steps: Vec<Value>) -> Vec<Value> {
+    let first = steps
         .iter()
         .filter(|s| s["previous"].is_null() && !s["next"].is_null())
         .map(|s| s["reached"].as_f64().unwrap_or(0.0))
         .fold(0.0, f64::max);
-    for s in out.iter_mut() {
+    let ratio = |a: f64, b: f64| if b > 0.0 { json!(a / b) } else { Value::Null };
+    let mut skipped_so_far = 0.0;
+    for s in steps.iter_mut() {
         let r = s["reached"].as_f64().unwrap_or(0.0);
-        s["retained"] = if first > 0.0 { json!(r / first) } else { Value::Null };
+        let k = s["skipped"].as_f64().unwrap_or(0.0);
+        let on_line = !(s["previous"].is_null() && s["next"].is_null());
+        if on_line {
+            skipped_so_far += k;
+        }
+        s["retained"] = ratio(r, first);
+        s["lost"] = if first > 0.0 && on_line { json!(1.0 - r / first) } else { Value::Null };
+        s["step_drop"] = match s["dropped"].as_f64() {
+            Some(d) => ratio(d, r),
+            None => Value::Null,
+        };
+        s["skip_rate"] = ratio(k, r);
+        s["cum_skip"] = if on_line { ratio(skipped_so_far, first) } else { Value::Null };
     }
-    out
-}
-
-fn outcome_sum(outcomes: &[Value]) -> Value {
-    let mut t: BTreeMap<&str, f64> = BTreeMap::new();
-    for k in ["offered", "completed", "declined", "left_during_tutorial", "in_progress"] {
-        t.insert(k, outcomes.iter().filter_map(|o| num(o.get(k))).sum());
-    }
-    json!(t)
+    steps
 }
 
 // ── The crawl ───────────────────────────────────────────────────────────────
@@ -501,7 +525,8 @@ fn spawn_crawl(entries: Vec<GuildApiEntry>, idle_hours: u32) {
         let jobs = entries
             .into_iter()
             .filter_map(|e| e.guild_api.map(|api| crawl_guild(e.id, api, idle_hours)));
-        futures_util::future::join_all(jobs).await;
+        // Each guild's sessions, and the chain-wide player tables from ours.
+        tokio::join!(futures_util::future::join_all(jobs), crate::mcp::onboarding_players::crawl());
         let snapshot = PLAYERS.lock().unwrap_or_else(|p| p.into_inner()).clone();
         crate::mcp::cache_store::save_in_background(CACHE_NAME, snapshot);
         {
@@ -633,105 +658,365 @@ pub fn fold_sample(sessions: &[(&String, &PlayerSession)], next: &HashMap<String
     })
 }
 
+// ── Filters and segments ────────────────────────────────────────────────────
+
+/// One population, optionally split along one dimension. Every page of the
+/// card reads the same filters.
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct Filters {
+    #[serde(default)]
+    pub interface: Option<String>,
+    #[serde(default)]
+    pub guild: Option<String>,
+    /// `active` | `inactive`
+    #[serde(default)]
+    pub activity: Option<String>,
+    /// `interface` | `guild` | `activity`
+    #[serde(default)]
+    pub compare: Option<String>,
+}
+
+/// The interface of a player with no onboarding telemetry: signed up before
+/// it existed, through the API (agents, this app's replicants), or elsewhere.
+pub const NO_INTERFACE: &str = "none";
+pub const DEFAULT_ACTIVE_DAYS: u32 = 7;
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Seg {
+    pub key: String,
+    pub label: String,
+    pub guild: Option<String>,
+    pub interface: Option<String>,
+    pub active: Option<bool>,
+}
+
+impl Seg {
+    pub fn wants(&self, guild: &str, interface: &str, active: bool) -> bool {
+        self.guild.as_deref().map_or(true, |g| g == guild)
+            && self.interface.as_deref().map_or(true, |i| i == interface)
+            && self.active.map_or(true, |a| a == active)
+    }
+}
+
+fn clean(v: &Option<String>) -> Option<String> {
+    v.as_ref().map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
+}
+
+/// The filtered population, or one segment per value of the compared
+/// dimension (narrowed by the filter on that same dimension, if any).
+pub fn segments(f: &Filters, guilds: &[(String, String)], interfaces: &[String]) -> Vec<Seg> {
+    let base = Seg {
+        key: "all".into(),
+        label: "All".into(),
+        guild: clean(&f.guild),
+        interface: clean(&f.interface),
+        active: match clean(&f.activity).as_deref() {
+            Some("active") => Some(true),
+            Some("inactive") => Some(false),
+            _ => None,
+        },
+    };
+    match clean(&f.compare).as_deref() {
+        Some("guild") => guilds
+            .iter()
+            .filter(|(id, _)| base.guild.as_ref().map_or(true, |g| g == id))
+            .map(|(id, label)| Seg { key: id.clone(), label: label.clone(), guild: Some(id.clone()), ..base.clone() })
+            .collect(),
+        Some("interface") => interfaces
+            .iter()
+            .filter(|i| base.interface.as_ref().map_or(true, |b| b == *i))
+            .map(|i| Seg { key: i.clone(), label: i.clone(), interface: Some(i.clone()), ..base.clone() })
+            .collect(),
+        Some("activity") => [(true, "active", "Active"), (false, "inactive", "Inactive")]
+            .iter()
+            .filter(|(a, _, _)| base.active.map_or(true, |b| b == *a))
+            .map(|(a, k, l)| Seg { key: (*k).into(), label: (*l).into(), active: Some(*a), ..base.clone() })
+            .collect(),
+        _ => vec![base],
+    }
+}
+
+// ── Folds over a segment ────────────────────────────────────────────────────
+
+/// One phase of a catalog in order: (key, previous, next).
+pub fn phase_chain(catalog: &[Value], phase: &str) -> Vec<(String, Option<String>, Option<String>)> {
+    let mut rows: Vec<&Value> = catalog.iter().filter(|r| text(r.get("phase")) == phase).collect();
+    rows.sort_by(|a, b| num(a.get("step_order")).unwrap_or(0.0).total_cmp(&num(b.get("step_order")).unwrap_or(0.0)));
+    let next: HashMap<String, String> = rows
+        .iter()
+        .filter_map(|r| {
+            let p = text(r.get("previous_step_key"));
+            (!p.is_empty()).then(|| (p, text(r.get("step_key"))))
+        })
+        .collect();
+    rows.iter()
+        .map(|r| {
+            let k = text(r.get("step_key"));
+            let p = text(r.get("previous_step_key"));
+            let n = next.get(&k).cloned();
+            (k, (!p.is_empty()).then_some(p), n)
+        })
+        .collect()
+}
+
+/// A funnel over player sessions, the server's columns plus rates. Quitting
+/// is the server's rule (reached, never reached the next step, idle) less
+/// the players who SKIPPED this step: a skip is counted as a skip, not a quit.
+pub fn sample_funnel(chain: &[(String, Option<String>, Option<String>)], sessions: &[&PlayerSession], now: i64, idle_hours: u32) -> Vec<Value> {
+    let steps = chain
+        .iter()
+        .enumerate()
+        .map(|(i, (k, prev, next))| {
+            let reached: Vec<&&PlayerSession> = sessions.iter().filter(|s| s.reached(k).is_some()).collect();
+            let skipped = sessions.iter().filter(|s| s.skipped(k)).count();
+            let dropped = next.as_ref().map(|n| {
+                reached.iter().filter(|s| s.reached(n).is_none() && !s.skipped(k) && s.idle(now, idle_hours)).count()
+            });
+            json!({ "key": k, "order": i, "previous": prev, "next": next, "reached": reached.len() as f64,
+                    "skipped": skipped as f64, "dropped": dropped.map(|d| d as f64) })
+        })
+        .collect();
+    with_rates(steps)
+}
+
+/// `{n, zero, mean, p25, p50, p75, p90, max, hist}`; `hist` counts values in
+/// `[0]` then each `[edges[i], edges[i+1])`, the last open-ended.
+pub fn dist(mut v: Vec<f64>, edges: &[f64]) -> Value {
+    v.retain(|x| x.is_finite());
+    if v.is_empty() {
+        return json!({ "n": 0, "hist": [] });
+    }
+    v.sort_by(|a, b| a.total_cmp(b));
+    let n = v.len();
+    let at = |q: f64| v[(((n - 1) as f64) * q).round() as usize];
+    let mut hist = vec![json!({ "lo": 0, "hi": 0, "n": v.iter().filter(|x| **x < edges[0]).count() })];
+    for (i, lo) in edges.iter().enumerate() {
+        let hi = edges.get(i + 1).copied();
+        let c = v.iter().filter(|x| **x >= *lo && hi.map_or(true, |h| **x < h)).count();
+        hist.push(json!({ "lo": lo, "hi": hi, "n": c }));
+    }
+    json!({
+        "n": n, "zero": v.iter().filter(|x| **x == 0.0).count(),
+        "mean": v.iter().sum::<f64>() / n as f64,
+        "p25": at(0.25), "p50": at(0.5), "p75": at(0.75), "p90": at(0.9), "max": v[n - 1],
+        "hist": hist,
+    })
+}
+
+const COUNT_EDGES: [f64; 6] = [1.0, 10.0, 100.0, 1e3, 1e4, 1e5];
+const GRAM_EDGES: [f64; 9] = [1.0, 10.0, 100.0, 1e3, 1e4, 1e5, 1e6, 1e7, 1e8];
+/// 10 min · 1 h · 6 h · 1 d · 3 d · 7 d · 30 d
+const PLAY_EDGES: [f64; 8] = [1.0, 600.0, 3_600.0, 21_600.0, 86_400.0, 259_200.0, 604_800.0, 2_592_000.0];
+
+fn is_active(p: Option<&crate::mcp::onboarding_players::PlayerFacts>, cutoff: i64) -> bool {
+    p.and_then(|p| p.last_active_ms).map_or(false, |t| t >= cutoff)
+}
+
 // ── The read ────────────────────────────────────────────────────────────────
 
-/// The onboarding dashboard for one content version (default: the newest any
-/// guild has a catalog for). Starts or continues the per-player crawl in the
-/// background and answers with whatever the sample holds so far.
+/// The onboarding and player dashboard for one content version (default: the
+/// newest any guild has a catalog for), filtered and split by `filters`.
+/// Starts or continues the background crawls and answers with what they hold.
 #[tauri::command]
-pub async fn terminal_onboarding(version: Option<String>, idle_hours: Option<u32>, fresh: Option<bool>) -> Result<Value, String> {
+pub async fn terminal_onboarding(
+    version: Option<String>,
+    idle_hours: Option<u32>,
+    active_days: Option<u32>,
+    filters: Option<Filters>,
+    fresh: Option<bool>,
+) -> Result<Value, String> {
     let fresh = fresh.unwrap_or(false);
     let idle_hours = idle_hours.filter(|h| (1..=24 * 30).contains(h)).unwrap_or(DEFAULT_IDLE_HOURS);
-    let (entries, mut versions) = directory(fresh).await?;
-    {
-        let cached = PLAYERS.lock().unwrap_or_else(|p| p.into_inner());
-        let seen: Vec<String> = cached.values().map(|s| s.version.clone()).filter(|v| !v.is_empty()).collect();
-        versions = sort_versions(versions.into_iter().chain(seen).collect());
-    }
+    let active_days = active_days.filter(|d| (1..=365).contains(d)).unwrap_or(DEFAULT_ACTIVE_DAYS);
+    let filters = filters.unwrap_or_default();
+    let (entries, mut versions, catalogs) = directory(fresh).await?;
+    let now = now_ms();
+    let cutoff = now - active_days as i64 * 86_400_000;
+
+    let sessions_all = PLAYERS.lock().unwrap_or_else(|p| p.into_inner()).clone();
+    versions = sort_versions(versions.into_iter().chain(sessions_all.values().map(|s| s.version.clone()).filter(|v| !v.is_empty())).collect());
     let version = version
         .filter(|v| !v.trim().is_empty())
         .or_else(|| versions.first().cloned())
         .unwrap_or_else(|| format!("{VERSION_PREFIX}1"));
-
-    let with_api: Vec<&GuildApiEntry> = entries.iter().filter(|e| e.guild_api.is_some()).collect();
-    let aggs = futures_util::future::join_all(with_api.iter().map(|e| {
-        guild_aggregate(&e.id, e.guild_api.as_deref().unwrap_or_default(), &version, idle_hours, fresh)
-    }))
-    .await;
-    let by_id: HashMap<&str, &GuildAggregate> = with_api.iter().map(|e| e.id.as_str()).zip(aggs.iter()).collect();
+    let catalog = catalogs.get(&version).cloned().unwrap_or_default();
 
     if crawl_due(fresh) {
         spawn_crawl(entries.clone(), idle_hours);
     }
 
-    let mut phases = serde_json::Map::new();
-    let mut next: HashMap<String, String> = HashMap::new();
-    for phase in PHASES {
-        let per: Vec<(String, Vec<Value>)> = with_api
-            .iter()
-            .filter_map(|e| by_id.get(e.id.as_str()).and_then(|a| a.funnels.get(phase)).map(|f| (e.id.clone(), f.clone())))
-            .collect();
-        let merged = merge_funnels(&per);
-        for s in &merged {
-            if let (Some(k), Some(n)) = (s["key"].as_str(), s["next"].as_str()) {
-                next.insert(k.to_string(), n.to_string());
-            }
+    let (players, stats, refreshed_ms) = {
+        let u = crate::mcp::onboarding_players::UNIVERSE.lock().unwrap_or_else(|p| p.into_inner());
+        (u.players.clone(), u.stats(), u.refreshed_ms)
+    };
+    let interface_of: HashMap<&str, &str> = sessions_all
+        .iter()
+        .filter(|(_, s)| !s.events.is_empty() && !s.interface.is_empty())
+        .map(|(pid, s)| (pid.as_str(), s.interface.as_str()))
+        .collect();
+    let mut interfaces: Vec<String> = interface_of.values().map(|s| s.to_string()).collect::<HashSet<_>>().into_iter().collect();
+    interfaces.sort();
+    interfaces.push(NO_INTERFACE.into());
+    let guild_labels: Vec<(String, String)> = entries
+        .iter()
+        .map(|e| (e.id.clone(), if e.tag.is_empty() { if e.name.is_empty() { e.id.clone() } else { e.name.clone() } } else { e.tag.clone() }))
+        .collect();
+    let segs = segments(&filters, &guild_labels, &interfaces);
+    let base = segments(&Filters { compare: None, ..filters.clone() }, &guild_labels, &interfaces).remove(0);
+
+    // The server's aggregates: every (guild, interface) a segment's signup
+    // funnel needs, plus each guild unfiltered for the Guilds page.
+    let with_api: Vec<&GuildApiEntry> = entries.iter().filter(|e| e.guild_api.is_some()).collect();
+    let signup_guilds = |seg: &Seg| -> Option<Vec<String>> {
+        if seg.active.is_some() || seg.interface.as_deref() == Some(NO_INTERFACE) {
+            return None;
         }
-        phases.insert(phase.to_string(), Value::Array(merged));
+        Some(with_api.iter().filter(|e| seg.guild.as_ref().map_or(true, |g| *g == e.id)).map(|e| e.id.clone()).collect())
+    };
+    let mut combos: HashSet<(String, Option<String>)> = with_api.iter().map(|e| (e.id.clone(), None)).collect();
+    for seg in &segs {
+        for g in signup_guilds(seg).unwrap_or_default() {
+            combos.insert((g, seg.interface.clone()));
+        }
     }
-    let outcome = outcome_sum(&aggs.iter().map(|a| a.outcome.clone()).collect::<Vec<_>>());
+    let combos: Vec<(String, Option<String>)> = combos.into_iter().collect();
+    let api_of: HashMap<&str, &str> = with_api.iter().map(|e| (e.id.as_str(), e.guild_api.as_deref().unwrap_or_default())).collect();
+    let aggs = futures_util::future::join_all(combos.iter().map(|(g, i)| {
+        guild_aggregate(g, api_of.get(g.as_str()).copied().unwrap_or_default(), &version, idle_hours, i.as_deref(), fresh)
+    }))
+    .await;
+    let agg: HashMap<(String, Option<String>), GuildAggregate> = combos.into_iter().zip(aggs).collect();
 
-    let first_reached = |rows: Option<&Vec<Value>>| -> f64 {
-        rows.map(|r| merge_funnels(&[(String::new(), r.clone())]))
-            .and_then(|m| m.iter().filter(|s| s["previous"].is_null() && !s["next"].is_null()).map(|s| s["reached"].as_f64().unwrap_or(0.0)).reduce(f64::max))
-            .unwrap_or(0.0)
-    };
-    let step_reached = |rows: Option<&Vec<Value>>, key: &str| -> f64 {
-        rows.and_then(|r| r.iter().find(|s| text(s.get("step_key")) == key)).and_then(|s| num(s.get("reached"))).unwrap_or(0.0)
+    let tutorial_chain = phase_chain(&catalog, PHASES[1]);
+    let session_in = |seg: &Seg, pid: &str, s: &PlayerSession| -> bool {
+        s.version == version && !s.events.is_empty() && seg.wants(&s.guild, if s.interface.is_empty() { NO_INTERFACE } else { &s.interface }, is_active(players.get(pid), cutoff))
     };
 
-    let now = now_ms();
-    let cached = PLAYERS.lock().unwrap_or_else(|p| p.into_inner()).clone();
+    let out_segs: Vec<Value> = segs
+        .iter()
+        .map(|seg| {
+            // Players.
+            let members: Vec<(&String, &crate::mcp::onboarding_players::PlayerFacts)> = players
+                .iter()
+                .filter(|(pid, p)| seg.wants(&p.guild, interface_of.get(pid.as_str()).copied().unwrap_or(NO_INTERFACE), is_active(Some(p), cutoff)))
+                .collect();
+            let active = members.iter().filter(|(_, p)| is_active(Some(p), cutoff)).count();
+            let churn_base: Vec<_> = members.iter().filter(|(_, p)| p.created_ms.map_or(true, |c| c <= cutoff)).collect();
+            let churned = churn_base.iter().filter(|(_, p)| !is_active(Some(p), cutoff)).count();
+            let st: Vec<&crate::mcp::onboarding_players::PlayerStats> = members.iter().filter_map(|(pid, _)| stats.get(*pid)).collect();
+            let gather = |f: &dyn Fn(&crate::mcp::onboarding_players::PlayerStats) -> Option<f64>| st.iter().filter_map(|s| f(s)).collect::<Vec<f64>>();
+
+            // Sessions.
+            let sess: Vec<(&String, &PlayerSession)> = sessions_all.iter().filter(|(pid, s)| session_in(seg, pid, s)).collect();
+            let refs: Vec<&PlayerSession> = sess.iter().map(|(_, s)| *s).collect();
+            let tutorial = sample_funnel(&tutorial_chain, &refs, now, idle_hours);
+            let offered: Vec<&&PlayerSession> = refs.iter().filter(|s| s.reached(OFFER_STEP).is_some()).collect();
+            let count = |o: &str| offered.iter().filter(|s| s.outcome(now, idle_hours) == o).count();
+            let (completed, declined, left) = (count("completed"), count("declined"), count("left"));
+            let ratio = |a: usize, b: usize| if b > 0 { json!(a as f64 / b as f64) } else { Value::Null };
+            let play: Vec<f64> = sess
+                .iter()
+                .filter(|(pid, _)| !is_active(players.get(pid.as_str()), cutoff))
+                .filter_map(|(pid, s)| {
+                    let signed = s.reached(PLAYER_STEP)?;
+                    let last = players.get(pid.as_str()).and_then(|p| p.last_active_ms).unwrap_or(signed);
+                    Some(((last - signed).max(0) as f64) / 1000.0)
+                })
+                .collect();
+            let folded = fold_sample(&sess, &HashMap::new(), now, idle_hours, 0);
+            let mut dwell_next: HashMap<String, String> = tutorial_chain.iter().filter_map(|(k, _, n)| n.clone().map(|n| (k.clone(), n))).collect();
+            dwell_next.extend(phase_chain(&catalog, PHASES[0]).into_iter().filter_map(|(k, _, n)| n.map(|n| (k, n))));
+            let dwell = fold_sample(&sess, &dwell_next, now, idle_hours, 0)["dwell"].clone();
+
+            // The server's signup funnel.
+            let signup = signup_guilds(seg).map(|gs| {
+                let per: Vec<(String, Vec<Value>)> = gs
+                    .iter()
+                    .filter_map(|g| agg.get(&(g.clone(), seg.interface.clone())).and_then(|a| a.funnels.get(PHASES[0])).map(|f| (g.clone(), f.clone())))
+                    .collect();
+                let steps = merge_funnels(&per);
+                let started = steps.iter().filter(|s| s["previous"].is_null() && !s["next"].is_null()).map(|s| s["reached"].as_f64().unwrap_or(0.0)).fold(0.0, f64::max);
+                let signed = steps.iter().find(|s| s["key"] == PLAYER_STEP).and_then(|s| s["reached"].as_f64()).unwrap_or(0.0);
+                json!({ "steps": steps, "started": started, "signed_up": signed,
+                        "dropoff_rate": if started > 0.0 { json!(1.0 - signed / started) } else { Value::Null } })
+            });
+
+            json!({
+                "key": seg.key, "label": seg.label,
+                "players": members.len(), "active": active, "inactive": members.len() - active,
+                "active_rate": ratio(active, members.len()),
+                "churn_base": churn_base.len(), "churned": churned, "churn_rate": ratio(churned, churn_base.len()),
+                "signup": signup.unwrap_or(Value::Null),
+                "tutorial": {
+                    "steps": tutorial, "offered": offered.len(), "completed": completed, "declined": declined, "left": left,
+                    "playing": count("playing"), "deciding": count("deciding"),
+                    "completion_rate": ratio(completed, offered.len()), "decline_rate": ratio(declined, offered.len()), "quit_rate": ratio(left, offered.len()),
+                },
+                "sessions": sess.len(),
+                "durations": folded["durations"], "daily": folded["daily"], "dwell": dwell,
+                "stats": {
+                    "mined": dist(gather(&|s| s.mined_g), &GRAM_EDGES),
+                    "refined": dist(gather(&|s| s.refined_g), &GRAM_EDGES),
+                    "planets": dist(gather(&|s| Some(s.planets)), &COUNT_EDGES),
+                    "raids_initiated": dist(gather(&|s| Some(s.raids_initiated)), &COUNT_EDGES),
+                    "raids_won": dist(gather(&|s| Some(s.raids_won)), &COUNT_EDGES),
+                },
+                "play_length": dist(play, &PLAY_EDGES),
+            })
+        })
+        .collect();
+
+    let recent_sessions: Vec<(&String, &PlayerSession)> = sessions_all.iter().filter(|(pid, s)| session_in(&base, pid, s)).collect();
+    let recent = fold_sample(&recent_sessions, &HashMap::new(), now, idle_hours, 30)["recent"].clone();
+
     let crawl = {
         let st = CRAWL.lock().unwrap_or_else(|p| p.into_inner());
+        let u = crate::mcp::onboarding_players::UNIVERSE_CRAWL.lock().unwrap_or_else(|p| p.into_inner()).clone();
         json!({
             "running": CRAWLING.load(Ordering::SeqCst),
             "finished_ms": if st.finished_ms > 0 { json!(st.finished_ms) } else { Value::Null },
             "guilds": st.guilds,
+            "players": { "known": players.len(), "ledgers": players.values().filter(|p| p.mined_g.is_some()).count(),
+                         "refreshed_ms": if refreshed_ms > 0 { json!(refreshed_ms) } else { Value::Null }, "round": u },
         })
     };
     let guilds: Vec<Value> = entries
         .iter()
         .map(|e| {
-            let a = by_id.get(e.id.as_str());
+            let a = agg.get(&(e.id.clone(), None));
             let signup = a.and_then(|a| a.funnels.get(PHASES[0]));
-            let mine: Vec<&PlayerSession> = cached.values().filter(|s| s.guild == e.id).collect();
+            let first = signup.map(|r| merge_funnels(&[(String::new(), r.clone())])).and_then(|m| {
+                m.iter().filter(|s| s["previous"].is_null() && !s["next"].is_null()).map(|s| s["reached"].as_f64().unwrap_or(0.0)).reduce(f64::max)
+            });
+            let signed = signup.and_then(|r| r.iter().find(|s| text(s.get("step_key")) == PLAYER_STEP)).and_then(|s| num(s.get("reached")));
+            let mine: Vec<&PlayerSession> = sessions_all.values().filter(|s| s.guild == e.id).collect();
+            let members: Vec<_> = players.values().filter(|p| p.guild == e.id).collect();
             json!({
                 "id": e.id, "name": e.name, "tag": e.tag,
                 "status": if e.guild_api.is_none() { "no_api" } else if a.and_then(|a| a.error.as_ref()).is_some() { "error" } else { "ok" },
                 "error": e.error.clone().or_else(|| a.and_then(|a| a.error.clone())),
-                "started": first_reached(signup),
-                "signed_up": step_reached(signup, PLAYER_STEP),
+                "started": first, "signed_up": signed,
                 "outcome": a.map(|a| a.outcome.clone()).unwrap_or(Value::Null),
                 "sampled": mine.iter().filter(|s| !s.events.is_empty()).count(),
                 "untracked": mine.iter().filter(|s| s.events.is_empty()).count(),
+                "players": members.len(),
+                "active": members.iter().filter(|p| is_active(Some(p), cutoff)).count(),
             })
         })
         .collect();
-
-    let sample: Vec<(&String, &PlayerSession)> = cached.iter().filter(|(_, s)| s.version == version).collect();
-    let folded = fold_sample(&sample, &next, now, idle_hours, 30);
 
     Ok(json!({
         "version": version,
         "versions": versions,
         "idle_hours": idle_hours,
+        "active_days": active_days,
         "generated_ms": now,
+        "filters": { "interface": clean(&filters.interface), "guild": clean(&filters.guild), "activity": clean(&filters.activity), "compare": clean(&filters.compare) },
+        "options": { "interfaces": interfaces, "guilds": guild_labels.iter().map(|(id, l)| json!({ "id": id, "label": l })).collect::<Vec<_>>() },
+        "segments": out_segs,
         "guilds": guilds,
-        "phases": phases,
-        "outcome": outcome,
-        "sample": folded,
-        "untracked": cached.values().filter(|s| s.events.is_empty()).count(),
+        "recent": recent,
+        "untracked": sessions_all.values().filter(|s| s.events.is_empty()).count(),
         "crawl": crawl,
     }))
 }
@@ -867,6 +1152,74 @@ mod tests {
         assert_eq!(f["recent"][0]["player_id"], json!("1-6002"), "most recent activity first");
     }
 
+    fn catalog() -> Vec<Value> {
+        [("tutorial", 1, "orientation.tutorial_offer", ""), ("tutorial", 2, "tutorial.loading", "orientation.tutorial_offer"),
+         ("tutorial", 3, "tutorial.end.ftl_jump", "tutorial.loading"), ("signup", 12, "signup.employee_record", "signup.submit")]
+            .iter()
+            .map(|(p, o, k, prev)| json!({"phase": p, "step_order": o, "step_key": k, "previous_step_key": if prev.is_empty() { Value::Null } else { json!(prev) }}))
+            .collect()
+    }
+
+    fn sess(steps: &[(&str, bool, i64)]) -> PlayerSession {
+        PlayerSession { guild: "0-5".into(), version: "tutorial-4".into(), interface: "structs-webapp".into(),
+            events: steps.iter().map(|(k, s, t)| Ev { k: k.to_string(), s: *s, t: *t }).collect(), ..Default::default() }
+    }
+
+    #[test]
+    fn the_tutorial_funnel_counts_a_skip_as_a_skip_not_a_quit() {
+        let chain = phase_chain(&catalog(), "tutorial");
+        assert_eq!(chain.iter().map(|c| c.0.as_str()).collect::<Vec<_>>(), vec![OFFER_STEP, LOADING_STEP, FTL_STEP]);
+        assert_eq!(chain[0].2.as_deref(), Some(LOADING_STEP));
+        let done = sess(&[(OFFER_STEP, false, 0), (LOADING_STEP, false, 1), (FTL_STEP, false, 2)]);
+        let skip = sess(&[(OFFER_STEP, false, 0), (OFFER_STEP, true, 1)]);
+        let quit = sess(&[(OFFER_STEP, false, 0), (LOADING_STEP, false, 1)]);
+        let fresh = sess(&[(OFFER_STEP, false, 0)]);
+        let now = 2 * 86_400_000;
+        let mut late = fresh.clone();
+        late.events[0].t = now - 1000;
+        let f = sample_funnel(&chain, &[&done, &skip, &quit, &late], now, 24);
+        assert_eq!(f[0]["reached"], json!(4.0));
+        assert_eq!(f[0]["skipped"], json!(1.0));
+        assert_eq!(f[0]["dropped"], json!(0.0), "the skipper is not a quit, and the one still deciding is not idle");
+        assert_eq!(f[0]["skip_rate"], json!(0.25));
+        assert_eq!(f[1]["dropped"], json!(1.0));
+        assert_eq!(f[1]["step_drop"], json!(0.5));
+        assert_eq!(f[1]["lost"], json!(0.5), "cumulative: half the players offered never got past loading");
+        assert_eq!(f[1]["cum_skip"], json!(0.25));
+        assert_eq!(f[2]["dropped"], Value::Null, "the last step has no quit figure");
+        assert_eq!(f[2]["retained"], json!(0.25));
+    }
+
+    #[test]
+    fn segments_split_one_dimension_within_the_filter() {
+        let guilds = vec![("0-1".to_string(), "OH".to_string()), ("0-5".to_string(), "SN.C".to_string())];
+        let ifaces = vec!["structs-webapp".to_string(), NO_INTERFACE.to_string()];
+        let one = segments(&Filters { guild: Some("0-5".into()), activity: Some("active".into()), ..Default::default() }, &guilds, &ifaces);
+        assert_eq!(one.len(), 1);
+        assert_eq!((one[0].guild.as_deref(), one[0].active), (Some("0-5"), Some(true)));
+        let by_iface = segments(&Filters { compare: Some("interface".into()), guild: Some("0-5".into()), ..Default::default() }, &guilds, &ifaces);
+        assert_eq!(by_iface.iter().map(|s| s.key.as_str()).collect::<Vec<_>>(), vec!["structs-webapp", "none"]);
+        assert!(by_iface.iter().all(|s| s.guild.as_deref() == Some("0-5")), "the filter still applies to every segment");
+        let by_guild = segments(&Filters { compare: Some("guild".into()), guild: Some("0-1".into()), ..Default::default() }, &guilds, &ifaces);
+        assert_eq!(by_guild.len(), 1, "comparing within a filtered dimension leaves its one value");
+        let by_act = segments(&Filters { compare: Some("activity".into()), ..Default::default() }, &guilds, &ifaces);
+        assert_eq!(by_act.iter().map(|s| s.active).collect::<Vec<_>>(), vec![Some(true), Some(false)]);
+        assert!(by_act[0].wants("0-9", "x", true) && !by_act[0].wants("0-9", "x", false));
+    }
+
+    #[test]
+    fn distributions_bucket_by_decade_with_zero_apart() {
+        let d = dist(vec![0.0, 0.0, 3.0, 12.0, 150.0, f64::NAN], &COUNT_EDGES);
+        assert_eq!(d["n"], json!(5));
+        assert_eq!(d["zero"], json!(2));
+        assert_eq!(d["p50"], json!(3.0));
+        assert_eq!(d["max"], json!(150.0));
+        let h: Vec<u64> = d["hist"].as_array().unwrap().iter().map(|b| b["n"].as_u64().unwrap()).collect();
+        assert_eq!(h, vec![2, 1, 1, 1, 0, 0, 0]);
+        assert_eq!(d["hist"][6]["hi"], Value::Null, "the last bucket is open-ended");
+        assert_eq!(dist(vec![], &COUNT_EDGES)["n"], json!(0));
+    }
+
     #[test]
     fn spread_is_null_when_nothing_was_measured() {
         assert_eq!(spread(vec![]), Value::Null);
@@ -920,7 +1273,7 @@ mod tests {
     #[tokio::test]
     #[ignore]
     async fn live_onboarding_aggregates() {
-        let v = terminal_onboarding(None, None, Some(true)).await.expect("read");
+        let v = terminal_onboarding(None, None, None, None, Some(true)).await.expect("read");
         eprintln!("{}", serde_json::to_string_pretty(&json!({"guilds": v["guilds"], "outcome": v["outcome"], "versions": v["versions"]})).unwrap());
     }
 }

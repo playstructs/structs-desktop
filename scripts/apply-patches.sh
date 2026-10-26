@@ -844,6 +844,18 @@ TXQ_EOF
 grep -q "__STRUCTS_TXQ__" "$BUILD_DIR/js/index.js" \
   || { echo "ERROR: txq façade patch did not apply"; exit 1; }
 
+# ── Onboarding telemetry: name this client ──
+# The webapp records every signup and tutorial session with
+# ONBOARDING_INTERFACE_NAME = 'structs-webapp', and the desktop app runs that
+# same bundle, so desktop signups were indistinguishable from browser ones in
+# each guild's onboarding_session.interface_name (the Onboarding card's
+# Interface filter). The server takes any slug, so the desktop build reports
+# its own. Only onboarding reads this constant.
+echo "    Patching OnboardingTelemetry.js (desktop interface name)..."
+sed -i.bak "s|export const ONBOARDING_INTERFACE_NAME = 'structs-webapp';|export const ONBOARDING_INTERFACE_NAME = 'structs-desktop';|" \
+  "$BUILD_DIR/js/telemetry/OnboardingTelemetry.js"
+verify_patched "$BUILD_DIR/js/telemetry/OnboardingTelemetry.js" "ONBOARDING_INTERFACE_NAME = 'structs-desktop'" "OnboardingTelemetry.js interface name"
+
 # ── Combat Training offer contract ──
 # frontend/structs-config.js re-offers the tutorial to players who never went
 # through it. It cannot import the webapp's own constants (the bundle keeps them
