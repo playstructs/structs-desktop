@@ -28,6 +28,16 @@
 //! since the indexer last rebuilt its player table (late September on the
 //! mirror), a floor before that. Play length after signup is therefore
 //! measured from the onboarding telemetry's own `signup.employee_record`.
+//!
+//! ## Replicants
+//!
+//! A replicant grants its primary `PermAll` on its own player object (every
+//! one this app launches does, `delegation.rs`); a human almost never hands
+//! another player full control. So `1-X@1-Y` at full control, X ≠ Y, marks
+//! 1-X as a replicant of 1-Y. The chain's whole permission store is three
+//! LCD pages (~30k rows, under a second), so it is read whole each crawl
+//! rather than tracked. Not perfect: a human who gives an alt full control
+//! reads as a replicant, and a bot that grants nothing reads as human.
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -52,6 +62,9 @@ const LEDGER_REFRESH_MS: i64 = 6 * 3_600_000;
 /// a strict `>` on a timestamp the indexer writes, not a cursor.
 const OVERLAP_SECS: i64 = 120;
 const CACHE_NAME: &str = "onboarding_universe";
+/// The permission store at the LCD's maximum page; a few pages cover it.
+const PERM_PAGE: usize = 10_000;
+const PERM_MAX_PAGES: usize = 20;
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct PlayerFacts {
@@ -90,6 +103,11 @@ pub struct Universe {
     since: HashMap<String, i64>,
     #[serde(default)]
     pub refreshed_ms: i64,
+    /// replicant → its primary, from the chain's permission store.
+    #[serde(default)]
+    pub replicants: HashMap<String, String>,
+    #[serde(default)]
+    pub replicants_ms: i64,
 }
 
 /// The five counters, derived from the tables. `None` = not known yet.
@@ -203,6 +221,10 @@ impl Universe {
             .collect();
     }
 
+    pub fn is_replicant(&self, id: &str) -> bool {
+        self.replicants.contains_key(id)
+    }
+
     /// The counters for every player, in one pass over the tables.
     pub fn stats(&self) -> HashMap<String, PlayerStats> {
         let mut out: HashMap<String, PlayerStats> = self
@@ -260,30 +282,80 @@ pub fn ledger_totals(rows: &[Value]) -> (f64, f64) {
     (mined, refined_u / 1_000_000.0)
 }
 
+/// Replicant → primary from LCD permission records (`permissionId` is
+/// `object@grantee`): a player object granting full control to ANOTHER player.
+pub fn replicants_from(records: &[Value]) -> HashMap<String, String> {
+    let mut out = HashMap::new();
+    for r in records {
+        let id = text(r.get("permissionId"));
+        let Some((obj, who)) = id.split_once('@') else { continue };
+        let full = text(r.get("value")).parse::<u64>().map_or(false, crate::mcp::delegation::has_full_control);
+        if full && obj != who && obj.starts_with("1-") && who.starts_with("1-") {
+            out.insert(obj.to_string(), who.to_string());
+        }
+    }
+    out
+}
+
+/// The whole permission store from the chain, folded to replicant → primary.
+pub async fn read_replicants() -> Result<HashMap<String, String>, String> {
+    let c = crate::mcp::cosmos_client::CosmosClient::new();
+    let mut records: Vec<Value> = Vec::new();
+    let mut key: Option<String> = None;
+    for _ in 0..PERM_MAX_PAGES {
+        let mut path = format!("/structs/permission?pagination.limit={PERM_PAGE}");
+        if let Some(k) = &key {
+            path.push_str(&format!("&pagination.key={}", crate::mcp::cosmos_client::encode_pagination_key(k)));
+        }
+        let (v, _, _) = c.lcd_get_bulk(&path).await?;
+        if let Some(Value::Array(rows)) = v.get("permissionRecords") {
+            records.extend(rows.iter().cloned());
+        }
+        key = v.get("pagination").and_then(|p| p.get("next_key")).and_then(|k| k.as_str()).filter(|k| !k.is_empty()).map(String::from);
+        if key.is_none() {
+            return Ok(replicants_from(&records));
+        }
+    }
+    Err(format!("permission store longer than {PERM_MAX_PAGES} pages"))
+}
+
+/// Refresh the replicant map. A failed read keeps the last one.
+pub async fn refresh_replicants() -> Result<(), String> {
+    let map = read_replicants().await?;
+    let mut u = UNIVERSE.lock().unwrap_or_else(|p| p.into_inner());
+    u.replicants = map;
+    u.replicants_ms = now_ms();
+    Ok(())
+}
+
 /// Which players' ledgers to read now: never read first, then those who have
-/// acted since and were read long enough ago; newest player first.
-pub fn ledger_plan(players: &HashMap<String, PlayerFacts>, now: i64) -> Vec<String> {
+/// acted since and were read long enough ago; newest player first, and every
+/// human before any replicant.
+pub fn ledger_plan(players: &HashMap<String, PlayerFacts>, replicants: &HashMap<String, String>, now: i64) -> Vec<String> {
     let index = |id: &str| id.split_once('-').and_then(|(_, i)| i.parse::<u64>().ok()).unwrap_or(0);
-    let mut never: Vec<&String> = Vec::new();
-    let mut stale: Vec<&String> = Vec::new();
+    // [human never, human stale, replicant never, replicant stale]
+    let mut tiers: [Vec<&String>; 4] = Default::default();
     for (id, p) in players {
         if !id.starts_with("1-") {
             continue;
         }
+        let r = if replicants.contains_key(id) { 2 } else { 0 };
         if p.ledger_ms == 0 {
-            never.push(id);
+            tiers[r].push(id);
         } else if p.last_active_ms.map(|a| a > p.ledger_ms).unwrap_or(false) && now - p.ledger_ms > LEDGER_REFRESH_MS {
-            stale.push(id);
+            tiers[r + 1].push(id);
         }
     }
-    never.sort_by_key(|id| std::cmp::Reverse(index(id)));
-    stale.sort_by_key(|id| std::cmp::Reverse(index(id)));
-    never.into_iter().chain(stale).take(LEDGER_BUDGET).cloned().collect()
+    for t in tiers.iter_mut() {
+        t.sort_by_key(|id| std::cmp::Reverse(index(id)));
+    }
+    tiers.into_iter().flatten().take(LEDGER_BUDGET).cloned().collect()
 }
 
 #[derive(Clone, Debug, Default, Serialize)]
 pub struct UniverseCrawl {
     pub tables_error: Option<String>,
+    pub replicants_error: Option<String>,
     pub ledger_todo: usize,
     pub ledger_read: usize,
     pub ledger_errors: usize,
@@ -346,15 +418,19 @@ async fn read_ledger(c: &GuildApiClient, pid: &str) -> Result<(f64, f64, bool), 
     Ok((m, r, truncated))
 }
 
-/// One round: the tables, then up to `LEDGER_BUDGET` ledgers. Persists.
-pub async fn crawl() {
+/// One round: the tables, then up to `LEDGER_BUDGET` ledgers, humans first.
+/// The replicant map is read before this (`refresh_replicants`). Persists.
+pub async fn crawl(replicants_error: Option<String>) {
     use futures_util::StreamExt;
     let c = crate::mcp::cosmos_client::CosmosClient::new().guild;
     let tables = refresh_tables(&c).await;
-    let todo = ledger_plan(&UNIVERSE.lock().unwrap_or_else(|p| p.into_inner()).players, now_ms());
+    let todo = {
+        let u = UNIVERSE.lock().unwrap_or_else(|p| p.into_inner());
+        ledger_plan(&u.players, &u.replicants, now_ms())
+    };
     {
         let mut st = UNIVERSE_CRAWL.lock().unwrap_or_else(|p| p.into_inner());
-        *st = UniverseCrawl { tables_error: tables.err(), ledger_todo: todo.len(), ..Default::default() };
+        *st = UniverseCrawl { tables_error: tables.err(), replicants_error, ledger_todo: todo.len(), ..Default::default() };
     }
     let mut results = futures_util::stream::iter(todo.into_iter().map(|pid| {
         let c = c.clone();
@@ -448,6 +524,35 @@ mod tests {
         p.insert("1-7".into(), PlayerFacts { ledger_ms: 10 * 3_600_000, last_active_ms: Some(20 * 3_600_000), ..Default::default() });
         p.insert("1-8".into(), PlayerFacts { ledger_ms: 10 * 3_600_000, last_active_ms: Some(5 * 3_600_000), ..Default::default() });
         p.insert("1-9".into(), PlayerFacts { ledger_ms: now - 3_600_000, last_active_ms: Some(now), ..Default::default() });
-        assert_eq!(ledger_plan(&p, now), vec!["1-50", "1-5", "1-7"]);
+        assert_eq!(ledger_plan(&p, &HashMap::new(), now), vec!["1-50", "1-5", "1-7"]);
+        let reps: HashMap<String, String> = [("1-50".to_string(), "1-1".to_string())].into();
+        assert_eq!(ledger_plan(&p, &reps, now), vec!["1-5", "1-7", "1-50"], "every human before any replicant");
+    }
+
+    #[test]
+    fn a_player_granting_another_full_control_is_a_replicant() {
+        let rows = vec![
+            json!({"permissionId": "1-300@1-194", "value": "33554431"}),
+            json!({"permissionId": "1-301@1-301", "value": "33554431"}),
+            json!({"permissionId": "1-302@1-194", "value": "15728640"}),
+            json!({"permissionId": "1-303@1-194", "value": "16777215"}),
+            json!({"permissionId": "2-9@1-194", "value": "33554431"}),
+            json!({"permissionId": "1-304@8-1", "value": "33554431"}),
+            json!({"permissionId": "garbage", "value": "33554431"}),
+        ];
+        let r = replicants_from(&rows);
+        assert_eq!(r.len(), 1, "{r:?}");
+        assert_eq!(r.get("1-300").map(String::as_str), Some("1-194"));
+    }
+
+    /// `cargo test --bin structs-app live_replicants -- --ignored --nocapture`
+    #[tokio::test]
+    #[ignore]
+    async fn live_replicants_come_from_the_whole_permission_store() {
+        let r = read_replicants().await.expect("permission store");
+        let primaries: std::collections::HashSet<&String> = r.values().collect();
+        println!("{} replicants under {} primaries", r.len(), primaries.len());
+        assert!(r.len() > 1_000 && primaries.len() < r.len() / 10);
+        assert!(!primaries.iter().any(|p| r.contains_key(*p)), "no primary is itself a replicant");
     }
 }

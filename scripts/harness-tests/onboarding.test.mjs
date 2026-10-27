@@ -5,7 +5,7 @@
 // The brief this pins: how far new players get through signup and Combat
 // Training, how long it takes, where they quit or skip, and what players do
 // afterwards — over every guild. Every page reads the same filters
-// (interface, guild, active/inactive) and can compare by one of them.
+// (interface, guild, active/inactive, replicants) and can compare by one of them.
 import { JSDOM } from 'jsdom';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { dirname, resolve } from 'node:path';
@@ -61,6 +61,7 @@ if (host) {
   check('OVERVIEW: players, active, churn and signup drop-off', /^9,600 PLAYERS$/.test(tiles[0]) && /ACTIVE 42%/.test(tiles[1]) && /^61% CHURN/.test(tiles[2]) && /^49% SIGNUP DROP-OFF 2,140 STARTED$/.test(tiles[3]), JSON.stringify(tiles));
   check('OVERVIEW: finished against not', tiles.some((t) => /^402 FINISHED 37%$/.test(t)) && tiles.some((t) => /^472 QUIT 43%$/.test(t)), JSON.stringify(tiles));
   check('one read, asked with the default windows and no filter', calls().length >= 1 && calls()[0].args.idleHours === 24 && calls()[0].args.activeDays === 7 && !calls()[0].args.filters.compare, JSON.stringify(calls()[0] || null));
+  check('humans only by default', calls()[0].args.filters.replicants === false, JSON.stringify(calls()[0].args.filters));
   check('four filter controls, the windows, and the version', host.querySelectorAll('.ob-controls select').length === 7);
 
   const go = (label) => { [...host.querySelectorAll('.ob .sui-screen-nav-item')].find((a) => text(a) === label).click(); };
@@ -92,6 +93,8 @@ if (host) {
   check('TIMING ranks steps by median time', host.querySelector('.ob-slow .ob-row[data-step]').dataset.step === 'signup.recovery_key_create');
   go('Guilds');
   const g = [...host.querySelectorAll('.ob-guilds .ob-row[data-guild]')];
+  const sn = g.find((r) => r.dataset.guild === '0-5');
+  check('GUILDS: replicants are not counted as sessions left to read', sn && text(sn.lastChild) === '3,810 / 3,810', sn && text(sn.lastChild));
   check('GUILDS lists every guild with its players, the one without an API quiet', g.length === 3 && g.find((r) => r.dataset.guild === '0-2').classList.contains('is-quiet') && /^72$/.test(text(g.find((r) => r.dataset.guild === '0-2').children[1])));
   go('Recent');
   const p = host.querySelector('.ob-recent .ob-row[data-player="1-9580"]');
@@ -122,6 +125,24 @@ if (host) {
   sel()[0].value = 'structs-webapp'; sel()[0].dispatchEvent(new w.Event('change'));
   const filtered = await until(() => calls().find((c) => c.args.filters.interface === 'structs-webapp'));
   check('a filter is a param too', !!filtered);
+  // ── Replicants ──
+  const box = () => host.querySelector('.ob-controls .sui-checkbox-container input');
+  check('a Replicants checkbox, unticked', box() && box().checked === false && !box().disabled);
+  check('the footer counts humans and names the replicants set aside', /of 445 humans/.test(text(host.querySelector('.ob-foot'))) && /9,167 replicants under 9 primaries/.test(text(host.querySelector('.ob-foot'))), text(host.querySelector('.ob-foot')));
+  box().checked = true; box().dispatchEvent(new w.Event('change'));
+  check('ticking it asks with replicants', !!(await until(() => calls().find((c) => c.args.filters.replicants === true))));
+  await until(() => box() && box().checked);
+  check('…and the footer then counts every player', /of 9,612 players/.test(text(host.querySelector('.ob-foot'))), text(host.querySelector('.ob-foot')));
+  sel()[3].value = 'replicant'; sel()[3].dispatchEvent(new w.Event('change'));
+  check('Compare: Human / replicant', !!(await until(() => calls().find((c) => c.args.filters.compare === 'replicant'))));
+  await until(() => /Replicants/.test(text(host.querySelector('.ob-compare .ob-head'))) || /Replicants/.test(text(host.querySelector('.ob-dist'))));
+  check('comparing them ticks and locks the box', box() && box().checked && box().disabled);
+  go('Overview');
+  const rh = [...host.querySelectorAll('.ob-compare .ob-head .ob-c')].map(text).join('|');
+  check('OVERVIEW compares humans with replicants', rh === '|Humans|Replicants', rh);
+  go('Signup');
+  check('replicants have no signup funnel, so Signup shows the humans alone', host.querySelector('.ob-view .ob-funnel') && !host.querySelector('.ob-view .ob-compare'));
+
   check('the card is titled Telemetry', /^Telemetry\b/.test(text(d.querySelector('#tm-grid .tm-card[data-card="' + id + '"] .tm-title'))), text(d.querySelector('#tm-grid .tm-card[data-card="' + id + '"] .tm-title')));
   check('while the crawl runs the footer says so with the in-progress glyph', !!host.querySelector('.ob-foot .icon-in-progress') && /reading…/.test(text(host.querySelector('.ob-foot'))));
 }

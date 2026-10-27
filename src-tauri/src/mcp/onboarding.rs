@@ -408,6 +408,7 @@ pub fn with_rates(mut steps: Vec<Value>) -> Vec<Value> {
 struct GuildCrawl {
     candidates: usize,
     team_skipped: usize,
+    replicants_skipped: usize,
     fetched: usize,
     errors: usize,
     last_error: Option<String>,
@@ -428,24 +429,38 @@ fn now_ms() -> i64 {
     chrono::Utc::now().timestamp_millis()
 }
 
-/// Which roster players to ask, newest first: (to fetch, newest set, team skipped, candidates).
+/// Which roster players to ask, newest first. Replicants sign up from code,
+/// never through an interface, so they have no telemetry to read.
+pub struct CrawlPlan {
+    pub todo: Vec<(String, String)>,
+    pub newest: HashSet<String>,
+    pub team: usize,
+    pub replicants: usize,
+    pub candidates: usize,
+}
+
 pub fn crawl_plan(
     roster: &[(String, String)],
     is_team: impl Fn(&str) -> bool,
+    is_replicant: impl Fn(&str) -> bool,
     cached: &HashMap<String, PlayerSession>,
-) -> (Vec<(String, String)>, HashSet<String>, usize, usize) {
+) -> CrawlPlan {
     let mut cands: Vec<(u64, &String, &String)> = roster
         .iter()
         .filter_map(|(id, name)| player_index(id).filter(|i| *i >= TELEMETRY_FLOOR_INDEX).map(|i| (i, id, name)))
         .collect();
     cands.sort_by(|a, b| b.0.cmp(&a.0));
     let total = cands.len();
-    let mut team = 0;
+    let (mut team, mut replicants) = (0, 0);
     let mut todo = Vec::new();
     let mut newest = HashSet::new();
     for (_, id, name) in cands {
         if is_team(id) {
             team += 1;
+            continue;
+        }
+        if is_replicant(id) {
+            replicants += 1;
             continue;
         }
         if newest.len() < UNSETTLED_NEWEST {
@@ -458,7 +473,7 @@ pub fn crawl_plan(
             todo.push((id.clone(), name.clone()));
         }
     }
-    (todo, newest, team, total)
+    CrawlPlan { todo, newest, team, replicants, candidates: total }
 }
 
 async fn crawl_guild(guild: String, api: String, idle_hours: u32) {
@@ -476,13 +491,15 @@ async fn crawl_guild(guild: String, api: String, idle_hours: u32) {
         }
     };
     let cached = PLAYERS.lock().unwrap_or_else(|p| p.into_inner()).clone();
-    let (todo, newest, team, total) = crawl_plan(&roster, crate::mcp::virtual_players::is_team_player, &cached);
+    let replicants = crate::mcp::onboarding_players::UNIVERSE.lock().unwrap_or_else(|p| p.into_inner()).replicants.clone();
+    let plan = crawl_plan(&roster, crate::mcp::virtual_players::is_team_player, |id| replicants.contains_key(id), &cached);
+    let newest = plan.newest;
     {
         let mut st = CRAWL.lock().unwrap_or_else(|p| p.into_inner());
         let g = st.guilds.entry(guild.clone()).or_default();
-        *g = GuildCrawl { candidates: total, team_skipped: team, ..Default::default() };
+        *g = GuildCrawl { candidates: plan.candidates, team_skipped: plan.team, replicants_skipped: plan.replicants, ..Default::default() };
     }
-    let mut results = futures_util::stream::iter(todo.into_iter().map(|(pid, name)| {
+    let mut results = futures_util::stream::iter(plan.todo.into_iter().map(|(pid, name)| {
         let c = c.clone();
         async move {
             let r = c.onboarding_player(&pid).await;
@@ -522,11 +539,17 @@ fn spawn_crawl(entries: Vec<GuildApiEntry>, idle_hours: u32) {
     }
     CRAWL.lock().unwrap_or_else(|p| p.into_inner()).started = Some(Instant::now());
     tauri::async_runtime::spawn(async move {
+        // Replicants first: both crawls below skip or defer them.
+        let replicants_error = crate::mcp::onboarding_players::refresh_replicants().await.err();
+        {
+            let u = crate::mcp::onboarding_players::UNIVERSE.lock().unwrap_or_else(|p| p.into_inner());
+            PLAYERS.lock().unwrap_or_else(|p| p.into_inner()).retain(|pid, _| !u.is_replicant(pid));
+        }
         let jobs = entries
             .into_iter()
             .filter_map(|e| e.guild_api.map(|api| crawl_guild(e.id, api, idle_hours)));
         // Each guild's sessions, and the chain-wide player tables from ours.
-        tokio::join!(futures_util::future::join_all(jobs), crate::mcp::onboarding_players::crawl());
+        tokio::join!(futures_util::future::join_all(jobs), crate::mcp::onboarding_players::crawl(replicants_error));
         let snapshot = PLAYERS.lock().unwrap_or_else(|p| p.into_inner()).clone();
         crate::mcp::cache_store::save_in_background(CACHE_NAME, snapshot);
         {
@@ -671,7 +694,10 @@ pub struct Filters {
     /// `active` | `inactive`
     #[serde(default)]
     pub activity: Option<String>,
-    /// `interface` | `guild` | `activity`
+    /// Count replicants too; humans only when unset.
+    #[serde(default)]
+    pub replicants: Option<bool>,
+    /// `interface` | `guild` | `activity` | `replicant`
     #[serde(default)]
     pub compare: Option<String>,
 }
@@ -688,13 +714,16 @@ pub struct Seg {
     pub guild: Option<String>,
     pub interface: Option<String>,
     pub active: Option<bool>,
+    /// `Some(false)` = humans only, `Some(true)` = replicants only.
+    pub replicant: Option<bool>,
 }
 
 impl Seg {
-    pub fn wants(&self, guild: &str, interface: &str, active: bool) -> bool {
+    pub fn wants(&self, guild: &str, interface: &str, active: bool, replicant: bool) -> bool {
         self.guild.as_deref().map_or(true, |g| g == guild)
             && self.interface.as_deref().map_or(true, |i| i == interface)
             && self.active.map_or(true, |a| a == active)
+            && self.replicant.map_or(true, |r| r == replicant)
     }
 }
 
@@ -715,6 +744,7 @@ pub fn segments(f: &Filters, guilds: &[(String, String)], interfaces: &[String])
             Some("inactive") => Some(false),
             _ => None,
         },
+        replicant: if f.replicants == Some(true) { None } else { Some(false) },
     };
     match clean(&f.compare).as_deref() {
         Some("guild") => guilds
@@ -731,6 +761,11 @@ pub fn segments(f: &Filters, guilds: &[(String, String)], interfaces: &[String])
             .iter()
             .filter(|(a, _, _)| base.active.map_or(true, |b| b == *a))
             .map(|(a, k, l)| Seg { key: (*k).into(), label: (*l).into(), active: Some(*a), ..base.clone() })
+            .collect(),
+        // Comparing the two is asking for both, whatever the checkbox says.
+        Some("replicant") => [(false, "human", "Humans"), (true, "replicant", "Replicants")]
+            .iter()
+            .map(|(r, k, l)| Seg { key: (*k).into(), label: (*l).into(), replicant: Some(*r), ..base.clone() })
             .collect(),
         _ => vec![base],
     }
@@ -845,10 +880,11 @@ pub async fn terminal_onboarding(
         spawn_crawl(entries.clone(), idle_hours);
     }
 
-    let (players, stats, refreshed_ms) = {
+    let (players, stats, refreshed_ms, replicants, replicants_ms) = {
         let u = crate::mcp::onboarding_players::UNIVERSE.lock().unwrap_or_else(|p| p.into_inner());
-        (u.players.clone(), u.stats(), u.refreshed_ms)
+        (u.players.clone(), u.stats(), u.refreshed_ms, u.replicants.clone(), u.replicants_ms)
     };
+    let is_rep = |pid: &str| replicants.contains_key(pid);
     let interface_of: HashMap<&str, &str> = sessions_all
         .iter()
         .filter(|(_, s)| !s.events.is_empty() && !s.interface.is_empty())
@@ -867,8 +903,10 @@ pub async fn terminal_onboarding(
     // The server's aggregates: every (guild, interface) a segment's signup
     // funnel needs, plus each guild unfiltered for the Guilds page.
     let with_api: Vec<&GuildApiEntry> = entries.iter().filter(|e| e.guild_api.is_some()).collect();
+    // Replicants sign up from code and record no telemetry, so the servers'
+    // funnel is the humans' and a replicants-only segment has none.
     let signup_guilds = |seg: &Seg| -> Option<Vec<String>> {
-        if seg.active.is_some() || seg.interface.as_deref() == Some(NO_INTERFACE) {
+        if seg.active.is_some() || seg.interface.as_deref() == Some(NO_INTERFACE) || seg.replicant == Some(true) {
             return None;
         }
         Some(with_api.iter().filter(|e| seg.guild.as_ref().map_or(true, |g| *g == e.id)).map(|e| e.id.clone()).collect())
@@ -889,7 +927,7 @@ pub async fn terminal_onboarding(
 
     let tutorial_chain = phase_chain(&catalog, PHASES[1]);
     let session_in = |seg: &Seg, pid: &str, s: &PlayerSession| -> bool {
-        s.version == version && !s.events.is_empty() && seg.wants(&s.guild, if s.interface.is_empty() { NO_INTERFACE } else { &s.interface }, is_active(players.get(pid), cutoff))
+        s.version == version && !s.events.is_empty() && seg.wants(&s.guild, if s.interface.is_empty() { NO_INTERFACE } else { &s.interface }, is_active(players.get(pid), cutoff), is_rep(pid))
     };
 
     let out_segs: Vec<Value> = segs
@@ -898,7 +936,7 @@ pub async fn terminal_onboarding(
             // Players.
             let members: Vec<(&String, &crate::mcp::onboarding_players::PlayerFacts)> = players
                 .iter()
-                .filter(|(pid, p)| seg.wants(&p.guild, interface_of.get(pid.as_str()).copied().unwrap_or(NO_INTERFACE), is_active(Some(p), cutoff)))
+                .filter(|(pid, p)| seg.wants(&p.guild, interface_of.get(pid.as_str()).copied().unwrap_or(NO_INTERFACE), is_active(Some(p), cutoff), is_rep(pid)))
                 .collect();
             let active = members.iter().filter(|(_, p)| is_active(Some(p), cutoff)).count();
             let churn_base: Vec<_> = members.iter().filter(|(_, p)| p.created_ms.map_or(true, |c| c <= cutoff)).collect();
@@ -977,7 +1015,11 @@ pub async fn terminal_onboarding(
             "finished_ms": if st.finished_ms > 0 { json!(st.finished_ms) } else { Value::Null },
             "guilds": st.guilds,
             "players": { "known": players.len(), "ledgers": players.values().filter(|p| p.mined_g.is_some()).count(),
+                         "humans": players.keys().filter(|pid| !is_rep(pid)).count(),
+                         "human_ledgers": players.iter().filter(|(pid, p)| !is_rep(pid) && p.mined_g.is_some()).count(),
                          "refreshed_ms": if refreshed_ms > 0 { json!(refreshed_ms) } else { Value::Null }, "round": u },
+            "replicants": { "known": replicants.len(), "primaries": replicants.values().collect::<HashSet<_>>().len(),
+                            "read_ms": if replicants_ms > 0 { json!(replicants_ms) } else { Value::Null } },
         })
     };
     let guilds: Vec<Value> = entries
@@ -989,8 +1031,9 @@ pub async fn terminal_onboarding(
                 m.iter().filter(|s| s["previous"].is_null() && !s["next"].is_null()).map(|s| s["reached"].as_f64().unwrap_or(0.0)).reduce(f64::max)
             });
             let signed = signup.and_then(|r| r.iter().find(|s| text(s.get("step_key")) == PLAYER_STEP)).and_then(|s| num(s.get("reached")));
-            let mine: Vec<&PlayerSession> = sessions_all.values().filter(|s| s.guild == e.id).collect();
-            let members: Vec<_> = players.values().filter(|p| p.guild == e.id).collect();
+            let mine: Vec<&PlayerSession> = sessions_all.iter().filter(|(pid, s)| s.guild == e.id && !is_rep(pid)).map(|(_, s)| s).collect();
+            let all: Vec<(&String, &crate::mcp::onboarding_players::PlayerFacts)> = players.iter().filter(|(_, p)| p.guild == e.id).collect();
+            let members: Vec<_> = all.iter().filter(|(pid, _)| base.replicant.map_or(true, |r| r == is_rep(pid))).map(|(_, p)| *p).collect();
             json!({
                 "id": e.id, "name": e.name, "tag": e.tag,
                 "status": if e.guild_api.is_none() { "no_api" } else if a.and_then(|a| a.error.as_ref()).is_some() { "error" } else { "ok" },
@@ -1000,6 +1043,7 @@ pub async fn terminal_onboarding(
                 "sampled": mine.iter().filter(|s| !s.events.is_empty()).count(),
                 "untracked": mine.iter().filter(|s| s.events.is_empty()).count(),
                 "players": members.len(),
+                "replicants": all.iter().filter(|(pid, _)| is_rep(pid)).count(),
                 "active": members.iter().filter(|p| is_active(Some(p), cutoff)).count(),
             })
         })
@@ -1011,12 +1055,13 @@ pub async fn terminal_onboarding(
         "idle_hours": idle_hours,
         "active_days": active_days,
         "generated_ms": now,
-        "filters": { "interface": clean(&filters.interface), "guild": clean(&filters.guild), "activity": clean(&filters.activity), "compare": clean(&filters.compare) },
+        "filters": { "interface": clean(&filters.interface), "guild": clean(&filters.guild), "activity": clean(&filters.activity),
+                     "replicants": filters.replicants == Some(true), "compare": clean(&filters.compare) },
         "options": { "interfaces": interfaces, "guilds": guild_labels.iter().map(|(id, l)| json!({ "id": id, "label": l })).collect::<Vec<_>>() },
         "segments": out_segs,
         "guilds": guilds,
         "recent": recent,
-        "untracked": sessions_all.values().filter(|s| s.events.is_empty()).count(),
+        "untracked": sessions_all.iter().filter(|(pid, s)| s.events.is_empty() && !is_rep(pid)).count(),
         "crawl": crawl,
     }))
 }
@@ -1099,11 +1144,14 @@ mod tests {
             .collect();
         let mut cached = HashMap::new();
         cached.insert("1-7000".to_string(), PlayerSession { settled: true, ..Default::default() });
-        let (todo, newest, team, total) = crawl_plan(&roster, |id| id == "1-8000", &cached);
-        assert_eq!(todo.iter().map(|t| t.0.as_str()).collect::<Vec<_>>(), vec!["1-9000", "1-6000"]);
-        assert_eq!(team, 1);
-        assert_eq!(total, 4);
-        assert!(newest.contains("1-9000") && newest.contains("1-7000"));
+        let plan = crawl_plan(&roster, |id| id == "1-8000", |_| false, &cached);
+        assert_eq!(plan.todo.iter().map(|t| t.0.as_str()).collect::<Vec<_>>(), vec!["1-9000", "1-6000"]);
+        assert_eq!(plan.team, 1);
+        assert_eq!(plan.candidates, 4);
+        assert!(plan.newest.contains("1-9000") && plan.newest.contains("1-7000"));
+        let plan = crawl_plan(&roster, |id| id == "1-8000", |id| id == "1-9000", &cached);
+        assert_eq!(plan.todo.iter().map(|t| t.0.as_str()).collect::<Vec<_>>(), vec!["1-6000"], "replicants have no telemetry to read");
+        assert_eq!(plan.replicants, 1);
     }
 
     #[test]
@@ -1204,7 +1252,13 @@ mod tests {
         assert_eq!(by_guild.len(), 1, "comparing within a filtered dimension leaves its one value");
         let by_act = segments(&Filters { compare: Some("activity".into()), ..Default::default() }, &guilds, &ifaces);
         assert_eq!(by_act.iter().map(|s| s.active).collect::<Vec<_>>(), vec![Some(true), Some(false)]);
-        assert!(by_act[0].wants("0-9", "x", true) && !by_act[0].wants("0-9", "x", false));
+        assert!(by_act[0].wants("0-9", "x", true, false) && !by_act[0].wants("0-9", "x", false, false));
+        assert!(!one[0].wants("0-5", "x", true, true), "humans only unless replicants are asked for");
+        let with = segments(&Filters { replicants: Some(true), ..Default::default() }, &guilds, &ifaces);
+        assert!(with[0].wants("0-5", "x", true, true) && with[0].wants("0-5", "x", true, false));
+        let by_rep = segments(&Filters { compare: Some("replicant".into()), ..Default::default() }, &guilds, &ifaces);
+        assert_eq!(by_rep.iter().map(|s| (s.key.as_str(), s.replicant)).collect::<Vec<_>>(), vec![("human", Some(false)), ("replicant", Some(true))],
+            "comparing them shows both even with the box unchecked");
     }
 
     #[test]

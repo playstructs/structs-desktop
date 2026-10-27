@@ -5,8 +5,10 @@
 // EVERY guild's server and the whole chain (`terminal_onboarding`,
 // mcp/onboarding.rs + mcp/onboarding_players.rs).
 //
-// Every page reads the same filters (interface, guild, active/inactive) and
-// can be split by one of them (Compare). The payload is a list of SEGMENTS —
+// Every page reads the same filters (interface, guild, active/inactive,
+// replicants) and can be split by one of them (Compare). Replicants — players
+// that hand another player full control of themselves — are left out unless
+// the box is ticked. The payload is a list of SEGMENTS —
 // one when nothing is compared — and each page draws one column (or one row)
 // per segment. Signup steps come from the guild servers' own funnels (every
 // session, even ones that quit before a player existed); everything else is
@@ -24,7 +26,7 @@
   var IDLE = [{ value: '6', label: '6h' }, { value: '24', label: '24h' }, { value: '72', label: '3d' }, { value: '168', label: '7d' }];
   var ACTIVE = [{ value: '1', label: '1d' }, { value: '7', label: '7d' }, { value: '30', label: '30d' }];
   var ACTIVITY = [{ value: '', label: 'All players' }, { value: 'active', label: 'Active' }, { value: 'inactive', label: 'Inactive' }];
-  var COMPARE = [{ value: '', label: 'Nothing' }, { value: 'interface', label: 'Interface' }, { value: 'guild', label: 'Guild' }, { value: 'activity', label: 'Active / inactive' }];
+  var COMPARE = [{ value: '', label: 'Nothing' }, { value: 'interface', label: 'Interface' }, { value: 'guild', label: 'Guild' }, { value: 'activity', label: 'Active / inactive' }, { value: 'replicant', label: 'Human / replicant' }];
   var DURATIONS = [['signup', 'Signup'], ['chain_wait', 'Chain wait'], ['to_offer', 'To offer'], ['decision', 'Decision'], ['tutorial', 'Tutorial'], ['total', 'Whole run']];
   var OUTCOMES = [['completed', 'Finished'], ['declined', 'Skipped'], ['left', 'Quit'], ['playing', 'Playing']];
   var STATS = [['mined', 'Ore mined', 'ore'], ['refined', 'Alpha refined', 'alpha'], ['planets', 'Planets completed', 'count'],
@@ -476,7 +478,7 @@
       row.appendChild(cell(live ? int(g.sampled) : '—', 'ob-n'));
       row.appendChild(cell(live ? int(g.untracked) : '—', 'ob-n'));
       var c = crawl[g.id];
-      var read = !c ? '—' : (int(c.fetched) + ' / ' + int(Math.max(0, (c.candidates || 0) - (c.team_skipped || 0))));
+      var read = !c ? '—' : (int(c.fetched) + ' / ' + int(Math.max(0, (c.candidates || 0) - (c.team_skipped || 0) - (c.replicants_skipped || 0))));
       row.appendChild(cell(read, 'ob-n' + (c && c.errors ? ' is-bad' : ''), c && c.last_error ? c.last_error : null));
       t.appendChild(row);
     });
@@ -538,7 +540,10 @@
     var c = d.crawl || {}, p = c.players || {};
     var sessions = (d.segments || []).reduce(function (a, s) { return a + (s.sessions || 0); }, 0);
     var parts = [int(sessions) + ' onboarding sessions on ' + (d.version || '—')];
-    if (p.known) parts.push('ledgers read for ' + int(p.ledgers) + ' of ' + int(p.known) + ' players');
+    var f = d.filters || {}, r = c.replicants || {};
+    if (p.known && (f.replicants || f.compare === 'replicant')) parts.push('ledgers read for ' + int(p.ledgers) + ' of ' + int(p.known) + ' players');
+    else if (p.known) parts.push('ledgers read for ' + int(p.human_ledgers) + ' of ' + int(p.humans) + ' humans');
+    if (r.known) parts.push(int(r.known) + ' replicants under ' + int(r.primaries) + ' primaries');
     if (c.running) parts.push('reading…');
     else if (c.finished_ms) parts.push('read ' + H.ago(c.finished_ms) + ' ago');
     var foot = H.el('div', 'ob-foot fstat-l');
@@ -557,6 +562,10 @@
     bar1.appendChild(H.field('Interface', H.selectBox(f.interface || '', ifaces, function (v) { set({ iface: v }); })));
     bar1.appendChild(H.field('Guild', H.selectBox(f.guild || '', guilds, function (v) { set({ guild: v }); })));
     bar1.appendChild(H.field('Players', H.selectBox(f.activity || '', ACTIVITY, function (v) { set({ activity: v }); })));
+    var both = f.compare === 'replicant';
+    var reps = H.checkbox(both || !!f.replicants, null, function (on) { set({ reps: on ? '1' : '' }); });
+    reps.querySelector('input').disabled = both;
+    bar1.appendChild(H.field('Replicants', reps));
     bar1.appendChild(H.field('Compare', H.selectBox(f.compare || '', COMPARE, function (v) { set({ compare: v }); })));
     bar1.appendChild(H.field('Active within', H.selectBox(String(d.active_days || 7), ACTIVE, function (v) { set({ active: v }); })));
     bar1.appendChild(H.field('Counts as quit after', H.selectBox(String(d.idle_hours || 24), IDLE, function (v) { set({ idle: v }); })));
@@ -566,7 +575,7 @@
   }
   function argsOf(p) {
     var a = { idleHours: Number(p.idle) || 24, activeDays: Number(p.active) || 7,
-      filters: { interface: p.iface || null, guild: p.guild || null, activity: p.activity || null, compare: p.compare || null } };
+      filters: { interface: p.iface || null, guild: p.guild || null, activity: p.activity || null, replicants: p.reps === '1', compare: p.compare || null } };
     if (p.version) a.version = p.version;
     return a;
   }
