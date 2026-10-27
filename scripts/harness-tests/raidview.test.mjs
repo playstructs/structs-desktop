@@ -1280,6 +1280,10 @@ check('pipRequestHide forgets the struct immediately (no stale re-show)', RV._pi
   const deployDoor = chunk.querySelector('a.sui-panel-btn[data-action="deploy_menu"]');
   check('an empty slot on our side offers the game\'s deploy DOOR in the button group — and nothing else in the chunk',
     !!deployDoor && deployDoor.classList.contains('sui-mod-default') && !chunk.querySelector('select, input'));
+  // The one bar button that used to explain nothing on a press-and-hold. Keyed
+  // and titled as the game keys and titles it (webapp e3a190af).
+  check('…and it explains itself, like every other button in the bar',
+    deployDoor.getAttribute('data-sui-cheatsheet') === 'deploy' && deployDoor.title === 'Deploy');
   deployDoor.click();
   await until(() => d.querySelector('#rv-picker .rv-pick[data-type="SAM Launcher"]'));
   const picker = d.getElementById('rv-picker');

@@ -120,6 +120,9 @@
 
     /** The fixed-key sheets, exactly as `build()`'s switch spells them. */
     var FIXED_SHEETS = {
+      // Opening the deploy menu is free; the Struct picked from it is what
+      // costs charge, so this sheet carries no battery ladder.
+      deploy: ['Deploy', 'Choose a Struct to deploy.'],
       'icon-beacon': ['Planetary Beacon', 'Planetary Structs can be deployed to this location.'],
       'icon-blocked': ['Blocked', 'Structs cannot be deployed to this location.'],
       'icon-cmd-post': ['Command Post', 'Only the Command Ship can be deployed to this location.'],

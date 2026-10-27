@@ -70,12 +70,19 @@ const EMPTY_ASSIGN = /^\s*(''|"" |""|``)\s*$/;
 // The raid window builds two strings into markup, both examined:
 //
 //  - a shield icon from a locally computed state word, no remote input;
-//  - the tooltip bubble, which DOES carry a player's on-chain name and is
-//    defended by escaping each segment. That escaping is load-bearing, so it
-//    has its own check below.
+//  - the tooltip bubble's BODY, which DOES carry a player's on-chain name and
+//    is defended by escaping each segment. That escaping is load-bearing, so
+//    it has its own check below.
+//
+// The tooltip allowance names the escaping itself rather than the dataset the
+// text came from: the bubble used to be filled in one statement that mentioned
+// `dataset.suiTooltip`, and when it was split into a label node plus an
+// escaped body the old pattern stopped matching — so this check went red while
+// the code was in fact still safe. Keyed on `.map(esc).join(...)`, the
+// allowance can only match markup built out of escaped segments.
 const ALLOWED_MARKUP = [
   /non_standard_icons\/shield_/,
-  /dataset\.suiTooltip/,
+  /\.map\(esc\)\.join\('<br>'\)/,
 ];
 
 // The board window paints HTML built in Rust (`mcp_board_html`). That is a
@@ -147,9 +154,19 @@ for (const file of FEDERATED) {
 // to claim the text was never user content — a name is script.
 {
   const src = readFileSync(root + '/frontend/raidview.js', 'utf8');
-  const bubble = src.slice(src.indexOf('bubble.innerHTML'), src.indexOf('bubble.innerHTML') + 200);
+  // Found by the assignment that builds the markup, not by a fixed window
+  // after `bubble.innerHTML` — the bubble is cleared first and the lines go
+  // into a body node further down, so a window there reads the clear and
+  // misses the escaping entirely.
+  const body = (src.match(/\.innerHTML\s*=\s*lines[^;]*;/) || [])[0];
+  check('the tooltip builds its body from the tooltip lines', !!body,
+    '(no `innerHTML = lines…` assignment in raidview.js)');
   check('the tooltip escapes every segment before joining',
-    /\.map\(esc\)/.test(bubble), bubble.slice(0, 90));
+    !!body && /\.map\(esc\)/.test(body), body || '');
+  // …and those lines are the dataset, so this really is the path a player's
+  // on-chain name travels into the window.
+  check('…and the lines are the tooltip dataset',
+    /var lines\s*=\s*String\(trigger\.dataset\.suiTooltip/.test(src));
 
   const escFn = src.slice(src.indexOf('function esc('), src.indexOf('function esc(') + 220);
   for (const ch of ['&', '<', '>', '"']) {

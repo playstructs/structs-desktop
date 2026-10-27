@@ -611,7 +611,12 @@ const tick = (ms) => new Promise((r) => setTimeout(r, ms));
   cfg.querySelector('a.sui-mod-primary').click();
   await until(() => /PHONIFFER/.test(d.querySelector('#tm-player-1')?.textContent || ''));
   check('…and the card re-renders on the new player', /PHONIFFER/.test(d.querySelector('#tm-player-1').textContent) && d.getElementById('tm-player-1').classList.contains('tm-w2'));
-  check('the title follows the params', d.querySelector('#tm-player-1 .tm-title').textContent === 'Player 1-248');
+  // The title follows the params, and then the retitle resolves the id to a
+  // NAME (board-terminal.js `retitlePlayer`): a watched player is named, with
+  // the id kept in parentheses. This used to expect the bare id, which is what
+  // the title reads for the instant before the lookup answers.
+  await until(() => /PHONIFFER/.test(d.querySelector('#tm-player-1 .tm-title')?.textContent || ''));
+  check('the title follows the params', d.querySelector('#tm-player-1 .tm-title').textContent === 'Player PHONIFFER (1-248)', d.querySelector('#tm-player-1 .tm-title').textContent);
 
   // Every card configures — its name, its refresh cadence, its width and how
   // much room it may take —
@@ -1454,7 +1459,7 @@ const tick = (ms) => new Promise((r) => setTimeout(r, ms));
         && !may('mcp_config_set') && !may('terminal_guild_bank_mint'));
       check('…while everything the raid map really calls still goes through',
         ['matrix_send', 'matrix_timeline', 'mcp_raid_state', 'mcp_struct_act', 'mcp_roster',
-         'mcp_inventory', 'matrix_object_room'].every(may));
+         'mcp_inventory', 'matrix_object_room', 'matrix_state'].every(may));
       /* The prefix went with the window. `matrix_` was on the list because
        * Comms was FRAMED here and reached 46 of the 55 commands; Comms is
        * native now and nothing frames chat.html, so a rail that renders text

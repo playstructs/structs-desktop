@@ -4296,6 +4296,12 @@
     // saying something in it. Nothing that moves value.
     matrix_object_chatter: 1, matrix_object_room: 1, matrix_object_room_create: 1,
     matrix_send: 1, matrix_timeline: 1,
+    // Whether the rail can speak at all: comms-state.js reads the session
+    // picture (identities and their phase) the moment anything in the window
+    // subscribes. A read of status, nothing that moves value — and refusing it
+    // is invisible, because the reader swallows the rejection and keeps its
+    // defaults, so an embedded rail just looks permanently signed out.
+    matrix_state: 1,
     mcp_inventory: 1, mcp_roster: 1,
     mcp_raid_log: 1, mcp_raid_state: 1, mcp_struct_act: 1,
     // A chip in the rail opening a planet or fleet as a raid view — the

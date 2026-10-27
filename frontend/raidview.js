@@ -1690,7 +1690,11 @@
       onClick: function () { openDeployPicker(tile, actor); },
       active: state.popover && state.popover.key === 'deploy:' + tile.key ? 'sui-mod-active-defense' : null,
     } : null;
-    return abilityBtn('icon-deploy', 'Deploy', { 'data-action': 'deploy_menu', 'data-tile': tile.key }, live);
+    // `data-sui-cheatsheet` on an action-bar button is how the game's own
+    // Deploy door explains itself (webapp e3a190af) — the only button in the
+    // bar that had no sheet at all until then.
+    return abilityBtn('icon-deploy', 'Deploy',
+      { 'data-sui-cheatsheet': 'deploy', 'data-action': 'deploy_menu', 'data-tile': tile.key }, live);
   }
   /* Send the build for a picked type; the tile shows its indicator at once. */
   function sendBuild(tile, actor, typeName) {
@@ -1733,7 +1737,10 @@
         r.href = 'javascript: void(0)';
         r.setAttribute('data-type', t.name);
         var info = el('div', 'sui-cheatsheet-property-info');
-        info.appendChild(el('div', 'sui-cheatsheet-property-label', t.name));
+        // A bare <div>, as the game's own property rows hold their lines:
+        // `sui-cheatsheet-property-label` was invented here and sui.css has no
+        // such rule, so it styled nothing and only looked like a system class.
+        info.appendChild(el('div', null, t.name));
         r.appendChild(info);
         if (t.build_charge) r.appendChild(el('div', 'sui-cheatsheet-cost rv-pick-cost', String(t.build_charge)));
         if (can) {

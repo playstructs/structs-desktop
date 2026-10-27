@@ -75,6 +75,13 @@ const TANK = { class_name: 'Tank', default_cosmetic_model_number: 'T-1', build_c
   const title = (f) => f.querySelector('.sui-cheatsheet-title-text').textContent;
   assert.equal(title(sh.cheatsheetBody(trig({ suiCheatsheet: 'icon-wreckage' }))), 'WRECKAGE');
   assert.equal(title(sh.cheatsheetBody(trig({ suiCheatsheet: 'icon-mine' }))), 'ORE EXTRACTION', 'a capability, never a number we cannot see');
+  // The Deploy door explains itself, and opening the menu is free — the Struct
+  // picked from it is what costs charge, so no battery ladder (webapp e3a190af
+  // ships the same two assertions as DeployCheatsheetTest).
+  const deployTip = sh.cheatsheetBody(trig({ suiCheatsheet: 'deploy', tile: 'plan|land|0' }));
+  assert.equal(title(deployTip), 'DEPLOY');
+  assert.equal(deployTip.querySelector('.sui-cheatsheet-description').textContent, 'Choose a Struct to deploy.');
+  assert.equal(deployTip.querySelector('.sui-battery-chunk'), null, 'opening the menu is free');
   assert.equal(title(sh.cheatsheetBody(trig({ suiCheatsheet: 'mystery', struct: '5-2' }))), 'MYSTERY HULL', 'a type we could not resolve is still named');
   const defend = sh.cheatsheetBody(trig({ suiCheatsheet: 'tank', struct: '5-1', actionButton: 'defend' }));
   assert.equal(title(defend), 'DEFEND');

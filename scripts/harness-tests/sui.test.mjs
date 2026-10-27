@@ -296,6 +296,13 @@ for (const file of windowFiles) {
 // bug, and `xs` is a size the game itself never uses.
 console.log('\n— always wrong, in any window');
 const before1 = failures;
+// Every element-local custom property any frontend script assigns. Collected
+// once, across all of them: the CSS lives in the page, the assignment in a
+// script beside it (board.html's `--n` is set by board-terminal-ops.js).
+const setByScript = new Set(
+  readdirSync(root + '/frontend').filter((f) => f.endsWith('.js') && !f.startsWith('_'))
+    .flatMap((f) => [...readFileSync(root + '/frontend/' + f, 'utf8')
+      .matchAll(/setProperty\(\s*['"](--[a-z0-9-]+)['"]/g)].map((m) => m[1])));
 for (const file of readdirSync(root + '/frontend').filter((f) => /\.(html|js)$/.test(f) && !f.startsWith('_'))) {
   const raw = readFileSync(root + '/frontend/' + file, 'utf8');
   // Comments are stripped first: a file that DOCUMENTS the bad pattern (this
@@ -305,7 +312,12 @@ for (const file of readdirSync(root + '/frontend').filter((f) => /\.(html|js)$/.
     .replace(/<!--[\s\S]*?-->/g, '')
     .split('\n').map((l) => l.replace(/\/\/.*$/, '')).join('\n');
   const used = [...src.matchAll(/var\((--[a-z0-9-]+)/g)].map((m) => m[1]);
-  const unknown = [...new Set(used)].filter((t) => !defined.has(t));
+  // A property the page's own JS sets on an element (`style.setProperty`) is a
+  // LOCAL custom property, not a design token, and SUI is not expected to
+  // define it — `--n` is the character count a board card writes so a number
+  // can size itself to its container. Reported as a missing token, it sent a
+  // reader looking for a token that was never meant to exist.
+  const unknown = [...new Set(used)].filter((t) => !defined.has(t) && !setByScript.has(t));
   if (unknown.length) check(`${file} uses only tokens SUI defines`, false, unknown.join(', '));
   if (/sui-icon-xs/.test(src)) check(`${file} avoids sui-icon-xs`, false, 'the webapp never uses 8px icons');
 }
