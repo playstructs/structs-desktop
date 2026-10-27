@@ -1612,10 +1612,16 @@
   /** The struct's own wrapper, which outlives the animation mount's clearing. */
   function burstMountForStruct(id) { return document.getElementById(domId('slot', id)); }
 
+  /* An invalid click does NOTHING while an action waits on a target (webapp
+   * 29fe0918, MapTileSelectionComponent.handleTargetSelectionClick): it used
+   * to call the action off and open the clicked struct's readout, which reads
+   * as the action having gone through. The click is swallowed instead — the
+   * same unit stays armed, and the action is called off from its own button
+   * on the action bar, or with Escape. */
   function targetStruct(t) {
     var p = state.pending;
     if (!p) return false;
-    if (!validTarget(t)) { cancelPending(); return false; }
+    if (!validTarget(t)) return true;
     var st = typeOf(p.struct) || {};
     playBurst(burstMountForStruct(t.id), p.action === 'defend' ? 'friendly' : 'enemy');
     if (p.action === 'attack') {
@@ -1634,7 +1640,9 @@
   function targetTile(tile) {
     var p = state.pending;
     if (!p) return false;
-    if (!validTile(tile)) { cancelPending(); return false; }
+    // Same as targetStruct: an empty tile that is not a move target is inert
+    // while anything is armed, rather than cancelling and selecting the tile.
+    if (!validTile(tile)) return true;
     var parts = tile.key.split('|');
     var ambit = parts[0] === 'plan' ? parts[1] : parts[2];
     // Command tiles have one slot per ambit (always 0); fleet and planetary

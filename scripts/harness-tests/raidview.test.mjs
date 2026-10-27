@@ -1151,8 +1151,14 @@ check('pipRequestHide forgets the struct immediately (no stale re-show)', RV._pi
   S.structsById['5-21'].ambit = 'land';
   check('…and reachable again from within it', RV._validTarget(S.structsById['5-21']));
   S.structsById['5-21'].hidden = false;
-  check('clicking an invalid target cancels the action', (RV._anchors()[RV.anchorKeyFor(S.structsById['5-20'])].dispatchEvent(new w.MouseEvent('click', { bubbles: true })), !S.pending && calls().length === 0));
-  sel('5-1'); chunk.querySelector('a.sui-panel-btn[data-action="attack:primary"]').click();
+  // Webapp 29fe0918: an invalid click is a no-op, not a cancel. It used to
+  // call the action off AND open the clicked struct's readout, which testers
+  // read as the action having gone through; now the same unit stays armed and
+  // the shot is called off from the action bar (or Escape) instead.
+  const selectedBefore = S.selectedId;
+  check('clicking an invalid target does nothing — the action stays armed on the same struct',
+    (RV._anchors()[RV.anchorKeyFor(S.structsById['5-20'])].dispatchEvent(new w.MouseEvent('click', { bubbles: true })),
+      !!S.pending && S.pending.struct.id === '5-1' && S.pending.action === 'attack' && calls().length === 0 && S.selectedId === selectedBefore));
   RV._anchors()[RV.anchorKeyFor(S.structsById['5-21'])].dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
   await until(() => calls().length >= 1);
   const shot = calls()[0].args;
@@ -1244,6 +1250,15 @@ check('pipRequestHide forgets the struct immediately (no stale re-show)', RV._pi
   const cmdTiles = Object.keys(tiles).filter((k) => tiles[k].classList.contains('rv-move-target'));
   check('a Command Ship\'s Move targets the empty COMMAND tiles of its side (all four ambits are possible for it)',
     cmdTiles.length === 3 && cmdTiles.every((k) => k.startsWith('cmd|defender|')) && !cmdTiles.includes('cmd|defender|land'));
+  // An unmarked EMPTY tile is inert the same way an unreachable struct is
+  // (webapp 29fe0918's emptyTileInMoveModeDoesNothingTest): Move stays armed
+  // and the tile does not take the selection away from the mover.
+  const deadTile = Object.keys(tiles).find((k) => !tiles[k].classList.contains('rv-move-target'));
+  const callsBefore = calls().length;
+  tiles[deadTile].dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
+  check('an unmarked tile does nothing while Move is armed',
+    !!S.pending && S.pending.kind === 'tile' && S.pending.struct.id === '5-9'
+      && S.selectedId === '5-9' && !S.selectedTile && calls().length === callsBefore);
   RV.cancelPending();
 
   console.log('\n— defend');
