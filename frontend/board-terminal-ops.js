@@ -40,7 +40,8 @@
   //
   // spec: { fields:[{key,label,kind:'choice'|'amount'|'text',options,placeholder,value,hint}],
   //         cta, danger, preview(values)->Promise|null, facts(preview)->[[label,value,tone]],
-  //         confirm(values,preview)->{title,rows,cta}, submit(values)->Promise, done() }
+  //         confirm(values,preview)->{title,rows,cta}, submit(values)->Promise, done(),
+  //         doneText }   (field `inputmode` overrides the numeric keypad)
   var readControl = function (n) { return T.readControl(n); };
   function ticket(spec) {
     var box = H.el('div', 'tm-ticket');
@@ -69,7 +70,7 @@
         if (f.kind === 'choice') ctl = H.selectBox(String(f.value == null ? (f.options[0] || {}).value : f.value), f.options, function () { changed(true); });
         else {
           ctl = H.textBox(f.value == null ? '' : String(f.value), f.placeholder || '', function () { changed(false); });
-          ctl.setAttribute('inputmode', 'numeric');
+          ctl.setAttribute('inputmode', f.inputmode || 'numeric');
           ctl.addEventListener('input', function () { changed(false); });
         }
         inputs[f.key] = ctl;
@@ -118,7 +119,7 @@
         go.classList.add('is-busy');
         spec.submit(v).then(function () {
           go.classList.remove('is-busy');
-          out.innerHTML = ''; out.appendChild(H.stateBlock('info', 'queued for signing'));
+          out.innerHTML = ''; out.appendChild(H.stateBlock('info', spec.doneText || 'queued for signing'));
           if (spec.done) spec.done();
         }).catch(function (e) {
           go.classList.remove('is-busy');
@@ -1618,7 +1619,7 @@
               ['back in', H.duration(f.cooldown_secs || 0), null, 'muted'],
             ];
             return [
-              ['capacity gained', H.fmtWatts(f.gained_mw || 0), 'sui-icon-energy', 'ok'],
+              ['net capacity', H.fmtWatts(f.net_mw || 0), 'sui-icon-energy', (f.net_mw || 0) < 0 ? 'bad' : 'ok'],
               ['commission', H.fmtWatts(f.commission_mw || 0), null, 'muted'],
               ['alpha after', H.fmtAlpha(f.balance_after_ualpha || 0), 'sui-icon-alpha-matter'],
             ];
@@ -2103,6 +2104,22 @@
   });
 
   // ── Wallet (mcp_inventory) ───────────────────────────────────────────────
+  // Retained coins → the player's vault: previewed, confirmed, then signed.
+  function collectRetained(player, ctx) {
+    invoke('mcp_collect_retained_preview', { player: player }).then(function (pv) {
+      if (!pv || pv.ok === false) { Board.stamp && Board.stamp('move to vault: ' + ((pv && pv.problems) || []).join('; ')); return; }
+      var body = H.el('div');
+      (pv.coins || []).forEach(function (c) {
+        body.appendChild(H.fact(H.denomName(c.denom), H.denomQty(Number(c.amount), c.denom)));
+      });
+      body.appendChild(H.fact('To', 'your vault'));
+      H.confirmModal('Move to vault?', body, 'Move', function () {
+        invoke('mcp_collect_retained', { player: player })
+          .then(function () { Board.stamp && Board.stamp('moved into the vault'); T.refresh(ctx.id, true); })
+          .catch(function (e) { Board.stamp && Board.stamp('move to vault: ' + e); });
+      });
+    }).catch(function (e) { Board.stamp && Board.stamp('move to vault: ' + e); });
+  }
   T.register('wallet', {
     label: 'Wallet', describe: function (p) { return 'Wallet · ' + (p.id || 'primary'); },
     params: [{ key: 'id', label: 'Player', kind: 'id', kinds: [1], placeholder: 'primary' }],
@@ -2121,6 +2138,14 @@
         assets.forEach(function (a) {
           var kind = a.denom === 'ualpha' ? 'alpha' : a.denom === 'ore' ? 'ore' : (/^uguild\./.test(String(a.denom)) ? 'guild' : 'other');
           var qty = kind === 'alpha' ? H.fmtAlpha(a.amount_p != null ? a.amount_p : a.amount) : (kind === 'ore' ? H.fmtOre(a.amount) : H.fmtNum(a.amount));
+          // v0.22: coins still at the signing key, not in the vault. They
+          // cannot be spent from here; the one thing to do is move them in.
+          if (a.retained) {
+            table.appendChild(window.StructsCards.asset.row({
+              denom: a.denom, name: (a.display_name || a.denom) + ' (retained)', tag: a.guild_tag || null, kind: kind, amount: qty, sendable: false,
+            }, { doors: [{ icon: 'icon-transfers', title: 'Move to vault', onClick: function () { collectRetained(p.id || 'primary', ctx); } }] }));
+            return;
+          }
           table.appendChild(window.StructsCards.asset.row({
             denom: a.denom, name: a.display_name || a.denom, tag: a.guild_tag || null, kind: kind, amount: qty, sendable: a.sendable !== false,
           }, { doors: kind === 'ore'
@@ -3282,5 +3307,115 @@
     },
   });
   T.energy = { rentQuote: rentQuote, gramsFor: gramsFor };
+
+  // ── Guild rank (v0.22 rank sales) ─────────────────────────────────────
+  // A better rank in your guild — or admission to one that sells it — paid in
+  // that guild's own token from your vault. The quote is the chain's own
+  // arithmetic (mcp/guild_economy.rs); the writer re-quotes and refuses a
+  // price above the one this card showed.
+  function tokenAsset(q) {
+    var i = (q && q.denom_info) || {};
+    return { denom: q && q.denom, exponent: i.exponent, display_name: i.display_name, base_name: i.base_name };
+  }
+  T.register('rank', {
+    label: 'Guild rank ticket', cadenceMs: 0,
+    describe: function (p) { return 'Guild rank' + (p && p.id ? ' · ' + p.id : ''); },
+    params: [{ key: 'id', label: 'Guild id', kind: 'id', kinds: [0], placeholder: 'your guild' }],
+    render: function (host, p) {
+      host.innerHTML = '';
+      var quote = null;
+      host.appendChild(ticket({
+        cta: 'Buy',
+        doneText: 'signed',
+        fields: [
+          { key: 'guild', label: 'Guild', kind: 'text', value: (p && p.id) || '', placeholder: 'your guild' },
+          { key: 'rank', label: 'Rank', placeholder: '99' },
+        ],
+        preview: function (v) {
+          quote = null;
+          var r = parseInt(v.rank, 10);
+          if (!(r > 0)) return null;
+          return invoke('terminal_rank_quote', { guildId: v.guild || null, targetRank: r });
+        },
+        facts: function (q) {
+          quote = q;
+          var a = tokenAsset(q);
+          return [
+            [q.member ? 'rank' : 'join ' + q.guild_id + ' at', (q.member ? '#' + q.current_rank + ' → ' : '') + '#' + q.target_rank, null, 'live'],
+            ['price', H.fmtAmountIn(a, q.price)],
+            ['in your vault', H.fmtAmountIn(a, q.balance), null, 'muted'],
+          ];
+        },
+        confirm: function () {
+          if (!quote) return null;
+          var a = tokenAsset(quote);
+          return {
+            title: quote.member ? 'Buy this rank?' : 'Join by purchase?', cta: 'Buy',
+            rows: [
+              ['Guild', quote.guild_id],
+              ['Rank', (quote.member ? '#' + quote.current_rank + ' → ' : '') + '#' + quote.target_rank],
+              ['Price', H.fmtAmountIn(a, quote.price) + ' from your vault'],
+            ],
+          };
+        },
+        submit: function () {
+          if (!quote) return Promise.reject(new Error('enter a rank and wait for its price'));
+          return invoke('terminal_rank_purchase', { guildId: quote.guild_id, targetRank: quote.target_rank, maxPrice: String(quote.price) });
+        },
+      }));
+    },
+  });
+
+  // ── Found a guild (v0.22 paid founding) ───────────────────────────────
+  // Two Alpha from your vault — one burned, one the new token's collateral —
+  // on a reactor and an entry substation that exist. Previewed as you type;
+  // the writer re-runs the preview before it signs.
+  T.register('found', {
+    label: 'Found a guild', cadenceMs: 0,
+    describe: function () { return 'Found a guild'; },
+    render: function (host) {
+      host.innerHTML = '';
+      var preview = null;
+      host.appendChild(ticket({
+        cta: 'Found',
+        doneText: 'signed',
+        fields: [
+          { key: 'reactor', label: 'Reactor', kind: 'text', placeholder: '3-1' },
+          { key: 'sub', label: 'Entry substation', kind: 'text', placeholder: '4-1' },
+          { key: 'endpoint', label: 'Endpoint', kind: 'text', inputmode: 'url', placeholder: 'https://…/guild.json' },
+        ],
+        preview: function (v) {
+          preview = null;
+          if (!v.reactor || !v.sub || !v.endpoint) return null;
+          return invoke('terminal_found_guild_preview', { reactorId: v.reactor, endpoint: v.endpoint, entrySubstationId: v.sub })
+            .then(function (r) { return r && r.ok === false ? { ok: false, refusal: (r.problems || []).join('; ') } : r; });
+        },
+        facts: function (r) {
+          preview = r;
+          return [
+            ['cost', H.fmtAlpha(Number(r.cost_ualpha) || 0), 'sui-icon-alpha-matter', 'live'],
+            ['burned', H.fmtAlpha(Number(r.burned_ualpha) || 0), null, 'muted'],
+            ['in your vault', H.fmtAlpha(Number(r.vault_ualpha) || 0), null, 'muted'],
+          ];
+        },
+        confirm: function (v) {
+          if (!preview) return null;
+          return {
+            title: 'Found this guild?', cta: 'Found',
+            rows: [
+              ['Reactor', v.reactor],
+              ['Entry substation', v.sub],
+              ['Endpoint', v.endpoint],
+              ['Cost', H.fmtAlpha(Number(preview.cost_ualpha) || 0) + ' from your vault'],
+            ],
+          };
+        },
+        submit: function (v) {
+          if (!preview) return Promise.reject(new Error('fill in all three and wait for the preview'));
+          return invoke('terminal_found_guild', { reactorId: v.reactor, endpoint: v.endpoint, entrySubstationId: v.sub });
+        },
+      }));
+    },
+  });
 
 })();

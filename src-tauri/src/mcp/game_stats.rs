@@ -1424,7 +1424,22 @@ async fn heavy_sweep(client: &CosmosClient) -> Result<(), String> {
         }
     }
     let mut alpha_by_player: HashMap<String, f64> = HashMap::new();
-    if alpha_board.is_none() {
+    // v0.22: liquid Alpha sits in per-player vaults, which no primary-address
+    // join can see. The indexer's per-owner inventory attributes vaults to
+    // their player; the LCD join below only still finds retained balances.
+    let indexed = if alpha_board.is_none() {
+        walk_pages(|p| client.guild.inventory_by_denom("ualpha", p, 1000)).await.ok()
+    } else {
+        None
+    };
+    if let Some((rows, cut)) = indexed {
+        truncated |= cut;
+        for r in rows {
+            if text(r.get("owner_type")) == "player" {
+                *alpha_by_player.entry(text(r.get("owner_id"))).or_insert(0.0) += num(r.get("balance"));
+            }
+        }
+    } else if alpha_board.is_none() {
         let pid_by_addr = with_cache(|c| c.pid_by_addr.clone());
         let (owners, hit_cap) = client
             .denom_owners("ualpha", 10)

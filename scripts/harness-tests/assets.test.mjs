@@ -147,5 +147,62 @@ check('.gitignore globs them rather than listing each one',
     untracked.size === 0, [...untracked].join(', ') + ' — git add it');
 }
 
+/* Does every animation name the Map Viewer can ask for resolve to a bundle?
+ *
+ * raidview.js turns an ANIMATION.NAMES constant into a path by lowercasing it
+ * (`lottiePath`), and PER_TYPE decides whether the struct's asset slug goes in
+ * as a second segment. Getting either wrong fails SILENTLY — lottie simply
+ * never loads, and the raid view plays no animation where the game plays one.
+ * That shipped once: stealth_activate/deactivate are per-type on disk and were
+ * not in PER_TYPE, so every stealth toggle was requested at a path that does
+ * not exist.
+ *
+ * The loop re-derived this by hand each time structs-webapp moved, which is
+ * also how EVADE got reported upstream as a missing asset when it is nothing
+ * of the kind. Both directions live here now. */
+{
+  const animSrc = readFileSync(root + '/structs-webapp/src/js/constants/AnimationConstants.js', 'utf8');
+  // Only NAMES declares animation names. PROJECTILES (weapon kinds) and
+  // BADGES (icon filenames) sit in the same object and are not bundles.
+  const namesBlock = animSrc.slice(animSrc.indexOf('NAMES: {'), animSrc.indexOf('PROJECTILES: {'));
+  const names = [...namesBlock.matchAll(/^\s*[A-Z0-9_]+:\s*'([^']+)'/gm)].map((m) => m[1]);
+  check('the game still declares its animation names where we read them', names.length > 20, String(names.length));
+
+  const rv = readFileSync(root + '/frontend/raidview.js', 'utf8');
+  const perType = new Set([...rv.match(/var PER_TYPE = \{([\s\S]*?)\};/)[1].matchAll(/([a-z_]+):\s*1/g)].map((m) => m[1]));
+  const literal = { VICTORY_BANNER: 'victory-banner', DEFEAT_BANNER: 'defeat-banner' };
+
+  /* Names that are NOT a bundle of their own, confirmed by the webapp team:
+   *   FIRST/LAST  AnimationEventFactory picks a shake variant by whether the
+   *               target survived. Suffixes, never a folder.
+   *   EVADE       registerEvadeAnimation (MapStructViewerComponent) registers
+   *               the name EVADE but loads one of THREE folders, chosen by the
+   *               target's defence. Our port keeps them apart in EVADE_ART. */
+  const markers = new Set(['FIRST', 'LAST']);
+  const aliases = { EVADE: ['defensive_maneuver', 'signal_jamming', 'low_orbit_ballistic_interceptor_network'] };
+
+  const missing = [], wrongLayout = [];
+  const checkDir = (label, dir) => {
+    const base = root + '/frontend/lottie/' + dir;
+    if (!existsSync(base)) { missing.push(label + ' (no lottie/' + dir + ')'); return; }
+    const onDisk = !existsSync(base + '/data.json')
+      && readdirSync(base, { withFileTypes: true }).some((e) => e.isDirectory());
+    if (onDisk !== perType.has(dir)) wrongLayout.push(dir + ' (on disk per-type=' + onDisk + ', PER_TYPE=' + perType.has(dir) + ')');
+  };
+  for (const n of names) {
+    if (markers.has(n)) continue;
+    if (aliases[n]) { aliases[n].forEach((d) => checkDir(n + ' -> ' + d, d)); continue; }
+    checkDir(n, literal[n] || n.toLowerCase());
+  }
+  check('every animation name the game declares has a lottie bundle to load', missing.length === 0, missing.join(', '));
+  check('…and PER_TYPE matches the on-disk layout of each one', wrongLayout.length === 0, wrongLayout.join(', '));
+
+  // The alias is only safe while our own map still covers every branch of it:
+  // a fourth defence upstream would otherwise just never animate.
+  const art = [...rv.match(/var EVADE_ART = \{([\s\S]*?)\};/)[1].matchAll(/'([A-Z_]+)'/g)].map((m) => m[1].toLowerCase()).sort();
+  check('EVADE_ART still names every folder registerEvadeAnimation can load',
+    art.join(',') === [...aliases.EVADE].sort().join(','), art.join(','));
+}
+
 console.log(failures ? `\n${failures} failing check(s)` : '\nall checks passed');
 process.exit(failures ? 1 : 0);

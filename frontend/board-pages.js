@@ -1076,12 +1076,15 @@
   var PREVIEW_FIELDS = {
     infuse: [
       { label: ['capacity gained', 'yours to keep'], key: 'gained_mw', kind: 'power', tone: 'ok' },
+      { label: 'diversity bonus', key: 'bonus_change_mw', kind: 'power', sign: true },
+      { label: 'net capacity', key: 'net_mw', kind: 'power', sign: true },
       { label: 'reactor commission', key: 'commission_mw', kind: 'power', tone: 'muted' },
       { label: 'capacity after', key: 'capacity_after_mw', kind: 'power' },
       { label: 'alpha left liquid', key: 'balance_after_ualpha', kind: 'alpha', tone: 'muted' },
     ],
     defuse: [
       { label: ['capacity removed', 'immediately'], key: 'capacity_lost_mw', kind: 'power', tone: 'live' },
+      { label: 'diversity bonus', key: 'bonus_change_mw', kind: 'power', sign: true },
       { label: 'capacity after', key: 'capacity_after_mw', kind: 'power' },
       { label: ['headroom after', 'over allocated load'], key: 'headroom_after_mw', kind: 'power', sign: true },
       { label: ['alpha returns in', 'cooldown'], key: 'cooldown_secs', kind: 'duration', tone: 'muted' },
@@ -1089,6 +1092,7 @@
     migrate: [
       { label: 'leaves the source', key: 'capacity_lost_mw', kind: 'power', tone: 'muted' },
       { label: 'arrives at the target', key: 'capacity_gained_mw', kind: 'power', tone: 'muted' },
+      { label: 'diversity bonus', key: 'bonus_change_mw', kind: 'power', sign: true },
       { label: ['net capacity', 'what the move costs'], key: 'net_mw', kind: 'power', sign: true },
       { label: 'capacity after', key: 'capacity_after_mw', kind: 'power' },
     ],
@@ -1215,7 +1219,10 @@
       body.appendChild(H.fact(o.op === 'migrate' ? 'From' : 'Reactor', st.dest));
       if (o.op === 'migrate') body.appendChild(H.fact('To', st.target));
       var f = p.facts || {};
-      if (o.op === 'infuse') body.appendChild(H.fact('Capacity gained', kw(f.gained_mw)));
+      if (o.op === 'infuse') {
+        body.appendChild(H.fact('Net capacity',
+          (f.net_mw < 0 ? '−' : '+') + kw(Math.abs(f.net_mw))));
+      }
       if (o.op === 'defuse') {
         body.appendChild(H.fact('Capacity removed now', kw(f.capacity_lost_mw)));
         body.appendChild(H.fact('Alpha returns in', H.duration(f.cooldown_secs, { zero: 'now' })));
@@ -1542,6 +1549,9 @@
           statTile('your stake', r.our_fuel_ualpha > 0 ? alpha(r.our_fuel_ualpha) : '—', null,
             r.our_fuel_ualpha > 0 ? 'ok' : 'muted'),
           statTile('infusers', H.fmtInt(r.infusers), null, 'muted'),
+          // One more gram here, net of the diversity bonus (v0.22).
+          statTile('per gram', r.net_mw_per_gram == null ? '—' : H.fmtWatts(r.net_mw_per_gram), null,
+            r.net_mw_per_gram == null ? 'muted' : (r.net_mw_per_gram < 0 ? 'bad' : 'ok')),
         ],
         action: act,
       }));
@@ -1872,6 +1882,20 @@
   function assetRow(a) {
     var reg = invDenoms();
     var act = null;
+    // v0.22: still at the signing key, not in the vault — move it in.
+    if (a.retained) {
+      act = H.el('div', 'cfg-actions');
+      var mv = massBtn('', 'icon-transfers', 'Move to vault', 'sui-mod-secondary');
+      mv.addEventListener('click', function (ev) { if (ev) ev.stopPropagation(); collectRetained(); });
+      act.appendChild(mv);
+      return H.resultRow({
+        icon: 'sui-icon-alpha-matter',
+        title: H.denomName(a.denom, reg) + ' (retained)',
+        subtitle: a.denom,
+        chips: [statTile('balance', H.denomQty(a.amount, a.denom, reg))],
+        action: act,
+      });
+    }
     if (a.sendable) {
       act = H.el('div', 'cfg-actions');
       var b = massBtn('', 'icon-send-alpha', 'Send', 'sui-mod-secondary');
@@ -1897,6 +1921,21 @@
         H.drawer('Asset — ' + H.denomName(a.denom, reg), d);
       },
     });
+  }
+
+  function collectRetained() {
+    var reg = invDenoms();
+    Board.T.core.invoke('mcp_collect_retained_preview', { player: invState.player }).then(function (pv) {
+      if (!pv || pv.ok === false) { H.drawer('Move to vault', H.stateBlock('error', ((pv && pv.problems) || []).join('; '))); return; }
+      var body = H.el('div');
+      (pv.coins || []).forEach(function (c) { body.appendChild(H.fact(H.denomName(c.denom, reg), H.denomQty(Number(c.amount), c.denom, reg))); });
+      body.appendChild(H.fact('To', 'your vault'));
+      H.confirmModal('Move to vault?', body, 'Move', function () {
+        Board.T.core.invoke('mcp_collect_retained', { player: invState.player })
+          .then(function () { renderInventory(); })
+          .catch(function (e) { H.drawer('Move to vault', H.stateBlock('error', String(e))); });
+      });
+    }).catch(function (e) { H.drawer('Move to vault', H.stateBlock('error', String(e))); });
   }
 
   // ── Transfer ──────────────────────────────────────────────────────────────
@@ -3065,6 +3104,18 @@
         fbody.appendChild(H.el('div', 'ops-muted', 'nothing broadcasting'));
       }
       body.appendChild(H.card('IN FLIGHT', fbody));
+
+      // AWAITING RESULT (v0.22: sent, outcome not yet known; not mutable)
+      var uq = q.unresolved || [];
+      if (uq.length) {
+        var ubody = H.el('div');
+        uq.forEach(function (t) {
+          ubody.appendChild(txRow(t, null, 0, null, null, false));
+          var uBtns = ubody.lastChild.querySelector('.tx-btns');
+          if (uBtns) uBtns.remove();
+        });
+        body.appendChild(H.card('AWAITING RESULT (' + uq.length + ')', ubody));
+      }
 
       // ACTION QUEUE (ordered, charge-gated)
       var abody = H.el('div');

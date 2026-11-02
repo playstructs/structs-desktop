@@ -33,9 +33,16 @@
 //! Signing goes through the vplayer façade at the holder's own HD index (index
 //! 0 derives the primary's key), exactly as `auto_infuse` has done in
 //! production — none of these messages is on the primary tx bridge. The signer
-//! address is re-derived and compared to the infusion's `address` before any
-//! removal or move: an infusion record is keyed by ADDRESS, so signing with the
+//! address is re-derived and compared to the holder's signing address before
+//! any write: an infusion record is keyed by ADDRESS, so signing with the
 //! wrong key silently acts on the wrong stake.
+//!
+//! v0.22: liquid Alpha lives in each player's protocol VAULT, so new stake is
+//! spent from — and held at — the vault address, selected with `ownerId`.
+//! Positions created before the upgrade stay at the signing address and keep
+//! `delegatorAddress`. A position is therefore ours when it sits at one of our
+//! signing addresses OR its owner (`ownerId`, else `playerId`) is one of our
+//! players; the row's own `address` says which selector acts on it.
 
 use serde_json::{json, Value};
 
@@ -56,6 +63,40 @@ const MW_PER_KW: f64 = 1_000_000.0;
 /// rest being a ratio-2 generator infusion at zero commission.
 pub fn capacity_gain_mw(power_mw: f64, commission: f64) -> f64 {
     (power_mw * (1.0 - commission)).floor().max(0.0)
+}
+
+/// The owner diversity bonus (v0.22) on a portfolio of per-reactor base power
+/// (post-commission, eligible reactors only): effective count `n = S²/Q`,
+/// bonus `= floor(S × max × min(1, (n − 1) / target))`. Exact for the chain's
+/// figures — reproduces 1-194's live `appliedBonus` of 128,726,655 — but a
+/// preview only: the chain's applied bonus is what actually lands.
+pub fn diversity_bonus(per_reactor: &[f64], max_bps: f64, target_extra: f64) -> f64 {
+    let s: f64 = per_reactor.iter().filter(|p| **p > 0.0).sum();
+    let q: f64 = per_reactor.iter().filter(|p| **p > 0.0).map(|p| p * p).sum();
+    if s <= 0.0 || q <= 0.0 || target_extra <= 0.0 {
+        return 0.0;
+    }
+    let spread = ((s * s / q - 1.0) / target_extra).clamp(0.0, 1.0);
+    (s * (max_bps / 10_000.0) * spread).floor()
+}
+
+/// Bonus before and after moving `deltas` (reactor id → base power change) on
+/// the owner's portfolio. A concentrated deposit can LOWER the bonus by more
+/// than the stake adds.
+pub fn bonus_shift(
+    portfolio: &std::collections::HashMap<String, f64>,
+    deltas: &[(&str, f64)],
+    max_bps: f64,
+    target_extra: f64,
+) -> (f64, f64) {
+    let before: Vec<f64> = portfolio.values().copied().collect();
+    let mut after = portfolio.clone();
+    for (id, d) in deltas {
+        let e = after.entry((*id).to_string()).or_insert(0.0);
+        *e = (*e + d).max(0.0);
+    }
+    let after: Vec<f64> = after.values().copied().collect();
+    (diversity_bonus(&before, max_bps, target_extra), diversity_bonus(&after, max_bps, target_extra))
 }
 
 /// Power an infusion of `fuel_ualpha` would produce at this reactor's `ratio`.
@@ -187,6 +228,68 @@ fn our_holders() -> Vec<Holder> {
 
 fn holder_for(address: &str) -> Option<Holder> {
     our_holders().into_iter().find(|h| h.address == address)
+}
+
+fn holder_by_pid(pid: &str) -> Option<Holder> {
+    if pid.is_empty() {
+        return None;
+    }
+    our_holders().into_iter().find(|h| h.player_id == pid)
+}
+
+/// The owner a position belongs to: `ownerId` (v0.22), else the legacy
+/// `playerId`.
+fn row_owner(r: &Value) -> String {
+    let get = |k: &str| r.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let owner = get("ownerId");
+    if owner.is_empty() { get("playerId") } else { owner }
+}
+
+/// Vault address → owner id, for every vault this process has looked up. The
+/// chain answers owner → vault only; the reverse is needed when the page hands
+/// back a vault-held position's address.
+static VAULTS: std::sync::LazyLock<std::sync::Mutex<std::collections::HashMap<String, String>>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
+async fn vault_of(client: &CosmosClient, pid: &str) -> Option<String> {
+    let cached = VAULTS
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .iter()
+        .find(|(_, owner)| owner.as_str() == pid)
+        .map(|(addr, _)| addr.clone());
+    if cached.is_some() {
+        return cached;
+    }
+    let (addr, _) = client.vault(pid).await.ok()?;
+    VAULTS.lock().unwrap_or_else(|p| p.into_inner()).insert(addr.clone(), pid.to_string());
+    Some(addr)
+}
+
+/// Who acts for the position at `address`, and whether it is vault-held.
+/// A signing address is ours by the registry; a vault address is ours only if
+/// the chain confirms it is the vault of one of our players.
+async fn resolve_acting(client: &CosmosClient, address: &str) -> Result<(Holder, bool), String> {
+    if let Some(h) = holder_for(address) {
+        return Ok((h, false));
+    }
+    let mut owner = VAULTS.lock().unwrap_or_else(|p| p.into_inner()).get(address).cloned();
+    if owner.is_none() {
+        owner = all_infusions(client)
+            .await
+            .unwrap_or_default()
+            .iter()
+            .find(|r| r.get("address").and_then(|a| a.as_str()) == Some(address))
+            .map(row_owner);
+    }
+    let holder = owner
+        .as_deref()
+        .and_then(holder_by_pid)
+        .ok_or_else(|| format!("{address} is not one of this operator's addresses or vaults"))?;
+    if vault_of(client, &holder.player_id).await.as_deref() != Some(address) {
+        return Err(format!("{address} is not {}'s vault", holder.player_id));
+    }
+    Ok((holder, true))
 }
 
 // ── Chain reads ─────────────────────────────────────────────────────────────
@@ -397,6 +500,163 @@ async fn liquid_alpha(client: &CosmosClient, address: &str) -> f64 {
         .unwrap_or(0.0)
 }
 
+/// The owner's reactor portfolio: reactor id → post-commission base power,
+/// eligible (ratio > 0) reactor rows only. Generators do not count.
+fn portfolio_of(rows: &[Value], owner: &str) -> std::collections::HashMap<String, f64> {
+    let mut out = std::collections::HashMap::new();
+    for r in rows {
+        if row_owner(r) != owner
+            || r.get("destinationType").and_then(|v| v.as_str()) != Some("reactor")
+            || num(r.get("ratio")) <= 0.0
+        {
+            continue;
+        }
+        let id = r.get("destinationId").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        *out.entry(id).or_insert(0.0) += capacity_gain_mw(num(r.get("power")), num(r.get("commission")));
+    }
+    out
+}
+
+/// `(maxBonusBps, targetExtraReactors, appliedBonus)` from the chain's owner
+/// diversity summary; the current defaults when it cannot be read.
+async fn diversity_params(client: &CosmosClient, owner: &str) -> (f64, f64, Option<f64>) {
+    match client.lcd_get(&format!("/structs/owner/{owner}/reactor-diversity")).await {
+        Ok(v) => (
+            Some(num(v.get("maxBonusBps"))).filter(|x| *x > 0.0).unwrap_or(5000.0),
+            Some(num(v.get("targetExtraReactors"))).filter(|x| *x > 0.0).unwrap_or(9.0),
+            v.pointer("/stored/appliedBonus").map(|b| num(Some(b))),
+        ),
+        Err(_) => (5000.0, 9.0, None),
+    }
+}
+
+/// The stake cap's room on a reactor: `(cap_active, external deposit headroom,
+/// bonded redelegation headroom)`. An empty headroom means "no cap" (inactive
+/// or 100%), reported as `None`.
+async fn stake_headroom(client: &CosmosClient, reactor_id: &str) -> (bool, Option<f64>, Option<f64>) {
+    let Ok(v) = client.lcd_get(&format!("/structs/reactor/{reactor_id}/stake-share")).await else {
+        return (false, None, None);
+    };
+    let room = |k: &str| {
+        v.get(k)
+            .and_then(|x| x.as_str())
+            .filter(|s| !s.is_empty())
+            .and_then(|s| s.parse::<f64>().ok())
+    };
+    (
+        v.get("capActive").and_then(|x| x.as_bool()).unwrap_or(false),
+        room("externalDepositHeadroom"),
+        room("bondedRedelegationHeadroom"),
+    )
+}
+
+/// Refusal when a reactor's stake cap would reject the inflow.
+fn cap_refusal(reactor_id: &str, amount_ualpha: f64, cap: (bool, Option<f64>)) -> Option<String> {
+    match cap {
+        (true, Some(room)) if amount_ualpha > room => Some(format!(
+            "reactor {reactor_id} is at its stake cap: it can take {:.4} g more, not {:.4} g",
+            room / UALPHA_PER_GRAM,
+            amount_ualpha / UALPHA_PER_GRAM
+        )),
+        _ => None,
+    }
+}
+
+// ── Where to infuse (v0.22 portfolio planning) ──────────────────────────────
+
+/// One reactor an owner could infuse: its id, the commission new stake would
+/// pay, and whether its validator is producing (bonded, not jailed).
+#[derive(Clone, Debug)]
+pub struct TargetCandidate {
+    pub reactor_id: String,
+    pub validator: String,
+    pub commission: f64,
+    pub eligible: bool,
+}
+
+/// Every eligible candidate ranked by the owner's NET power change from
+/// `amount_ualpha` there (base share plus the change in diversity bonus),
+/// best first. Pure.
+pub fn rank_targets(
+    portfolio: &std::collections::HashMap<String, f64>,
+    candidates: &[TargetCandidate],
+    amount_ualpha: f64,
+    max_bps: f64,
+    target_extra: f64,
+) -> Vec<(TargetCandidate, f64)> {
+    let mut out: Vec<(TargetCandidate, f64)> = candidates
+        .iter()
+        .filter(|c| c.eligible)
+        .map(|c| {
+            let gained = capacity_gain_mw(power_of(amount_ualpha, 1.0), c.commission);
+            let (before, after) = bonus_shift(portfolio, &[(c.reactor_id.as_str(), gained)], max_bps, target_extra);
+            (c.clone(), gained + after - before)
+        })
+        .collect();
+    out.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    out
+}
+
+/// `(base gain, bonus change)` in mW for `owner` infusing `amount_ualpha`
+/// into `reactor_id` at `commission`. Advisory plans add these instead of
+/// pricing the base share alone.
+pub async fn infuse_effect(client: &CosmosClient, owner: &str, reactor_id: &str, amount_ualpha: f64, commission: f64) -> Result<(f64, f64), String> {
+    let rows = all_infusions(client).await?;
+    let portfolio = portfolio_of(&rows, owner);
+    let (max_bps, target_extra, _) = diversity_params(client, owner).await;
+    let gained = capacity_gain_mw(power_of(amount_ualpha, 1.0), commission);
+    let (before, after) = bonus_shift(&portfolio, &[(reactor_id, gained)], max_bps, target_extra);
+    Ok((gained, after - before))
+}
+
+/// The reactor an automatic infuse of `amount_ualpha` for `owner` should use:
+/// `prefer` (the guild's reactor) while it still RAISES the owner's power and
+/// its stake cap admits the amount; otherwise the eligible reactor with the
+/// best net gain that the cap admits. `None` when no reactor raises power.
+/// Returns `(reactor_id, validator, net_mw)`.
+pub async fn plan_infuse_target(
+    client: &CosmosClient,
+    owner: &str,
+    amount_ualpha: f64,
+    prefer: Option<&str>,
+) -> Result<Option<(String, String, f64)>, String> {
+    let (rows, reactors, vals) = tokio::join!(all_infusions(client), reactors(client), validators(client));
+    let portfolio = portfolio_of(&rows?, owner);
+    let (max_bps, target_extra, _) = diversity_params(client, owner).await;
+    let candidates: Vec<TargetCandidate> = reactors
+        .rows
+        .iter()
+        .filter_map(|r| {
+            let id = r.get("id")?.as_str()?.to_string();
+            let validator = r.get("validator")?.as_str()?.to_string();
+            let v = vals.get(&validator);
+            let eligible = v.is_some_and(|v| {
+                !v.get("jailed").and_then(|j| j.as_bool()).unwrap_or(true)
+                    && v.get("status").and_then(|s| s.as_str()) == Some("BOND_STATUS_BONDED")
+            });
+            Some(TargetCandidate { reactor_id: id, validator, commission: num(r.get("defaultCommission")), eligible })
+        })
+        .collect();
+    let ranked = rank_targets(&portfolio, &candidates, amount_ualpha, max_bps, target_extra);
+    let admits = |id: String| async move {
+        let (active, room, _) = stake_headroom(client, &id).await;
+        cap_refusal(&id, amount_ualpha, (active, room)).is_none()
+    };
+    if let Some(p) = prefer {
+        if let Some((c, net)) = ranked.iter().find(|(c, _)| c.reactor_id == p) {
+            if *net > 0.0 && admits(c.reactor_id.clone()).await {
+                return Ok(Some((c.reactor_id.clone(), c.validator.clone(), *net)));
+            }
+        }
+    }
+    for (c, net) in ranked.into_iter().filter(|(_, n)| *n > 0.0).take(5) {
+        if admits(c.reactor_id.clone()).await {
+            return Ok(Some((c.reactor_id, c.validator, net)));
+        }
+    }
+    Ok(None)
+}
+
 // ── READ: the whole page in one command ─────────────────────────────────────
 
 /// Everything Industry → Infusions renders: our holdings, what is in flight,
@@ -408,8 +668,13 @@ pub async fn mcp_infusions() -> Result<Value, String> {
     if holders.is_empty() {
         return Err("primary identity not synced yet".into());
     }
-    let by_address: std::collections::HashMap<String, Holder> =
+    let mut by_address: std::collections::HashMap<String, Holder> =
         holders.iter().map(|h| (h.address.clone(), h.clone())).collect();
+    let by_pid: std::collections::HashMap<String, Holder> = holders
+        .iter()
+        .filter(|h| !h.player_id.is_empty())
+        .map(|h| (h.player_id.clone(), h.clone()))
+        .collect();
 
     let (rows, reactors, vals, (unbonding_secs, max_entries)) = tokio::join!(
         all_infusions(&client),
@@ -419,17 +684,31 @@ pub async fn mcp_infusions() -> Result<Value, String> {
     );
     let rows = rows?;
 
-    // Ours only. Addresses are compared WHOLE — never by prefix: bech32 shares
-    // a long prefix across every account on the chain.
-    let mine: Vec<&Value> = rows
-        .iter()
-        .filter(|r| {
-            r.get("address")
-                .and_then(|a| a.as_str())
-                .map(|a| by_address.contains_key(a))
-                .unwrap_or(false)
-        })
-        .collect();
+    // Ours only: at one of our signing addresses, or owned by one of our
+    // players (a vault-held position). Ids and addresses are compared WHOLE —
+    // never by prefix: `1-19` is a prefix of `1-194`.
+    let signing: std::collections::HashSet<String> = by_address.keys().cloned().collect();
+    let is_ours = |r: &Value| -> bool {
+        r.get("address").and_then(|a| a.as_str()).is_some_and(|a| signing.contains(a))
+            || by_pid.contains_key(&row_owner(r))
+    };
+    let mine: Vec<&Value> = rows.iter().filter(|r| is_ours(r)).collect();
+    // Vault-held rows name their holder by owner; teach the address map so the
+    // rest of the page (names, in-flight state) treats them like any other.
+    for r in &mine {
+        let addr = r.get("address").and_then(|a| a.as_str()).unwrap_or("");
+        if !addr.is_empty() && !by_address.contains_key(addr) {
+            if let Some(h) = by_pid.get(&row_owner(r)) {
+                VAULTS.lock().unwrap_or_else(|p| p.into_inner()).insert(addr.to_string(), h.player_id.clone());
+                by_address.insert(addr.to_string(), h.clone());
+            }
+        }
+    }
+    // The primary's vault too: a fully-defused vault position has no row left,
+    // but its cooldown is still in flight there.
+    if let Some(v) = vault_of(&client, &holders[0].player_id).await {
+        by_address.entry(v).or_insert_with(|| holders[0].clone());
+    }
 
     // Grid figures for the players that actually hold something — this is the
     // budget every removal is measured against, so it is read live rather than
@@ -503,6 +782,12 @@ pub async fn mcp_infusions() -> Result<Value, String> {
         let mut seen = std::collections::HashSet::new();
         mine.iter()
             .filter_map(|r| r.get("address").and_then(|v| v.as_str()).map(String::from))
+            .chain(
+                by_address
+                    .iter()
+                    .filter(|(a, h)| h.index == 0 && **a != h.address)
+                    .map(|(a, _)| a.clone()),
+            )
             .filter(|a| seen.insert(a.clone()))
             .collect()
     };
@@ -588,7 +873,12 @@ pub async fn mcp_infusions() -> Result<Value, String> {
         let commission = num(r.get("commission"));
         let ratio = num(r.get("ratio"));
         let defusing = num(r.get("defusing"));
+        // v0.22: a disabled generator keeps its fuel and ratio but its row
+        // `power` is 0 — it earns nothing, exactly like a ratio-0 reactor row.
+        let generator_disabled = r.get("generatorDisabled").and_then(|v| v.as_bool()).unwrap_or(false);
+        let dead = ratio == 0.0 || generator_disabled;
         let (pid, name, idx) = name_of(address);
+        let vault_held = by_address.get(address).is_some_and(|h| h.address != address);
         let is_reactor = dest_type == "reactor";
         let gain = capacity_gain_mw(power, commission);
         let reactor = if is_reactor { reactors.by_id(dest_id) } else { None };
@@ -606,7 +896,7 @@ pub async fn mcp_infusions() -> Result<Value, String> {
         t_power += gain;
         t_defusing += defusing;
         t_commission += power - gain;
-        if ratio == 0.0 {
+        if dead {
             t_dead += fuel;
         }
 
@@ -630,6 +920,7 @@ pub async fn mcp_infusions() -> Result<Value, String> {
             "player_name": name,
             "hd_index": idx,
             "address": address,
+            "vault_held": vault_held,
             "fuel_ualpha": fuel,
             "power_mw": power,
             "capacity_mw": gain,
@@ -639,7 +930,8 @@ pub async fn mcp_infusions() -> Result<Value, String> {
             "defusing_ualpha": defusing,
             // ratio 0 = the validator is jailed or unbonded: this fuel is
             // staked and producing nothing at all.
-            "dead": ratio == 0.0,
+            "dead": dead,
+            "generator_disabled": generator_disabled,
             // Generator infusions have no defuse message and no migration.
             "reversible": is_reactor,
             "destroyed": gen.and_then(|g| g.get("destroyed")).and_then(|x| x.as_bool()).unwrap_or(false),
@@ -670,11 +962,7 @@ pub async fn mcp_infusions() -> Result<Value, String> {
     for r in &rows {
         let Some(d) = r.get("destinationId").and_then(|v| v.as_str()) else { continue };
         *infuser_count.entry(d.to_string()).or_insert(0) += 1;
-        if r.get("address")
-            .and_then(|a| a.as_str())
-            .map(|a| by_address.contains_key(a))
-            .unwrap_or(false)
-        {
+        if is_ours(r) {
             *our_stake.entry(d.to_string()).or_insert(0.0) += num(r.get("fuel"));
         }
     }
@@ -683,6 +971,19 @@ pub async fn mcp_infusions() -> Result<Value, String> {
         .ok()
         .and_then(|g| g.guild_id.clone())
         .unwrap_or_default();
+    // What one more gram is worth to the primary at each reactor (v0.22):
+    // the base share plus the change in its diversity bonus — negative where
+    // more stake would concentrate the portfolio enough to LOWER power.
+    let primary_pid = holders[0].player_id.clone();
+    let portfolio = portfolio_of(&rows, &primary_pid);
+    let (max_bps, target_extra, _) = diversity_params(&client, &primary_pid).await;
+    let net_per_gram = |id: &str, commission: f64, producing: bool| -> Option<f64> {
+        producing.then(|| {
+            let gained = capacity_gain_mw(power_of(UALPHA_PER_GRAM, 1.0), commission);
+            let (before, after) = bonus_shift(&portfolio, &[(id, gained)], max_bps, target_extra);
+            gained + after - before
+        })
+    };
     let mut reactor_rows: Vec<Value> = reactors
         .rows
         .iter()
@@ -702,6 +1003,14 @@ pub async fn mcp_infusions() -> Result<Value, String> {
                 "stake_commission": vinfo.map(|x| num(x.get("stake_commission"))).unwrap_or(0.0),
                 "our_fuel_ualpha": our_stake.get(id).copied().unwrap_or(0.0),
                 "infusers": infuser_count.get(id).copied().unwrap_or(0),
+                "net_mw_per_gram": net_per_gram(
+                    id,
+                    num(r.get("defaultCommission")),
+                    vinfo.is_some_and(|v| {
+                        !v.get("jailed").and_then(|j| j.as_bool()).unwrap_or(true)
+                            && v.get("status").and_then(|s| s.as_str()) == Some("BOND_STATUS_BONDED")
+                    }),
+                ),
             })
         })
         .collect();
@@ -792,8 +1101,16 @@ pub async fn mcp_infusion_preview(
     amount_ualpha: f64,
 ) -> Result<Value, String> {
     let client = CosmosClient::new();
-    let holder = holder_for(&address)
-        .ok_or_else(|| format!("{address} is not one of this operator's addresses"))?;
+    let (holder, _) = resolve_acting(&client, &address).await?;
+    // New stake is spent from — and held at — the holder's vault (v0.22), so
+    // an infuse is priced against the vault whatever address the page passed.
+    let address = if op == "infuse" {
+        vault_of(&client, &holder.player_id)
+            .await
+            .ok_or_else(|| format!("could not resolve {}'s vault", holder.player_id))?
+    } else {
+        address
+    };
     let reactors = reactors(&client).await;
     let vals = validators(&client).await;
     let (unbonding_secs, max_entries) = staking_params(&client).await;
@@ -838,10 +1155,15 @@ pub async fn mcp_infusion_preview(
     let mut facts = json!({});
     let refusal: Option<String>;
 
+    // The owner's portfolio decides the diversity bonus, which every change
+    // below moves — sometimes against the stake (v0.22).
+    let portfolio = portfolio_of(&all_infusions(&client).await.unwrap_or_default(), &holder.player_id);
+    let (max_bps, target_extra, applied_bonus) = diversity_params(&client, &holder.player_id).await;
+
     match op.as_str() {
         "infuse" => {
             let balance = liquid_alpha(&client, &address).await;
-            refusal = infuse_refusal(amount_ualpha, balance);
+            let (cap_active, external_room, _) = stake_headroom(&client, &destination_id).await;
             // A first infusion into a reactor whose validator is down produces
             // nothing at all until it is unjailed — that is not a refusal (the
             // Alpha is recoverable) but it IS the whole decision.
@@ -869,25 +1191,52 @@ pub async fn mcp_infusion_preview(
             };
             let power = power_of(amount_ualpha, effective_ratio);
             let gained = capacity_gain_mw(power, commission);
+            let (bonus_before, bonus_after) =
+                bonus_shift(&portfolio, &[(destination_id.as_str(), gained)], max_bps, target_extra);
+            let net = gained + bonus_after - bonus_before;
+            refusal = infuse_refusal(amount_ualpha, balance)
+                .or_else(|| cap_refusal(&destination_id, amount_ualpha, (cap_active, external_room)))
+                .or_else(|| {
+                    (net < 0.0).then(|| {
+                        format!(
+                            "that LOWERS {}'s power by {:.2} kW: it adds {:.2} kW here but                              concentrates the portfolio, cutting the diversity bonus by {:.2} kW —                              infuse a different reactor",
+                            holder.name,
+                            -net / MW_PER_KW,
+                            gained / MW_PER_KW,
+                            (bonus_before - bonus_after) / MW_PER_KW
+                        )
+                    })
+                });
             facts = json!({
                 "balance_ualpha": balance,
                 "balance_after_ualpha": (balance - amount_ualpha).max(0.0),
                 "gained_mw": gained,
+                "bonus_before_mw": bonus_before,
+                "bonus_after_mw": bonus_after,
+                "bonus_applied_mw": applied_bonus,
+                "bonus_change_mw": bonus_after - bonus_before,
+                "net_mw": net,
                 "ratio": effective_ratio,
                 "commission_mw": power - gained,
                 "commission": commission,
                 "capacity_mw": capacity,
-                "capacity_after_mw": capacity + gained,
+                "capacity_after_mw": capacity + net,
                 "load_mw": load,
-                "headroom_after_mw": (capacity + gained - load).max(0.0),
-                "online_after": (load + structs_load) <= (capacity + gained + cap_secondary),
+                "headroom_after_mw": (capacity + net - load).max(0.0),
+                "online_after": (load + structs_load) <= (capacity + net + cap_secondary),
+                "stake_cap_headroom_ualpha": if cap_active { external_room } else { None },
             });
         }
         "defuse" => {
             // The capacity that leaves is the share this fuel was crediting —
             // its OWN locked commission, which may differ from the reactor's
             // current default.
-            let lost = capacity_gain_mw(power_of(amount_ualpha, ratio), row_commission);
+            let base_lost = capacity_gain_mw(power_of(amount_ualpha, ratio), row_commission);
+            let (bonus_before, bonus_after) =
+                bonus_shift(&portfolio, &[(destination_id.as_str(), -base_lost)], max_bps, target_extra);
+            // What actually leaves: the base share, plus or minus the bonus —
+            // trimming a concentrated reactor can even RAISE the bonus.
+            let lost = base_lost + bonus_before - bonus_after;
             refusal = if existing.is_none() {
                 Some(format!("no infusion from {address} into {destination_id}"))
             } else {
@@ -915,6 +1264,11 @@ pub async fn mcp_infusion_preview(
             facts = json!({
                 "staked_ualpha": row_fuel,
                 "already_defusing_ualpha": row_defusing,
+                "base_lost_mw": base_lost,
+                "bonus_before_mw": bonus_before,
+                "bonus_after_mw": bonus_after,
+                "bonus_applied_mw": applied_bonus,
+                "bonus_change_mw": bonus_after - bonus_before,
                 "capacity_lost_mw": lost,
                 "capacity_mw": capacity,
                 "capacity_after_mw": (capacity - lost).max(0.0),
@@ -943,6 +1297,14 @@ pub async fn mcp_infusion_preview(
             let to_ratio = if to_jailed || to_status != "BOND_STATUS_BONDED" { 0.0 } else { 1.0 };
             let lost = capacity_gain_mw(power_of(amount_ualpha, ratio), row_commission);
             let gained = capacity_gain_mw(power_of(amount_ualpha, to_ratio), to_commission);
+            let (bonus_before, bonus_after) = bonus_shift(
+                &portfolio,
+                &[(destination_id.as_str(), -lost), (to_id.as_str(), gained)],
+                max_bps,
+                target_extra,
+            );
+            let bonus_change = bonus_after - bonus_before;
+            let (cap_active, _, redelegation_room) = stake_headroom(&client, &to_id).await;
 
             refusal = if existing.is_none() {
                 Some(format!("no infusion from {address} into {destination_id}"))
@@ -957,11 +1319,13 @@ pub async fn mcp_infusion_preview(
                     row_fuel / UALPHA_PER_GRAM,
                     row_defusing / UALPHA_PER_GRAM
                 ))
+            } else if let Some(why) = cap_refusal(&to_id, amount_ualpha, (cap_active, redelegation_room)) {
+                Some(why)
             } else {
                 // A migration is a swap, so it only brownouts when the
                 // destination is worth LESS than the source (a dead validator,
-                // or a fatter commission).
-                let net = gained - lost;
+                // a fatter commission, or a more concentrated portfolio).
+                let net = gained - lost + bonus_change;
                 if net < 0.0 && load > capacity + net {
                     Some(format!(
                         "that destination pays {:.2} kW less than the source, leaving {:.2} kW \
@@ -1001,34 +1365,34 @@ pub async fn mcp_infusion_preview(
                 "from_reactor": destination_id, "to_reactor": to_id,
                 "from_commission": row_commission, "to_commission": to_commission,
                 "capacity_lost_mw": lost, "capacity_gained_mw": gained,
-                "net_mw": gained - lost,
+                "bonus_before_mw": bonus_before, "bonus_after_mw": bonus_after,
+                "bonus_applied_mw": applied_bonus,
+                "bonus_change_mw": bonus_change,
+                "net_mw": gained - lost + bonus_change,
                 "capacity_mw": capacity,
-                "capacity_after_mw": (capacity - lost + gained).max(0.0),
+                "capacity_after_mw": (capacity - lost + gained + bonus_change).max(0.0),
                 "load_mw": load,
-                "headroom_after_mw": capacity - lost + gained - load,
+                "headroom_after_mw": capacity - lost + gained + bonus_change - load,
                 "cooldown_secs": unbonding_secs,
             });
         }
         other => return Err(format!("unknown op '{other}' (infuse, defuse or migrate)")),
     }
 
-    // Permission check on the holder's own player object. A player owns itself,
-    // so this normally passes — it fails on a delegated or restricted account,
-    // and the chain's rejection ("unauthorized") says nothing about which bit.
-    if let Ok(mask) = client.permission_value(&holder.player_id, &holder.player_id).await {
-        let bit = match op.as_str() {
-            "infuse" => 5u64,   // PermTokenInfuse
-            "migrate" => 6,     // PermTokenMigrate
-            _ => 7,             // PermTokenDefuse
-        };
-        if mask != 0 && mask & (1 << bit) == 0 {
-            warnings.push(format!(
-                "{} does not hold Perm{} on its own player object — the chain may reject this",
-                holder.name,
-                match bit { 5 => "TokenInfuse", 6 => "TokenMigrate", _ => "TokenDefuse" }
-            ));
-        }
-    }
+    // v0.22: the SIGNING KEY must hold the operation's bit itself; a grant on
+    // the player object no longer stands in for it. A key without it is a
+    // certain rejection, so it refuses (an unreadable record does not).
+    let (need, label) = match op.as_str() {
+        "infuse" => (crate::mcp::send_guard::perm::TOKEN_INFUSE, "token-infuse"),
+        "migrate" => (crate::mcp::send_guard::perm::TOKEN_MIGRATE, "token-migrate"),
+        _ => (crate::mcp::send_guard::perm::TOKEN_DEFUSE, "token-defuse"),
+    };
+    let refusal = match refusal {
+        Some(r) => Some(r),
+        None => crate::mcp::send_guard::signer_lacks(&holder.address, need, label)
+            .await
+            .map(|why| format!("{}: {why}", holder.name)),
+    };
 
     Ok(json!({
         "ok": refusal.is_none(),
@@ -1073,18 +1437,49 @@ async fn verify_signer(
     Ok(())
 }
 
-/// Sign one reactor message as the holder of `address`, after checking that the
-/// key we would sign with really is that address.
+/// Which stake a reactor message acts on: a vault-held position (and every new
+/// infuse) by `ownerId`, a pre-v0.22 position at a signing address by
+/// `delegatorAddress`. Never both — an explicit delegator must match the
+/// selected vault, and the signing address is not it.
+fn with_selector(mut payload: Value, holder: &Holder, address: &str, vault: bool) -> Value {
+    if let Some(m) = payload.as_object_mut() {
+        if vault {
+            m.insert("ownerId".into(), json!(holder.player_id));
+        } else {
+            m.insert("delegatorAddress".into(), json!(address));
+        }
+    }
+    payload
+}
+
+/// What stake a signed message acts on.
+#[derive(Clone, Copy, PartialEq)]
+enum Stake {
+    /// The position at the given address (defuse, migrate, cancel).
+    AtPosition,
+    /// New stake from the holder's vault (infuse).
+    FromVault,
+    /// None — the message carries no delegator (reactor restart).
+    Unused,
+}
+
+/// Sign one reactor message as the holder of `address`, after checking that
+/// the key we would sign with really is the holder's.
 async fn sign_as(
     app: &tauri::AppHandle,
     address: &str,
     type_url: &str,
     payload: Value,
     context: &str,
+    stake: Stake,
 ) -> Result<String, String> {
-    let holder = holder_for(address)
-        .ok_or_else(|| format!("{address} is not one of this operator's addresses"))?;
-    verify_signer(app, holder.index, address).await?;
+    let client = CosmosClient::new();
+    let (holder, vault_held) = resolve_acting(&client, address).await?;
+    verify_signer(app, holder.index, &holder.address).await?;
+    let payload = match stake {
+        Stake::Unused => payload,
+        _ => with_selector(payload, &holder, address, stake == Stake::FromVault || vault_held),
+    };
     let res = crate::mcp::tx_retry::sign_with_retry(app, holder.index, type_url, payload, context)
         .await?;
     Ok(res
@@ -1150,11 +1545,11 @@ pub async fn mcp_infusion_infuse_impl(
         &address,
         "/structs.structs.MsgReactorInfuse",
         json!({
-            "delegatorAddress": address,
             "validatorAddress": validator,
             "amount": coin(amount_ualpha),
         }),
         &format!("board:infuse:{}", preview["player_id"].as_str().unwrap_or("")),
+        Stake::FromVault,
     )
     .await?;
     feed(
@@ -1208,11 +1603,11 @@ pub async fn mcp_infusion_defuse_impl(
         &address,
         "/structs.structs.MsgReactorDefuse",
         json!({
-            "delegatorAddress": address,
             "validatorAddress": validator,
             "amount": coin(amount_ualpha),
         }),
         &format!("board:defuse:{}", preview["player_id"].as_str().unwrap_or("")),
+        Stake::AtPosition,
     )
     .await?;
     feed(
@@ -1284,12 +1679,12 @@ pub async fn mcp_infusion_migrate_impl(
         &address,
         "/structs.structs.MsgReactorBeginMigration",
         json!({
-            "delegatorAddress": address,
             "validatorSrcAddress": src,
             "validatorDstAddress": dst,
             "amount": coin(amount_ualpha),
         }),
         &format!("board:migrate:{}", preview["player_id"].as_str().unwrap_or("")),
+        Stake::AtPosition,
     )
     .await?;
     feed(
@@ -1340,12 +1735,12 @@ pub async fn mcp_infusion_cancel_defusion_impl(
         &address,
         "/structs.structs.MsgReactorCancelDefusion",
         json!({
-            "delegatorAddress": address,
             "validatorAddress": validator,
             "amount": coin(amount_ualpha),
             "creationHeight": creation_height,
         }),
         "board:cancel_defusion",
+        Stake::AtPosition,
     )
     .await?;
     feed(
@@ -1398,6 +1793,7 @@ pub async fn mcp_infusion_restart_impl(
         "/structs.structs.MsgReactorRestart",
         json!({ "validatorAddress": validator }),
         "board:reactor_restart",
+        Stake::Unused,
     )
     .await?;
     feed(&app, format!("restarted reactor {reactor_id} from live staking"));
@@ -1407,6 +1803,92 @@ pub async fn mcp_infusion_restart_impl(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn targets_rank_by_net_gain_and_skip_dead_reactors() {
+        // A heavy reactor beside many light ones: topping up the heavy one
+        // LOSES power, so it must rank below a light one, and a jailed
+        // reactor is never offered.
+        let mut pf = std::collections::HashMap::new();
+        pf.insert("3-0".to_string(), 2e9);
+        for i in 1..=25 {
+            pf.insert(format!("3-{i}"), 2e8);
+        }
+        let c = |id: &str, eligible: bool| TargetCandidate {
+            reactor_id: id.into(), validator: format!("v{id}"), commission: 0.0, eligible,
+        };
+        let ranked = rank_targets(&pf, &[c("3-0", true), c("3-1", true), c("3-99", false)], 5e8, 5000.0, 9.0);
+        assert_eq!(ranked.len(), 2, "the jailed reactor is not a target");
+        assert_eq!(ranked[0].0.reactor_id, "3-1");
+        assert!(ranked[0].1 > 0.0 && ranked[1].1 < 0.0, "{ranked:?}");
+    }
+
+    #[test]
+    fn diversity_bonus_matches_the_chain() {
+        // Live 1-194, 2026-11-01: 3-1 and 3-3 at 4% commission.
+        let p = [2_319_001_349.0 * 0.96f64, 1_000_000_000.0 * 0.96];
+        let p = [p[0].floor(), p[1].floor()];
+        assert_eq!(diversity_bonus(&p, 5000.0, 9.0), 128_726_655.0);
+        // One reactor: no bonus. Ten equal: the full 50%.
+        assert_eq!(diversity_bonus(&[1e9], 5000.0, 9.0), 0.0);
+        assert_eq!(diversity_bonus(&[1e9; 10], 5000.0, 9.0), 5e9);
+    }
+
+    #[test]
+    fn a_concentrated_deposit_can_cost_more_bonus_than_it_adds() {
+        // One heavy reactor beside many light ones: topping up the heavy one
+        // concentrates the portfolio enough that total power FALLS.
+        let mut pf = std::collections::HashMap::new();
+        pf.insert("3-0".to_string(), 2e9);
+        for i in 1..=25 {
+            pf.insert(format!("3-{i}"), 2e8);
+        }
+        let (before, after) = bonus_shift(&pf, &[("3-0", 5e8)], 5000.0, 9.0);
+        assert!(5e8 + after - before < 0.0, "net {} must be negative", 5e8 + after - before);
+        // The same stake into a light reactor raises it.
+        let (b2, a2) = bonus_shift(&pf, &[("3-1", 5e8)], 5000.0, 9.0);
+        assert!(5e8 + a2 - b2 > 0.0);
+    }
+
+    #[test]
+    fn stake_cap_refuses_only_above_live_headroom() {
+        assert!(cap_refusal("3-1", 5e6, (true, Some(4e6))).is_some());
+        assert!(cap_refusal("3-1", 3e6, (true, Some(4e6))).is_none());
+        assert!(cap_refusal("3-1", 5e9, (false, Some(1.0))).is_none(), "inactive cap");
+        assert!(cap_refusal("3-1", 5e9, (true, None)).is_none(), "empty = no cap");
+    }
+
+    #[test]
+    fn portfolio_counts_eligible_reactor_rows_of_the_owner_only() {
+        let rows = vec![
+            json!({ "destinationType": "reactor", "destinationId": "3-1", "playerId": "1-9", "ownerId": "", "power": "100", "commission": "0.04", "ratio": "1" }),
+            json!({ "destinationType": "reactor", "destinationId": "3-1", "playerId": "1-9", "ownerId": "1-9", "power": "100", "commission": "0.04", "ratio": "1" }),
+            json!({ "destinationType": "reactor", "destinationId": "3-2", "playerId": "1-9", "ownerId": "", "power": "100", "commission": "0", "ratio": "0" }),
+            json!({ "destinationType": "struct", "destinationId": "5-1", "playerId": "1-9", "ownerId": "", "power": "100", "commission": "0", "ratio": "2" }),
+            json!({ "destinationType": "reactor", "destinationId": "3-1", "playerId": "1-90", "ownerId": "", "power": "100", "commission": "0", "ratio": "1" }),
+        ];
+        let pf = portfolio_of(&rows, "1-9");
+        assert_eq!(pf.len(), 1);
+        assert_eq!(pf["3-1"], 192.0);
+    }
+
+    #[test]
+    fn row_owner_prefers_owner_id_then_player_id() {
+        assert_eq!(row_owner(&json!({ "ownerId": "0-5", "playerId": "1-9" })), "0-5");
+        assert_eq!(row_owner(&json!({ "ownerId": "", "playerId": "1-9" })), "1-9");
+        assert_eq!(row_owner(&json!({})), "");
+    }
+
+    #[test]
+    fn selector_is_owner_id_for_vault_stake_and_address_for_legacy() {
+        let h = Holder { player_id: "1-194".into(), name: "p".into(), address: "structs1sign".into(), index: 0 };
+        let vault = with_selector(json!({ "validatorAddress": "v" }), &h, "structs1vault", true);
+        assert_eq!(vault["ownerId"], "1-194");
+        assert!(vault.get("delegatorAddress").is_none(), "an explicit delegator would have to match the vault");
+        let legacy = with_selector(json!({ "validatorAddress": "v" }), &h, "structs1sign", false);
+        assert_eq!(legacy["delegatorAddress"], "structs1sign");
+        assert!(legacy.get("ownerId").is_none());
+    }
 
     #[test]
     fn capacity_split_matches_live_player() {

@@ -2335,11 +2335,16 @@ fn summarize_shot(s: &Value) -> String {
             .unwrap_or(0)
             .saturating_sub(s.get("damageReduction").and_then(json_to_u64).unwrap_or(0));
         out.push_str(&format!(": {} dmg", dmg));
+        // v0.22: only a volley's FINAL projectile row carries the resolved
+        // health; earlier rows repeat the pre-volley figure. An unchanged
+        // pair is one of those, not a shot that did nothing.
         if let (Some(b), Some(a)) = (
             s.get("targetHealthBefore").and_then(json_to_u64),
             s.get("targetHealthAfter").and_then(json_to_u64),
         ) {
-            out.push_str(&format!(", HP {}→{}", b, a));
+            if a != b {
+                out.push_str(&format!(", HP {}→{}", b, a));
+            }
         }
     }
     if bval("targetDestroyed") {

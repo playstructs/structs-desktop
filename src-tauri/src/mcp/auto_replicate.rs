@@ -437,7 +437,7 @@ fn signals(gp: Option<&crate::mcp::guild_power::GuildPower>, cfg: &AutoReplicate
             // "nothing to dilute" and lets one through; so do we, one at a time.
             1
         } else {
-            let available = (g.sub_capacity - g.sub_load).max(0.0);
+            let available = g.available();
             crate::mcp::guild_power::derive_headroom(available, g.sub_connection_count, cfg.min_share_mw).1
         }
     });
@@ -666,7 +666,7 @@ pub async fn terminal_replication(app: tauri::AppHandle) -> Result<Value, String
             match gp.as_ref() {
                 Some(g) => {
                     let queue = queue_now;
-                    let available = (g.sub_capacity - g.sub_load).max(0.0);
+                    let available = g.available();
                     let after = if g.sub_connection_count + queue > 0 {
                         available / (g.sub_connection_count + queue) as f64
                     } else {

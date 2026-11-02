@@ -85,7 +85,7 @@ pub async fn push_game_event(app: tauri::AppHandle, event: GameEvent) -> Result<
         crate::mcp::grass_native::note_webview_suppressed();
         return Ok(());
     }
-    ingest(&app, event);
+    crate::mcp::grass_native::ingest_resolving(&app, event);
     Ok(())
 }
 

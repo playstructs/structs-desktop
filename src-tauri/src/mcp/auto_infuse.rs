@@ -61,6 +61,8 @@ pub fn set(cfg: AutoInfuseConfig) {
 /// Outcome of an infuse attempt, for reporting.
 pub struct InfuseResult {
     pub infused_ualpha: u64,
+    /// The reactor it went into (the guild's unless that would lower power).
+    pub reactor_id: String,
     pub kept_ualpha: u64,
     pub tx: String,
 }
@@ -87,11 +89,9 @@ pub async fn infuse_primary_excess(
     }
     let client = CosmosClient::new();
     let gp = crate::mcp::guild_power::resolve_guild_power(&client, &guild_id).await?;
-    if gp.reactor_validator.is_empty() {
-        return Err(format!("couldn't resolve reactor {} validator", gp.reactor_id));
-    }
 
-    // Current liquid Alpha (ualpha).
+    // Current liquid Alpha (ualpha) — `rocks` is the player VAULT's spendable
+    // balance since v0.22, which is exactly what an infuse spends.
     let balance = match client.query_entity("player", &primary_pid).await {
         Ok(v) => crate::mcp::loop_util::parse_f64(v
             .get("playerInventory")
@@ -108,9 +108,29 @@ pub async fn infuse_primary_excess(
         ));
     }
 
+    // v0.22: reactor power has a portfolio bonus, so more stake in an already
+    // concentrated reactor can LOWER total power. Keep the guild's reactor
+    // while it still raises power; otherwise the best reactor that does.
+    let Some((reactor_id, validator, _net)) = crate::mcp::tools::infusions::plan_infuse_target(
+        &client,
+        &primary_pid,
+        infuse as f64,
+        Some(gp.reactor_id.as_str()).filter(|r| !r.is_empty()),
+    )
+    .await?
+    else {
+        return Err(format!(
+            "no reactor would raise power with {} ualpha (portfolio concentration or stake caps) — kept liquid",
+            infuse
+        ));
+    };
+
+    // v0.22: stake comes from the player's vault, selected by owner id. The
+    // signing address holds no liquid Alpha any more; naming it as delegator
+    // would resolve to whatever owns it, not necessarily this vault.
     let payload = json!({
-        "delegatorAddress": primary_addr,
-        "validatorAddress": gp.reactor_validator,
+        "ownerId": primary_pid,
+        "validatorAddress": validator,
         "amount": { "denom": "ualpha", "amount": infuse.to_string() },
     });
     // HD index 0 = the primary's own key off the shared mnemonic.
@@ -127,7 +147,7 @@ pub async fn infuse_primary_excess(
         .and_then(|h| h.as_str())
         .unwrap_or("(pending)")
         .to_string();
-    Ok(InfuseResult { infused_ualpha: infuse, kept_ualpha: keep, tx })
+    Ok(InfuseResult { infused_ualpha: infuse, reactor_id, kept_ualpha: keep, tx })
 }
 
 /// Auto-run hook (throttled). Infuses the primary's excess each interval when enabled.
@@ -159,8 +179,8 @@ pub async fn tick(app_handle: &tauri::AppHandle, force: bool) {
                 "auto_infuse",
                 crate::mcp::telemetry::Sev::Notice,
                 format!(
-                    "infused {} ualpha (kept {} g), tx {}",
-                    r.infused_ualpha, cfg.keep_grams, r.tx
+                    "infused {} ualpha into {} (kept {} g), tx {}",
+                    r.infused_ualpha, r.reactor_id, cfg.keep_grams, r.tx
                 ),
             );
             crate::mcp::board_feed::push(
@@ -168,8 +188,9 @@ pub async fn tick(app_handle: &tauri::AppHandle, force: bool) {
                 crate::mcp::board_feed::Severity::Notice,
                 "auto_infuse",
                 format!(
-                    "infused {:.1} g alpha into the reactor (kept {} g)",
+                    "infused {:.1} g alpha into reactor {} (kept {} g)",
                     r.infused_ualpha as f64 / 1_000_000.0,
+                    r.reactor_id,
                     cfg.keep_grams
                 ),
             );

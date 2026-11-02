@@ -49,20 +49,54 @@ pub const DIFFICULTY_RECALCULATE: u64 = 5_000_000;
 
 /// Calculate difficulty based on block age and target.
 ///
-/// Port of TaskState.getCalculatedDifficulty / getCurrentDifficulty:
-/// ```js
-/// if (age <= 1) return 64;
-/// let difficulty = 64 - Math.floor(Math.log10(age) / Math.log10(difficulty_target) * 63);
-/// return Math.max(1, difficulty);
-/// ```
+/// Exact port of structsd v0.22.0 `types.CalculateDifficulty`
+/// (x/structs/types/work.go): `64 - max{k ≤ 63 : range^k ≤ age^63}`.
+///
+/// v0.21 and earlier used `64 - floor(log10(age) / log10(range) * 63)`, and
+/// so did this port. Float log10 differs in the last bit between platforms;
+/// where the true ratio sits on an integer boundary that flips a whole hex
+/// zero, so a proof we judged sufficient could be one the chain rejects. The
+/// chain switched to integer arithmetic at the v0.22.0 upgrade (height
+/// 3,353,000 on structstestnet-111), so this must match it exactly.
 pub fn calculate_difficulty(age: u64, difficulty_target: u64) -> u64 {
-    if age <= 1 {
+    // log(1) = 0 and log(0) = -inf have no meaningful curve; the chain pins
+    // both at the maximum rather than assuming a governed range.
+    if age <= 1 || difficulty_target <= 1 {
         return 64;
     }
-    let age_f = age as f64;
-    let target_f = difficulty_target as f64;
-    let difficulty = 64.0 - (age_f.log10() / target_f.log10() * 63.0).floor();
-    (difficulty as i64).max(1) as u64
+    let age_to_the_63 = (0..63).fold(vec![1u64], |n, _| mul_small(&n, age));
+    let mut range_to_the_k = vec![1u64];
+    let mut exponent = 0;
+    for k in 1..=63 {
+        range_to_the_k = mul_small(&range_to_the_k, difficulty_target);
+        if cmp_limbs(&range_to_the_k, &age_to_the_63) == std::cmp::Ordering::Greater {
+            break;
+        }
+        exponent = k;
+    }
+    64 - exponent
+}
+
+/// Little-endian u64 limbs × u64. age^63 for a u64 age is up to 4032 bits —
+/// far past u128 — and this is the only big-number arithmetic the hasher needs.
+fn mul_small(n: &[u64], m: u64) -> Vec<u64> {
+    let mut out = Vec::with_capacity(n.len() + 1);
+    let mut carry: u128 = 0;
+    for &limb in n {
+        let p = limb as u128 * m as u128 + carry;
+        out.push(p as u64);
+        carry = p >> 64;
+    }
+    if carry > 0 {
+        out.push(carry as u64);
+    }
+    out
+}
+
+fn cmp_limbs(a: &[u64], b: &[u64]) -> std::cmp::Ordering {
+    let trim = |x: &[u64]| x.iter().rposition(|&l| l != 0).map_or(0, |i| i + 1);
+    let (la, lb) = (trim(a), trim(b));
+    la.cmp(&lb).then_with(|| a[..la].iter().rev().cmp(b[..lb].iter().rev()))
 }
 
 /// Estimate the current block age (blocks since task started).
@@ -167,6 +201,39 @@ mod tests {
     fn test_difficulty_min_1() {
         // Very large age should still return at least 1
         assert!(calculate_difficulty(u64::MAX / 2, 100) >= 1);
+    }
+
+    #[test]
+    fn integer_difficulty_matches_chain_boundaries() {
+        // age == range: range^63 <= age^63 exactly, so k = 63 → 1.
+        assert_eq!(calculate_difficulty(10, 10), 1);
+        assert_eq!(calculate_difficulty(700, 700), 1);
+        // Range <= 1 pins at the maximum, as on chain.
+        assert_eq!(calculate_difficulty(500, 1), 64);
+        assert_eq!(calculate_difficulty(500, 0), 64);
+        // age = 2, range = 4: 4^k <= 2^63 ⟺ 2k <= 63 → k = 31 → 33.
+        assert_eq!(calculate_difficulty(2, 4), 33);
+        // age = 8, range = 4: 4^k <= 8^63 = 2^189 ⟺ k <= 94.5, capped at 63 → 1.
+        assert_eq!(calculate_difficulty(8, 4), 1);
+        // age = 2, range = 1024: 2^(10k) <= 2^63 → k = 6 → 58.
+        assert_eq!(calculate_difficulty(2, 1024), 58);
+        // Exact power boundary: 1000^21 = 10^63 = 10^63 → k = 21 → 43.
+        assert_eq!(calculate_difficulty(10, 1000), 43);
+        // One block short of the boundary loses that step: 9^63 < 1000^21.
+        assert_eq!(calculate_difficulty(9, 1000), 44);
+    }
+
+    #[test]
+    fn integer_difficulty_never_easier_than_old_float_curve_off_boundaries() {
+        // Away from exact power boundaries the two curves agree; the integer
+        // version only differs where float rounding crossed a whole step.
+        for range in [10u64, 28_000, 14_000, 700, 213, 238] {
+            for age in [2u64, 3, 7, 50, 333, 1_234, 9_999, 27_999] {
+                let float = (64.0 - ((age as f64).log10() / (range as f64).log10() * 63.0).floor()).max(1.0) as u64;
+                let int = calculate_difficulty(age, range);
+                assert!(int.abs_diff(float) <= 1, "age={age} range={range} int={int} float={float}");
+            }
+        }
     }
 
     #[test]

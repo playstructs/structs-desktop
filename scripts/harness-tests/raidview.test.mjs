@@ -1026,6 +1026,51 @@ check('pipRequestHide forgets the struct immediately (no stale re-show)', RV._pi
   check('…and its counter lands on the attacker as the cruiser rule says',
     tn.includes('5-d:IMPACT_ANGLED_DOWN_MISSILE+SHAKE_ANGLED_DOWN_DEFAULT_FIRST'), tn.join(' '));
 
+  // v0.22 counter → rebound (structsd fixture
+  // target_counter_triggers_lethal_attacker_explosion): the volley takes the
+  // target 3→1, it counters, the attacker explodes, and the REBOUND kills the
+  // target. Order: volley impact, counter, attacker destroy, rebound, destroy.
+  const rebound = RV.planAttack({
+    attacker_id: '5-d', attacker_type: 'Destroyer', attacker_ambit: 'water', weapon: 'primaryWeapon',
+    attacker_health_before: 1, attacker_health_after: 0,
+    shots: [{ evaded: false, blocked: false, targetStructId: '5-c', targetStructOperatingAmbit: 'water',
+      damage: '2', targetHealthBefore: '3', targetHealthAfter: '0', targetDestroyed: true,
+      targetCountered: true, targetCounterWeaponSystem: 'primaryWeapon', targetCounteredDamage: '1',
+      targetCounterDestroyedAttacker: true }],
+  }, S);
+  const rn = names(rebound);
+  const at = (n) => rn.indexOf(n);
+  const tgtHits = rebound.filter((e) => e.structId === '5-c' && e.names[0] && e.names[0].indexOf('IMPACT') === 0);
+  check('v0.22: the volley impact shows the post-volley health, not the final one',
+    tgtHits.length === 2 && tgtHits[0].healthAfter === 1 && tgtHits[1].healthAfter === 0,
+    JSON.stringify(rebound.map((e) => [e.structId, e.names[0], e.healthAfter])));
+  check('…the destroyed target still fires its counter, after the volley',
+    at('5-c:ATTACK_PRIMARY_WEAPON') > rn.findIndex((n) => n.indexOf('5-c:IMPACT') === 0), rn.join(' '));
+  check('…the attacker explodes before the rebound lands',
+    at('5-d:DESTROY_WATER') > at('5-c:ATTACK_PRIMARY_WEAPON')
+      && at('5-d:DESTROY_WATER') < rn.lastIndexOf(rn.filter((n) => n.indexOf('5-c:IMPACT') === 0).pop()), rn.join(' '));
+  check('…and the target is destroyed last, once',
+    rn[rn.length - 1] === '5-c:DESTROY_WATER' && rn.filter((n) => n === '5-c:DESTROY_WATER').length === 1, rn.join(' '));
+
+  // v0.22 fixture evading_target_dies_to_attacker_explosion: an EVADED volley
+  // does no damage; only the rebound after the counter moves its health.
+  const evadeRebound = RV.planAttack({
+    attacker_id: '5-d', attacker_type: 'Destroyer', attacker_ambit: 'water', weapon: 'primaryWeapon',
+    attacker_health_before: 1, attacker_health_after: 0,
+    shots: [{ evaded: true, evadedCause: 'defensiveManeuver', blocked: false, targetStructId: '5-c',
+      targetStructOperatingAmbit: 'water', damage: '0', targetHealthBefore: '1', targetHealthAfter: '0',
+      targetDestroyed: true, targetCountered: true, targetCounterWeaponSystem: 'primaryWeapon',
+      targetCounteredDamage: '1', targetCounterDestroyedAttacker: true }],
+  }, S);
+  const en = evadeRebound.map((e) => [e.structId, e.names[0] || '-', e.healthAfter]);
+  const firstTgt = evadeRebound.find((e) => e.structId === '5-c');
+  check('v0.22: an evaded volley keeps the target at full health until the rebound',
+    firstTgt && firstTgt.healthAfter === 1, JSON.stringify(en));
+  check('…then the rebound takes it to 0 and destroys it',
+    evadeRebound[evadeRebound.length - 1].names[0] === 'DESTROY_WATER'
+      && evadeRebound.some((e) => e.structId === '5-c' && e.healthAfter === 0 && e.names[0] && e.names[0].indexOf('IMPACT') === 0),
+    JSON.stringify(en));
+
   // Planetary Defense Cannon: forwarded on the parent row by the Rust side.
   const pdc = RV.planAttack({
     attacker_id: '5-a', attacker_type: 'Battleship', attacker_ambit: 'space', weapon: 'primaryWeapon',

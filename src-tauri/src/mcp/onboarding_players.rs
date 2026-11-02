@@ -62,9 +62,11 @@ const LEDGER_REFRESH_MS: i64 = 6 * 3_600_000;
 /// a strict `>` on a timestamp the indexer writes, not a cursor.
 const OVERLAP_SECS: i64 = 120;
 const CACHE_NAME: &str = "onboarding_universe";
-/// The permission store at the LCD's maximum page; a few pages cover it.
-const PERM_PAGE: usize = 10_000;
-const PERM_MAX_PAGES: usize = 20;
+/// The permission store at the LCD's maximum page. v0.22.0 clamps every
+/// Structs page to 1000 rows (it was ~3 pages of 10,000), so the walk
+/// bound has to cover ~30+ pages now.
+const PERM_PAGE: usize = 1_000;
+const PERM_MAX_PAGES: usize = 200;
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct PlayerFacts {

@@ -50,7 +50,7 @@ pub struct GuildPower {
     pub sub_connection_count: u64,
     pub sub_load: f64,
     /// Derived: per-connection share if one more player connects, matching the
-    /// keeper's `connectionCapacity = (capacity - load) / connectionCount`
+    /// keeper's `connectionCapacity = usable / connectionCount`
     /// (grid_context.go) — i.e. AVAILABLE capacity over count+1.
     pub share_if_one_more: f64,
     /// Derived: how many MORE players the substation can power at `MIN_PLAYER_DRAW_MW`
@@ -58,9 +58,19 @@ pub struct GuildPower {
     pub supportable_more: i64,
 }
 
+/// What a substation can hand out, v0.22+: a fixed 10% operating loss on
+/// incoming capacity, then outgoing allocations — `floor(capacity × 9 / 10) −
+/// load`, floored at 0. Exact integer arithmetic, as the keeper does it.
+/// Verified live on 4-1 (2026-11-01): 41,614,860,000 capacity, 0 load, 5,046
+/// connections → connectionCapacity 7,422,388.
+pub fn substation_usable(capacity: f64, load: f64) -> f64 {
+    let usable = (capacity.max(0.0) as u128) * 9 / 10;
+    usable.saturating_sub(load.max(0.0) as u128) as f64
+}
+
 /// The growth heuristic, matching the chain keeper exactly: the entry
 /// substation's per-connection share is `connectionCapacity = available /
-/// connectionCount` where `available = capacity - load` (grid_context.go), so
+/// connectionCount` where `available` is [`substation_usable`] (grid_context.go), so
 /// adding one more connection dilutes everyone to `available / (count + 1)`.
 /// Pass `available_capacity` (already net of substation load). Returns
 /// `(share_if_one_more, supportable_more)` — the latter is how many additional
@@ -91,7 +101,7 @@ pub struct InfraPlan {
     pub commission_mw: f64,      // to the reactor (lost to the infuser)
     pub keep_mw: f64,            // kept as personal capacity for own expansion
     pub donate_mw: f64,          // routed out to the shared substation
-    pub own_share_gain_mw: f64,  // what feeding the shared pool returns to YOUR connection (donate / connections)
+    pub own_share_gain_mw: f64,  // what feeding the shared pool returns to YOUR connection (donate × 9/10 / connections)
 }
 
 /// Plan the infra amounts. `infuse_ualpha`/`keep_w` override the defaults
@@ -109,10 +119,13 @@ pub fn plan_infra(
     let commission_mw = infuse * commission;
     let keep = keep_w.unwrap_or(structs_load_mw * 2.0).clamp(0.0, gained);
     let donate = (gained - keep).max(0.0);
+    // What the donation pays out after the substation's 10% operating loss
+    // (v0.22), split across every connection.
+    let paid_out = substation_usable(donate, 0.0);
     let own_share_gain_mw = if connection_count > 0 {
-        donate / connection_count as f64
+        paid_out / connection_count as f64
     } else {
-        donate
+        paid_out
     };
     InfraPlan {
         infuse_ualpha: infuse,
@@ -126,6 +139,14 @@ pub fn plan_infra(
 
 use crate::mcp::loop_util::parse_f64 as num;
 
+impl GuildPower {
+    /// The entry substation's capacity left for connected players, after the
+    /// operating loss and outgoing allocations.
+    pub fn available(&self) -> f64 {
+        substation_usable(self.sub_capacity, self.sub_load)
+    }
+}
+
 /// Find `controller`'s existing DYNAMIC allocation feeding `substation_id`, if
 /// any, as `(allocation_id, current_power_mw)`. Enables the single-allocation
 /// policy: GROW one allocation via `MsgAllocationUpdate` each infuse cycle
@@ -138,8 +159,7 @@ pub async fn find_dynamic_allocation(
     controller: &str,
     substation_id: &str,
 ) -> Option<(String, u64)> {
-    let list = client.list_entities("allocation", None, Some(2000)).await.ok()?;
-    let arr = list.get("Allocation").and_then(|a| a.as_array())?;
+    let arr = client.list_all_entities("allocation", "Allocation").await.ok()?;
     let id = arr
         .iter()
         .find(|a| {
@@ -225,8 +245,8 @@ pub async fn resolve_guild_power(
         }
     }
 
-    // ── Derived growth headroom ── (available = capacity − load, per keeper)
-    let available = (out.sub_capacity - out.sub_load).max(0.0);
+    // ── Derived growth headroom ── (after the 10% operating loss, per keeper)
+    let available = out.available();
     let (share, more) = derive_headroom(available, out.sub_connection_count, MIN_PLAYER_DRAW_MW);
     out.share_if_one_more = share;
     out.supportable_more = more;
@@ -254,6 +274,18 @@ mod tests {
     }
 
     #[test]
+    fn substation_usable_takes_the_operating_loss_then_load() {
+        // Live 4-1, 2026-11-01: the chain's own connectionCapacity.
+        let usable = substation_usable(41_614_860_000.0, 0.0);
+        assert_eq!(usable, 37_453_374_000.0);
+        assert_eq!((usable / 5_046.0).floor(), 7_422_388.0);
+        // Floors before subtracting load, and never goes negative.
+        assert_eq!(substation_usable(11.0, 0.0), 9.0);
+        assert_eq!(substation_usable(100.0, 85.0), 5.0);
+        assert_eq!(substation_usable(100.0, 95.0), 0.0);
+    }
+
+    #[test]
     fn headroom_zero_connections_uses_full_capacity() {
         let (share, more) = derive_headroom(6_000_000.0, 0, 1_400_000.0);
         assert_eq!(share, 6_000_000.0);
@@ -270,7 +302,8 @@ mod tests {
         assert_eq!(p.keep_mw, 12_980_000.0); // 2× struct draw
         assert!((p.donate_mw - (26_880_000.0 - 12_980_000.0)).abs() < 1.0); // 13.9M
         // Dilution: donating 13.9M across 220 connections returns only ~63k to us.
-        assert!((p.own_share_gain_mw - p.donate_mw / 220.0).abs() < 1.0);
+        // v0.22: the substation keeps 10% before it splits.
+        assert!((p.own_share_gain_mw - (p.donate_mw * 0.9).floor() / 220.0).abs() < 1.0);
         assert!(p.own_share_gain_mw < 64_000.0);
     }
 

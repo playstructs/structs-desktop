@@ -385,10 +385,9 @@ pub async fn execute(
         // step (mine → refine → send alpha to primary). Advises — execution stays
         // on the audited `act` path so nothing signs implicitly. Drive it in a loop.
         "economy" => {
-            let (primary_addr, primary_alpha, primary_pid, guild_id) = {
+            let (primary_alpha, primary_pid, guild_id) = {
                 let gs = crate::game_state::GAME_STATE.read().unwrap();
                 (
-                    gs.wallet_address.clone().unwrap_or_default(),
                     gs.alpha.unwrap_or(0.0),
                     gs.player_id.clone().unwrap_or_default(),
                     gs.guild_id.clone().unwrap_or_default(),
@@ -433,10 +432,10 @@ pub async fn execute(
                     }
                     Err(_) => (0.0, 0.0),
                 };
-                let step = if alpha_raw >= MIN_SEND_UALPHA && !primary_addr.is_empty() {
+                let step = if alpha_raw >= MIN_SEND_UALPHA && !primary_pid.is_empty() {
                     format!(
                         "send {:.0} ualpha → primary: structs_players act {{player:{}, action:\"player_send\", args:{{to:\"{}\", amount:\"{:.0}\"}}}}",
-                        alpha_raw, index, primary_addr, alpha_raw
+                        alpha_raw, index, primary_pid, alpha_raw
                     )
                 } else if ore > 0.0 {
                     format!(
@@ -523,11 +522,10 @@ pub async fn execute(
             // host means every step is runnable now via `act {tx}` (raw signing).
             let host = params.player.clone();
 
-            let (primary_pid, primary_addr, guild_id) = {
+            let (primary_pid, guild_id) = {
                 let gs = crate::game_state::GAME_STATE.read().unwrap();
                 (
                     gs.player_id.clone().unwrap_or_default(),
-                    gs.wallet_address.clone().unwrap_or_default(),
                     gs.guild_id.clone().unwrap_or_default(),
                 )
             };
@@ -539,20 +537,19 @@ pub async fn execute(
                 Err(e) => return vec![Content::text(format!("Couldn't resolve guild power: {}", e))],
             };
 
-            // Resolve the HOST player's alpha + struct draw + address (defaults to primary).
-            let (host_pid, host_addr, host_label) = match host.as_deref() {
+            // Resolve the HOST player's alpha + struct draw (defaults to primary).
+            let (host_pid, host_label) = match host.as_deref() {
                 Some(key) => {
                     let reg = REGISTRY.read().unwrap();
                     match reg.find(key) {
                         Some(p) => (
                             p.player_id.clone().unwrap_or_default(),
-                            p.address.clone(),
                             format!("vplayer {} ({})", p.name, p.player_id.clone().unwrap_or_default()),
                         ),
                         None => return vec![Content::text(format!("No virtual player matches '{}'.", key))],
                     }
                 }
-                None => (primary_pid.clone(), primary_addr.clone(), format!("primary {}", primary_pid)),
+                None => (primary_pid.clone(), format!("primary {}", primary_pid)),
             };
             if host_pid.is_empty() {
                 return vec![Content::text("Host player has no on-chain id yet.".to_string())];
@@ -586,6 +583,24 @@ pub async fn execute(
 
             let is_vplayer_host = host.is_some();
             let m = |w: f64| format!("{:.2} kW", w / 1e6);
+            // v0.22: the diversity bonus moves with every infuse — sometimes
+            // against it. Say so, and name a better reactor when it does.
+            let bonus_line = match crate::mcp::tools::infusions::infuse_effect(client, &host_pid, &gp.reactor_id, plan.infuse_ualpha, gp.reactor_commission).await {
+                Ok((gained, bonus)) if gained + bonus < 0.0 => {
+                    let better = crate::mcp::tools::infusions::plan_infuse_target(client, &host_pid, plan.infuse_ualpha, None)
+                        .await
+                        .ok()
+                        .flatten()
+                        .map(|(id, _, net)| format!(" Better: reactor {id} (net +{}).", m(net)))
+                        .unwrap_or_default();
+                    format!(
+                        "⚠ Diversity bonus: {} — this infuse LOWERS the host's power by {} net (portfolio too concentrated in {}).{}\n\n",
+                        m(bonus), m(-(gained + bonus)), gp.reactor_id, better
+                    )
+                }
+                Ok((gained, bonus)) => format!("Diversity bonus: {}{} → net +{} personal capacity.\n\n", if bonus >= 0.0 { "+" } else { "" }, m(bonus), m(gained + bonus)),
+                Err(_) => String::new(),
+            };
             let mut out = String::new();
             out.push_str(&format!(
                 "⚙ INFRASTRUCTURE PLAN ({} mode) — host {}\n\
@@ -600,6 +615,7 @@ pub async fn execute(
                 m(plan.keep_mw), m(plan.donate_mw),
                 gp.sub_connection_count, m(plan.own_share_gain_mw),
             ));
+            out.push_str(&bonus_line);
 
             // Build the ordered tx sequence. For a vplayer host, emit ready-to-run
             // `act {tx}` calls (raw signing handles every msg today). For the
@@ -621,7 +637,7 @@ pub async fn execute(
             out.push_str("1. Infuse alpha → personal capacity:\n");
             out.push_str(&wrap(
                 "/structs.structs.MsgReactorInfuse",
-                format!("{{\"delegatorAddress\":\"{}\",\"validatorAddress\":\"{}\",\"amount\":{{\"denom\":\"ualpha\",\"amount\":\"{}\"}}}}", host_addr, gp.reactor_validator, infuse_s),
+                format!("{{\"ownerId\":\"{}\",\"validatorAddress\":\"{}\",\"amount\":{{\"denom\":\"ualpha\",\"amount\":\"{}\"}}}}", host_pid, gp.reactor_validator, infuse_s),
                 "primary: do in-app (reactor infuse/staking isn't on the primary tx bridge)",
             ));
             if mode == "direct" {
@@ -1289,10 +1305,10 @@ pub async fn execute(
             if run_now {
                 match crate::mcp::auto_infuse::infuse_primary_excess(app_handle, cfg.keep_grams).await {
                     Ok(r) => out.push_str(&format!(
-                        "Infused {} ualpha (~{:.2} g → ~{:.2} kW personal capacity), kept {} g. tx {}\nVerify: structs_players capacity (primary capacity should rise).",
+                        "Infused {} ualpha (~{:.2} g) into reactor {}, kept {} g. tx {}\nVerify: structs_players capacity (primary capacity should rise; the reactor was chosen because it raises power after the diversity bonus).",
                         r.infused_ualpha,
                         r.infused_ualpha as f64 / crate::mcp::auto_infuse::UALPHA_PER_GRAM as f64,
-                        (r.infused_ualpha as f64 * 0.96) / 1e6,
+                        r.reactor_id,
                         cfg.keep_grams,
                         r.tx
                     )),
@@ -1814,7 +1830,18 @@ pub async fn execute(
                 };
                 (tu.to_string(), params.args.get("msg").cloned().unwrap_or_else(|| json!({})))
             } else {
-                match build_virtual_msg(action, &params.args, &player_id) {
+                // v0.22 sends are vault→vault by owner id: a recipient given as
+                // an address is resolved (and confirmed) before the build.
+                let mut args = params.args.clone();
+                if action == "player_send" {
+                    if let Some(to) = args.get("to").and_then(|v| v.as_str()).map(String::from) {
+                        match crate::mcp::send_guard::resolve_recipient_owner(&to).await {
+                            Ok(owner) => args["to"] = json!(owner),
+                            Err(e) => return vec![Content::text(format!("Error: player_send refused: {e}"))],
+                        }
+                    }
+                }
+                match build_virtual_msg(action, &args, &player_id) {
                     Ok(v) => v,
                     Err(e) => return vec![Content::text(format!("Error: {}", e))],
                 }
@@ -2014,31 +2041,16 @@ fn build_virtual_msg(action: &str, args: &Value, player_id: &str) -> Result<(Str
             }),
         )),
         // Send alpha to another player (the flywheel's funnel-to-primary step).
-        // fromAddress is this virtual player's own address, resolved from the
-        // registry by its player id; amount is ualpha (e.g. "1000000").
+        // v0.22: vault→vault — this player's vault to the recipient owner's
+        // (`to` is a player/guild id; the async caller resolves addresses).
+        // amount is base units (e.g. "1000000"); denom defaults to ualpha.
         "player_send" => {
-            let from = REGISTRY
-                .read()
-                .unwrap()
-                .players
-                .iter()
-                .find(|p| p.player_id.as_deref() == Some(player_id))
-                .map(|p| p.address.clone())
-                .ok_or("player_send: couldn't resolve this player's address")?;
-            let to = s("to").ok_or("player_send: 'to' (recipient address) required")?;
+            let to = s("to").ok_or("player_send: 'to' (recipient player id) required")?;
             let amount = s("amount").ok_or("player_send: 'amount' in ualpha (e.g. \"1000000\") required")?;
-            // The chain does not validate MsgPlayerSend's toAddress — a
-            // malformed destination burns the funds rather than rejecting.
-            crate::mcp::send_guard::validate_send(&from, &to, &amount)
+            let denom = s("denom").unwrap_or_else(|| "ualpha".into());
+            let payload = crate::mcp::send_guard::vault_send_payload(player_id, &to, &denom, &amount)
                 .map_err(|e| format!("player_send refused: {e}"))?;
-            Ok((
-                "/structs.structs.MsgPlayerSend".into(),
-                json!({
-                    "fromAddress": from,
-                    "toAddress": to,
-                    "amount": [{ "denom": "ualpha", "amount": amount }],
-                }),
-            ))
+            Ok(("/structs.structs.MsgVaultSend".into(), payload))
         }
         // ── Player self-management ──
         "player_resume" => Ok((

@@ -1600,6 +1600,7 @@ pub async fn matrix_work_accept(
         result_difficulty: 0,
         estimated_hashrate: 300.0,
         estimated_block_start_offset: 0,
+        rules_height: None,
         status: "starting".to_string(),
     };
 

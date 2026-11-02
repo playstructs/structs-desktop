@@ -11,9 +11,12 @@ static HTTP_CLIENT: OnceLock<Client> = OnceLock::new();
 /// MCP inherits the user's auth automatically once they're signed in.
 pub fn shared_client() -> &'static Client {
     HTTP_CLIENT.get_or_init(|| {
+        // 20 s: the v0.22 guild server gives player fund reads a 15 s native
+        // deadline (VaultFundsManager) and its own webapp waits 15 s; a 10 s
+        // client cut those off before the server could answer.
         Client::builder()
             .cookie_store(true)
-            .timeout(std::time::Duration::from_secs(10))
+            .timeout(std::time::Duration::from_secs(20))
             .build()
             .expect("failed to build HTTP client")
     })

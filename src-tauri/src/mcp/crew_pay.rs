@@ -22,14 +22,13 @@
 //! Two further rules, both inherited rather than invented:
 //!
 //!   * the destination is read from the CHAIN (`player.primaryAddress` via
-//!     `matrix::resolve_payable`), never from the message and never even from
-//!     the address in the receipt — a message must not be able to name where
-//!     money goes, and that rule does not get an exception because the feature
-//!     is convenient;
+//!     `matrix::resolve_payable`, which resolves back to the helper's player
+//!     id), never from the message and never even from the address in the
+//!     receipt — a message must not be able to name where money goes, and
+//!     that rule does not get an exception because the feature is convenient;
 //!   * every payment goes through `mcp_transfer_execute_impl`, which re-runs
-//!     its own preview and `send_guard::validate_send` server-side. The chain
-//!     does NOT validate `MsgPlayerSend.toAddress`; a malformed one is a
-//!     silent burn, not a rejection.
+//!     its own preview server-side and pays vault→vault (`MsgVaultSend`, v0.22)
+//!     on validated owner ids.
 //!
 //! Standing authority to spend is the sharpest thing in this feature, so it is
 //! off by default and bounded twice — per helper and per epoch — and it stops

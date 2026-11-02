@@ -865,6 +865,15 @@ fn next_batch(roster: &[RosterEntry], n: usize) -> Vec<RosterEntry> {
 
 /// Resolve everything the gates and score need for one candidate.
 /// Four reads: player, planet, fleet, Command Ship.
+/// Only an ACTIVE planet can be moved to or raided (v0.22). An absent status
+/// reads as active — older records and partial reads never carried one.
+fn planet_is_raidable(planet: &serde_json::Value) -> bool {
+    planet
+        .pointer("/Planet/status")
+        .and_then(|s| s.as_str())
+        .map_or(true, |s| s.is_empty() || s == "active")
+}
+
 async fn evaluate(client: &CosmosClient, player_id: &crate::mcp::types::PlayerId, guild_id: &str) -> Option<Candidate> {
     use crate::mcp::types::EntityView;
     let pl = client.entity("player", player_id.as_str()).await.ok()?;
@@ -883,6 +892,12 @@ async fn evaluate(client: &CosmosClient, player_id: &crate::mcp::types::PlayerId
         .unwrap_or(0);
 
     let planet = client.entity("planet", &planet_id).await.ok()?;
+    // v0.22: a completed planet is unreachable — FleetMove refuses it as a
+    // destination and PlanetRaidComplete refuses to settle there. The owner's
+    // `planetId` can still name it until they explore a new one.
+    if !planet_is_raidable(&planet) {
+        return None;
+    }
     let planetary_shield = EntityView::new(&planet).planet_attr_u64("planetaryShield");
     let planet_ore_remaining = EntityView::new(&planet).grid_f64("ore");
     // Is somebody else already raiding here? A planet hosts ONE raid: a second
@@ -1897,6 +1912,13 @@ async fn start_raid_proof(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn completed_planets_are_not_raid_targets() {
+        assert!(planet_is_raidable(&json!({ "Planet": { "status": "active" } })));
+        assert!(planet_is_raidable(&json!({ "Planet": {} })));
+        assert!(!planet_is_raidable(&json!({ "Planet": { "status": "complete" } })));
+    }
 
     /// `gate()` consults the combat lists, which load from the OPERATOR'S data
     /// directory — so without this these tests assert against whatever guilds

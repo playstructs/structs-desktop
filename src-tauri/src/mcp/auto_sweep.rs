@@ -1,5 +1,5 @@
 //! Continuous Alpha sweep: send a vplayer's Alpha to the primary as soon as it
-//! crosses a threshold, instead of waiting for someone to press "Sweep All".
+//! crosses a threshold (v0.22: vault→vault, `MsgVaultSend`), instead of waiting for someone to press "Sweep All".
 //!
 //! WHY A LOOP AND NOT JUST THE BUTTON. The manual mass action sweeps the whole
 //! roster in one job. At 533 players that is 533 signed transactions queued
@@ -19,7 +19,6 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{LazyLock, Mutex, RwLock};
 
 use serde::{Deserialize, Serialize};
-use serde_json::json;
 
 use crate::hasher::types::now_millis;
 use crate::mcp::telemetry::{tlog, LoopRun, Sev};
@@ -167,12 +166,11 @@ pub async fn tick(app: &tauri::AppHandle, force: bool) {
 }
 
 async fn scan(app: &tauri::AppHandle, cfg: &AutoSweepConfig, run: &LoopRun) {
-    // Chain-verified destination — NOT the local signing address. A desktop
-    // install acting as a second device signs with a key whose address holds
-    // no game balance; sweeping there burned a player's alpha (see
-    // send_guard's module docs). Unverifiable ⇒ no sweep this scan.
-    let to_address = match crate::mcp::send_guard::verified_primary_send_target().await {
-        Ok((addr, _pid)) => addr,
+    // v0.22: Alpha moves vault→vault by OWNER id. The destination is the
+    // primary's player id, verified to exist on chain. Unverifiable ⇒ no
+    // sweep this scan.
+    let to_owner = match crate::mcp::send_guard::verified_primary_owner().await {
+        Ok(pid) => pid,
         Err(e) => {
             run.blocked(format!("no verified primary destination: {e}"));
             return;
@@ -241,7 +239,7 @@ async fn scan(app: &tauri::AppHandle, cfg: &AutoSweepConfig, run: &LoopRun) {
             "auto_sweep",
             Sev::Notice,
             format!(
-                "dry run: would sweep {taking} of {eligible} eligible player(s), {total:.1} Alpha to {to_address}"
+                "dry run: would sweep {taking} of {eligible} eligible player(s), {total:.1} Alpha to {to_owner}'s vault"
             ),
         );
         run.acted();
@@ -253,7 +251,7 @@ async fn scan(app: &tauri::AppHandle, cfg: &AutoSweepConfig, run: &LoopRun) {
     let swept = std::sync::Arc::new(Mutex::new(0.0f64));
 
     let app_c = app.clone();
-    let to_c = to_address.clone();
+    let to_c = to_owner.clone();
     let (ok_c, failed_c, swept_c) = (ok.clone(), failed.clone(), swept.clone());
     crate::mcp::loop_util::for_each_player_concurrent(
         entries,
@@ -269,53 +267,41 @@ async fn scan(app: &tauri::AppHandle, cfg: &AutoSweepConfig, run: &LoopRun) {
                 if crate::mcp::combat_lists::is_held_for_combat(&e.player_id) {
                     return;
                 }
-                // The source address MUST come from the local vplayer registry —
-                // that is the structural guarantee that this loop can only ever
-                // move OUR OWN players' Alpha: a player we hold no HD key for
-                // has no entry here and cannot be signed for.
-                //
-                // `unwrap_or_default()` used to turn a missing entry into an
-                // EMPTY fromAddress and still attempt the send. The chain would
-                // reject it, but a money transaction should never be built
-                // malformed in the first place — refuse and count it.
-                let from = match registry_address(e.index) {
-                    Some(a) => a,
-                    None => {
-                        failed.fetch_add(1, Ordering::Relaxed);
-                        tlog(
-                            "auto_sweep",
-                            Sev::Warn,
-                            format!(
-                                "{} (hd index {}) is not in the vplayer registry — refusing to send",
-                                e.player_id, e.index
-                            ),
-                        );
-                        return;
-                    }
-                };
-                // Final gate on the EXACT strings being signed. Refusing a
-                // malformed send beats letting the chain burn it — PlayerSend
-                // does not validate its destination.
-                if let Err(err) =
-                    crate::mcp::send_guard::validate_send(&from, &to, &e.amount_ualpha)
-                {
+                // The player MUST be in the local vplayer registry — that is
+                // the structural guarantee that this loop can only ever move
+                // OUR OWN players' Alpha: a player we hold no HD key for has
+                // no entry here and cannot be signed for.
+                if registry_address(e.index).is_none() {
                     failed.fetch_add(1, Ordering::Relaxed);
                     tlog(
                         "auto_sweep",
                         Sev::Warn,
-                        format!("{} refused: {err}", e.player_id),
+                        format!(
+                            "{} (hd index {}) is not in the vplayer registry — refusing to send",
+                            e.player_id, e.index
+                        ),
                     );
                     return;
                 }
-                let payload = json!({
-                    "fromAddress": from,
-                    "toAddress": to,
-                    "amount": [{ "denom": "ualpha", "amount": e.amount_ualpha }],
-                });
+                // Final gate on the EXACT strings being signed: the vplayer's
+                // own vault → the primary's vault.
+                let payload = match crate::mcp::send_guard::vault_send_payload(
+                    &e.player_id,
+                    &to,
+                    "ualpha",
+                    &e.amount_ualpha,
+                ) {
+                    Ok(p) => p,
+                    Err(err) => {
+                        failed.fetch_add(1, Ordering::Relaxed);
+                        tlog("auto_sweep", Sev::Warn, format!("{} refused: {err}", e.player_id));
+                        return;
+                    }
+                };
                 match crate::mcp::tx_retry::sign_with_retry(
                     &app,
                     e.index,
-                    "/structs.structs.MsgPlayerSend",
+                    "/structs.structs.MsgVaultSend",
                     payload,
                     &format!("auto_sweep:{}", e.player_id),
                 )
@@ -334,7 +320,7 @@ async fn scan(app: &tauri::AppHandle, cfg: &AutoSweepConfig, run: &LoopRun) {
                         // Chain says the money isn't there — remember the
                         // cached balance this happened at so the next scans
                         // skip this player until the cache shows movement.
-                        if err.to_lowercase().contains("insufficient funds") {
+                        if crate::mcp::send_guard::is_insufficient_funds(&err) {
                             lock_recover(&BROKE_AT_BALANCE)
                                 .insert(e.player_id.clone(), e.alpha_before);
                         }

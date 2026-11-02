@@ -207,6 +207,40 @@ mod tests {
         assert!(err.contains("unknown typeUrl"), "{err}");
     }
 
+    /// The embedded descriptor must be the v0.22.0 schema. A stale one drops
+    /// `ownerId` silently (unknown keys are ignored above), which turns a
+    /// guild-vault selector into "spend the signer's own vault".
+    #[test]
+    fn descriptor_is_the_v022_schema() {
+        let vault = serde_json::json!({ "ownerId": "1-61", "recipientOwnerId": "1-11", "amount": [{ "denom": "ualpha", "amount": "1000000" }] });
+        assert!(!encode("/structs.structs.MsgVaultSend", &vault, "structs1signer").unwrap().is_empty());
+        let infuse = |extra: serde_json::Value| {
+            let mut p = serde_json::json!({ "validatorAddress": "structsvaloper1x", "amount": { "denom": "ualpha", "amount": "1" } });
+            p.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+            encode("/structs.structs.MsgReactorInfuse", &p, "structs1signer").unwrap()
+        };
+        assert_ne!(infuse(serde_json::json!({ "ownerId": "0-5" })), infuse(serde_json::json!({})));
+    }
+
+    /// The primary's non-gameplay messages now sign natively
+    /// (`tx_retry::sign_as_primary`); these are the exact payloads sent.
+    #[test]
+    fn primary_economic_payloads_encode() {
+        for (t, p) in [
+            ("/structs.structs.MsgAllocationCreate", serde_json::json!({ "controller": "1-194", "sourceObjectId": "1-194", "allocationType": "dynamic", "power": 5_000_000 })),
+            ("/structs.structs.MsgAllocationUpdate", serde_json::json!({ "allocationId": "6-12", "power": 5_000_000 })),
+            ("/structs.structs.MsgAllocationDelete", serde_json::json!({ "allocationId": "6-12" })),
+            ("/structs.structs.MsgSubstationAllocationConnect", serde_json::json!({ "allocationId": "6-12", "destinationId": "4-1" })),
+            ("/structs.structs.MsgGuildUpdatePrimaryReactor", serde_json::json!({ "guildId": "0-1", "reactorId": "3-2" })),
+        ] {
+            let bytes = encode(t, &p, "structs1signer").unwrap_or_else(|e| panic!("{t}: {e}"));
+            assert!(bytes.len() > "structs1signer".len() + 2, "{t} encoded only its creator");
+        }
+        let dynamic = encode("/structs.structs.MsgAllocationCreate", &serde_json::json!({ "allocationType": "dynamic" }), "s").unwrap();
+        let one = encode("/structs.structs.MsgAllocationCreate", &serde_json::json!({ "allocationType": 1 }), "s").unwrap();
+        assert_eq!(dynamic, one);
+    }
+
     #[test]
     fn a_non_object_payload_is_rejected() {
         let err = encode("/structs.structs.MsgStructActivate", &serde_json::json!("1-5"), "structs1x").unwrap_err();

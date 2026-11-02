@@ -49,7 +49,7 @@ pub struct PlanEntry {
     pub player_id: String,
     pub index: u32,
     pub name: String,
-    /// Stringified integer ualpha — MsgPlayerSend amount format.
+    /// Stringified integer ualpha — MsgVaultSend amount format.
     pub amount_ualpha: String,
     pub alpha_before: f64,
 }
@@ -163,15 +163,13 @@ pub(crate) fn build_sweep_plan(
 // NOTE: the old `primary_send_target()` (destination = locally synced
 // wallet_address) was removed deliberately: that address is the SIGNING key,
 // which on a second-device install is not where the player's balance lives.
-// Use `send_guard::verified_primary_send_target()` — chain-verified — instead.
+// Since v0.22 the destination is the primary's vault, named by owner id
+// (`send_guard::verified_primary_owner()`).
 
 async fn sweep_alpha(app: tauri::AppHandle, request: MassActionRequest) -> Result<Value, String> {
     let a = sweep_args(&request.args);
-    // Chain-verified destination (player.primaryAddress), never the local
-    // signing address — on a second-device install those differ and the
-    // signing address holds no player balance (the null-counterparty burn).
-    let (to_address, _primary_pid) =
-        crate::mcp::send_guard::verified_primary_send_target().await?;
+    // v0.22: vault→vault by owner id; the primary verified to exist on chain.
+    let to_owner = crate::mcp::send_guard::verified_primary_owner().await?;
     let rows = roster_cache::all_rows();
     let (entries, skipped) = build_sweep_plan(&rows, request.players.as_ref(), a);
     let total_alpha: f64 = entries
@@ -185,7 +183,7 @@ async fn sweep_alpha(app: tauri::AppHandle, request: MassActionRequest) -> Resul
             "entries": entries,
             "total_alpha": total_alpha,
             "skipped": skipped,
-            "to_address": to_address,
+            "to_owner_id": to_owner,
             "roster_age_ms": now_millis() - roster_cache::refreshed_at_ms(),
             "note": "sending resets each sender's charge",
         }));
@@ -238,7 +236,7 @@ async fn sweep_alpha(app: tauri::AppHandle, request: MassActionRequest) -> Resul
         let done = Arc::new(AtomicUsize::new(0));
         let swept = Arc::new(std::sync::Mutex::new(0.0f64));
         let app_c = app.clone();
-        let to = to_address.clone();
+        let to = to_owner.clone();
         let (ok_c, failed_c, done_c, swept_c, job_c) =
             (ok.clone(), failed.clone(), done.clone(), swept.clone(), job.clone());
         loop_util::for_each_player_concurrent(
@@ -250,26 +248,26 @@ async fn sweep_alpha(app: tauri::AppHandle, request: MassActionRequest) -> Resul
                 let (ok, failed, done, swept, job) =
                     (ok_c.clone(), failed_c.clone(), done_c.clone(), swept_c.clone(), job_c.clone());
                 async move {
-                    // A missing registry entry must refuse, never sign a
-                    // malformed transfer (registry_address defaults to "").
-                    let from = registry_address(e.index);
-                    if let Err(err) =
-                        crate::mcp::send_guard::validate_send(&from, &to, &e.amount_ualpha)
-                    {
-                        failed.fetch_add(1, Ordering::Relaxed);
-                        done.fetch_add(1, Ordering::Relaxed);
-                        tlog("sweep", Sev::Warn, format!("{} refused: {err}", e.player_id));
-                        return;
-                    }
-                    let payload = json!({
-                        "fromAddress": from,
-                        "toAddress": to,
-                        "amount": [{ "denom": "ualpha", "amount": e.amount_ualpha }],
-                    });
+                    // A player we hold no HD key for must refuse, never sign
+                    // (registry_address defaults to "").
+                    let payload = if registry_address(e.index).is_empty() {
+                        Err(format!("hd index {} is not in the vplayer registry", e.index))
+                    } else {
+                        crate::mcp::send_guard::vault_send_payload(&e.player_id, &to, "ualpha", &e.amount_ualpha)
+                    };
+                    let payload = match payload {
+                        Ok(p) => p,
+                        Err(err) => {
+                            failed.fetch_add(1, Ordering::Relaxed);
+                            done.fetch_add(1, Ordering::Relaxed);
+                            tlog("sweep", Sev::Warn, format!("{} refused: {err}", e.player_id));
+                            return;
+                        }
+                    };
                     let res = tx_retry::sign_with_retry(
                         &app,
                         e.index,
-                        "/structs.structs.MsgPlayerSend",
+                        "/structs.structs.MsgVaultSend",
                         payload,
                         &format!("sweep:{}", e.player_id),
                     )
@@ -375,7 +373,7 @@ async fn launch_players(app: tauri::AppHandle, request: MassActionRequest) -> Re
         .ok_or("no guild synced yet")?;
     let client = crate::mcp::cosmos_client::CosmosClient::new();
     let gp = crate::mcp::guild_power::resolve_guild_power(&client, &guild_id).await?;
-    let available = (gp.sub_capacity - gp.sub_load).max(0.0);
+    let available = gp.available();
     let n_now = gp.sub_connection_count.max(1) as f64;
     let per_conn_now = available / n_now;
     let per_conn_after = available / (n_now + count as f64);

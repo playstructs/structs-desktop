@@ -450,6 +450,7 @@ pub async fn mcp_energy() -> Result<Value, String> {
             "substation_owner": gp.substation_owner,
             "sub_capacity_mw": gp.sub_capacity,
             "sub_load_mw": gp.sub_load,
+            "sub_usable_mw": gp.available(),
             "sub_connection_capacity_mw": gp.sub_connection_capacity,
             "sub_connection_count": gp.sub_connection_count,
             "share_if_one_more_mw": gp.share_if_one_more,
@@ -541,14 +542,15 @@ fn loops_json() -> Value {
 // invite a player to discover the expensive way:
 //
 //   1. ORE IS NOT A BANK ASSET. It lives in `gridAttributes.ore`, never in
-//      `playerInventory.rocks`, and `MsgPlayerSend` is a bank send — it
-//      structurally cannot carry ore. Ore moves by being REFINED into ualpha,
+//      `playerInventory.rocks`, and every send (`MsgVaultSend`, `MsgPlayerSend`)
+//      is a bank move — it structurally cannot carry ore. Ore moves by being REFINED into ualpha,
 //      or by being seized/forfeited in battle. So ore is read-only here and
 //      gets no transfer control at all: not a disabled one, absent.
 //   2. Anything whose transferability we have not verified is read-only too.
 //      `SENDABLE_DENOMS` is an allow-list, never a free-text denom field.
 
-/// Denoms a player can send with `MsgPlayerSend` / `bank_send`.
+/// Denoms a player can send (`MsgVaultSend`, or `MsgPlayerSend` from the
+/// vault to an outside address).
 ///
 /// `uguild.*` used to be excluded as "observed only in provider/guild flows,
 /// so read-only until proven otherwise". It has now been proven, against the
@@ -629,12 +631,22 @@ pub async fn mcp_inventory(player: Option<String>) -> Result<Value, String> {
     let (player_id, index, name, address) = resolve_player(&who)?;
 
     let client = crate::mcp::cosmos_client::CosmosClient::new();
-    // Bank coins: ualpha AND every uguild.<id> the address holds. A single-key
-    // `playerInventory.rocks` read could never have shown the latter.
-    let (balances, bank_err) = match client.bank_balances(&address).await {
-        Ok(b) => (b, None),
-        Err(e) => (vec![], Some(e)),
+    // Bank coins: ualpha AND every uguild.<id>. Since v0.22 they live in the
+    // player's VAULT; a signing address keeps only "retained" coins, which are
+    // listed separately and are not spendable from here.
+    let vault_address = if player_id.is_empty() {
+        None
+    } else {
+        client.vault(&player_id).await.ok().map(|(a, _)| a)
     };
+    let (balances, bank_err) = match &vault_address {
+        Some(v) => match client.bank_balances(v).await {
+            Ok(b) => (b, None),
+            Err(e) => (vec![], Some(e)),
+        },
+        None => (vec![], Some(format!("no vault known for {}", if player_id.is_empty() { "this player" } else { &player_id }))),
+    };
+    let retained = client.bank_balances(&address).await.unwrap_or_default();
 
     // Ore is NOT in the bank — it is a planet grid attribute — so it is fetched
     // separately and marked read-only.
@@ -678,6 +690,25 @@ pub async fn mcp_inventory(player: Option<String>) -> Result<Value, String> {
             })
         })
         .collect();
+    for c in &retained {
+        let denom = c.get("denom").and_then(|d| d.as_str()).unwrap_or("").to_string();
+        let amount = c.get("amount").and_then(|a| a.as_str()).and_then(|a| a.parse::<f64>().ok()).unwrap_or(0.0);
+        if amount <= 0.0 {
+            continue;
+        }
+        let info = registry.get(&denom);
+        assets.push(json!({
+            "denom": denom,
+            "amount": amount,
+            "sendable": false,
+            "retained": true,
+            "base_name": info.map(|i| i.base_name.clone()),
+            "display_name": info.map(|i| i.display_name.clone()),
+            "exponent": info.map(|i| i.exponent).unwrap_or(0),
+            "guild_id": info.map(|i| i.guild_id.clone()),
+            "guild_tag": info.map(|i| i.guild_tag.clone()),
+        }));
+    }
     if let Some(o) = ore {
         assets.push(json!({
             "denom": "ore",
@@ -709,7 +740,7 @@ pub async fn mcp_inventory(player: Option<String>) -> Result<Value, String> {
     Ok(json!({
         "player": {
             "player_id": player_id, "index": index, "name": name,
-            "address": address, "pfp_attrs": pfp_attrs,
+            "address": address, "vault_address": vault_address, "pfp_attrs": pfp_attrs,
         },
         "assets": assets,
         "bank_error": bank_err,
@@ -718,6 +749,86 @@ pub async fn mcp_inventory(player: Option<String>) -> Result<Value, String> {
         "denoms": registry,
         "roster_refreshed_at_ms": roster_cache::refreshed_at_ms(),
     }))
+}
+
+/// Coins still sitting at a player's SIGNING key since v0.22 moved liquid
+/// balances into vaults ("retained"): spendable amounts only — locked vesting
+/// coins cannot move — and only denoms this app may send.
+async fn retained_coins(client: &crate::mcp::cosmos_client::CosmosClient, address: &str) -> Result<Vec<(String, u128)>, String> {
+    let v = client.lcd_get(&format!("/cosmos/bank/v1beta1/spendable_balances/{address}?pagination.limit=200")).await?;
+    Ok(v.get("balances")
+        .and_then(|b| b.as_array())
+        .map(|coins| {
+            coins
+                .iter()
+                .filter_map(|c| {
+                    let denom = c.get("denom")?.as_str()?.to_string();
+                    let amount: u128 = c.get("amount")?.as_str()?.parse().ok()?;
+                    (amount > 0 && is_sendable(&denom)).then_some((denom, amount))
+                })
+                .collect()
+        })
+        .unwrap_or_default())
+}
+
+/// What collecting a player's retained coins would move: from the signing
+/// key to that player's own vault.
+#[tauri::command]
+pub async fn mcp_collect_retained_preview(player: Option<String>) -> Result<Value, String> {
+    let who = player.unwrap_or_else(|| "primary".into());
+    let (player_id, index, name, address) = resolve_player(&who)?;
+    if player_id.is_empty() {
+        return Err("this player has no on-chain id yet".into());
+    }
+    let client = crate::mcp::cosmos_client::CosmosClient::new();
+    let coins = retained_coins(&client, &address).await?;
+    let (vault, _) = client.vault(&player_id).await?;
+    let mut problems = Vec::new();
+    if coins.is_empty() {
+        problems.push("nothing retained at this key".to_string());
+    }
+    if let Some(why) = crate::mcp::send_guard::signer_lacks(&address, crate::mcp::send_guard::perm::TOKEN_TRANSFER, "token-transfer").await {
+        problems.push(why);
+    }
+    Ok(json!({
+        "ok": problems.is_empty(),
+        "problems": problems,
+        "player": { "player_id": player_id, "index": index, "name": name, "address": address },
+        "vault_address": vault,
+        "coins": coins.iter().map(|(d, a)| json!({ "denom": d, "amount": a.to_string() })).collect::<Vec<_>>(),
+    }))
+}
+
+/// Move every retained coin at the signing key into the player's vault, in
+/// one `MsgPlayerSend` (the same transfer the v0.22 webapp prepends to a
+/// spend). Board-gated; re-reads before it signs.
+#[tauri::command]
+pub async fn mcp_collect_retained(app: tauri::AppHandle, window: tauri::WebviewWindow, player: Option<String>) -> Result<Value, String> {
+    require_trusted(&window)?;
+    mcp_collect_retained_impl(app, player).await
+}
+
+pub async fn mcp_collect_retained_impl(app: tauri::AppHandle, player: Option<String>) -> Result<Value, String> {
+    let preview = mcp_collect_retained_preview(player).await?;
+    if preview.get("ok").and_then(|v| v.as_bool()) != Some(true) {
+        let why: Vec<&str> = preview["problems"].as_array().map(|a| a.iter().filter_map(|v| v.as_str()).collect()).unwrap_or_default();
+        return Err(format!("refused: {}", why.join("; ")));
+    }
+    let from = preview["player"]["address"].as_str().unwrap_or("").to_string();
+    let vault = preview["vault_address"].as_str().unwrap_or("").to_string();
+    let coins = preview["coins"].clone();
+    let total: u128 = coins.as_array().map(|c| c.iter().filter_map(|x| x["amount"].as_str()?.parse::<u128>().ok()).sum()).unwrap_or(0);
+    crate::mcp::send_guard::validate_send(&from, &vault, &total.to_string()).map_err(|e| format!("refused: {e}"))?;
+    let payload = json!({ "fromAddress": from, "toAddress": vault, "amount": coins });
+    let index = preview["player"]["index"].as_u64().map(|i| i as u32).unwrap_or(0);
+    let res = crate::mcp::tx_retry::sign_once(&app, index, "/structs.structs.MsgPlayerSend", payload, "board:collect_retained").await?;
+    board_feed::push(
+        &app,
+        board_feed::Severity::Notice,
+        "transfer",
+        format!("moved retained balances of {} into the vault", preview["player"]["name"].as_str().unwrap_or("a player")),
+    );
+    Ok(json!({ "ok": true, "moved": preview["coins"], "tx": res.get("transactionHash").and_then(|h| h.as_str()).unwrap_or("(pending)") }))
 }
 
 /// A page of the durable Guild-API ledger for one player. This reaches back
@@ -810,56 +921,77 @@ pub async fn mcp_transfer_preview(
             SENDABLE_DENOMS.join(", ")
         ));
     }
-    // bech32 for this chain: `structs1` + data. Cheap shape check, not a
-    // checksum — the chain rejects a bad one, but a typo caught here costs
-    // nothing.
     let to = to.trim().to_string();
-    if !to.starts_with("structs1") || to.len() < 39 {
-        problems.push("destination is not a well-formed structs1… address".into());
-    }
-    if to == address {
-        problems.push("destination is the sender's own address".into());
-    }
     if !(amount > 0.0) {
         problems.push("amount must be greater than zero".into());
     }
+    if player_id.is_empty() {
+        problems.push("the sender has no on-chain player id yet".into());
+    }
 
-    // Who is on the other end?
-    let known = crate::mcp::enrich::addresses_map();
-    let recipient = known.get(&to).cloned();
-    /* ...and their face, when they are one of ours.
-     *
-     * A payment is addressed to a PERSON, and a bech32 string is not a person.
-     * Resolved via the vplayer registry, which is the only table that joins an
-     * ADDRESS to a player id — `RosterRow` carries portraits but no address.
-     * Absent for an external destination, which is exactly the distinction
-     * this window needs to draw.
-     */
-    let recipient_id = crate::mcp::virtual_players::VirtualPlayerStore::load()
-        .find(&to)
-        .and_then(|p| p.player_id.clone());
-    let recipient_pfp = recipient_id.as_ref().and_then(|pid| {
-        roster_cache::all_rows()
-            .into_iter()
-            .find(|r| &r.player_id == pid)
-            .and_then(|r| r.pfp_attrs)
-    });
-
-    // Can they afford it?
+    // Where is it going? A player or guild (by id, or by a player's registered
+    // address) is paid vault→vault; anything else is an outside address, paid
+    // from the sender's vault with a bank send.
     let client = crate::mcp::cosmos_client::CosmosClient::new();
-    let balance = client
-        .bank_balances(&address)
-        .await
-        .ok()
-        .and_then(|bs| {
-            bs.iter()
-                .find(|c| c.get("denom").and_then(|d| d.as_str()) == Some(denom.as_str()))
-                .and_then(|c| c.get("amount").and_then(|a| a.as_str()))
-                .and_then(|a| a.parse::<f64>().ok())
-        })
-        .unwrap_or(0.0);
+    let dest = match resolve_destination(&client, &to).await {
+        Ok(d) => Some(d),
+        Err(e) => {
+            problems.push(e);
+            None
+        }
+    };
+    if let Some(Destination::Owner(owner)) = &dest {
+        if *owner == player_id {
+            problems.push("destination is the sender's own vault".into());
+        }
+    }
+
+    // Who is on the other end? Named by owner id for a player — a bech32
+    // string is not a person.
+    let recipient_id = match &dest {
+        Some(Destination::Owner(owner)) => Some(owner.clone()),
+        _ => None,
+    };
+    let recipient_row = recipient_id.as_ref().and_then(|pid| roster_cache::get_row(pid));
+    let recipient = match (&dest, &recipient_row) {
+        (_, Some(r)) => Some(r.chain_name.clone().unwrap_or_else(|| r.name.clone())),
+        (Some(Destination::Owner(owner)), None) => Some(
+            crate::mcp::enrich::addresses_map()
+                .get(&to)
+                .cloned()
+                .unwrap_or_else(|| owner.clone()),
+        ),
+        _ => None,
+    };
+    let recipient_pfp = recipient_row.and_then(|r| r.pfp_attrs);
+
+    // Can they afford it? Liquid balances live in the sender's VAULT (v0.22).
+    let mut vault_address = None;
+    let mut balance = 0.0;
+    if !player_id.is_empty() {
+        match client.vault(&player_id).await {
+            Ok((vault, provisioned)) => {
+                if matches!(dest, Some(Destination::External(_))) && !provisioned {
+                    problems.push("the sender's vault is not provisioned — pay a player instead".into());
+                }
+                balance = coin_amount(&client.bank_balances(&vault).await.unwrap_or_default(), &denom);
+                vault_address = Some(vault);
+            }
+            Err(e) => problems.push(format!("could not read the sender's vault: {e}")),
+        }
+    }
     if amount > balance {
         problems.push(format!("balance is {balance} {denom}, short by {}", amount - balance));
+    }
+    // v0.22: the key that signs must itself hold token-transfer.
+    if let Some(why) = crate::mcp::send_guard::signer_lacks(
+        &address,
+        crate::mcp::send_guard::perm::TOKEN_TRANSFER,
+        "token-transfer",
+    )
+    .await
+    {
+        problems.push(why);
     }
 
     let registry = crate::guild_config::denom_registry();
@@ -867,8 +999,12 @@ pub async fn mcp_transfer_preview(
     Ok(json!({
         "ok": problems.is_empty(),
         "problems": problems,
-        "from": { "player_id": player_id, "index": index, "name": name, "address": address },
+        "from": {
+            "player_id": player_id, "index": index, "name": name,
+            "address": address, "vault_address": vault_address,
+        },
         "to": to,
+        "to_owner_id": recipient_id,
         // null here is the point: an unrecognised destination must be shown as
         // an external address, not silently rendered as if it were a teammate.
         "recipient": recipient,
@@ -878,8 +1014,42 @@ pub async fn mcp_transfer_preview(
         "amount": amount,
         "balance": balance,
         "denom_info": info,
-        "route": if index.is_some() { "vplayer bridge" } else { "primary signing queue" },
+        "route": if index.is_some() { "vplayer key" } else { "device key" },
     }))
+}
+
+/// Where a payment lands.
+enum Destination {
+    /// A player or guild — paid vault→vault with `MsgVaultSend`.
+    Owner(String),
+    /// An address no player has registered — paid from the sender's vault
+    /// with `MsgPlayerSend`, exactly as the v0.22 webapp does.
+    External(String),
+}
+
+async fn resolve_destination(
+    client: &crate::mcp::cosmos_client::CosmosClient,
+    to: &str,
+) -> Result<Destination, String> {
+    if crate::mcp::send_guard::validate_owner_id("recipient", to).is_ok() {
+        return crate::mcp::send_guard::resolve_recipient_owner(to).await.map(Destination::Owner);
+    }
+    crate::mcp::send_guard::validate_addr("destination", to)?;
+    match client.address_player(to).await {
+        Ok(Some(owner)) => Ok(Destination::Owner(owner)),
+        Ok(None) => Ok(Destination::External(to.to_string())),
+        Err(e) => Err(format!("could not look up {to} on chain: {e}")),
+    }
+}
+
+/// The amount of `denom` in a bank `balances` array, or 0.
+fn coin_amount(balances: &[Value], denom: &str) -> f64 {
+    balances
+        .iter()
+        .find(|c| c.get("denom").and_then(|d| d.as_str()) == Some(denom))
+        .and_then(|c| c.get("amount").and_then(|a| a.as_str()))
+        .and_then(|a| a.parse::<f64>().ok())
+        .unwrap_or(0.0)
 }
 
 /// Execute a transfer. Board-only, and it re-runs the preview server-side so a
@@ -922,54 +1092,44 @@ pub async fn mcp_transfer_execute_impl(
     }
 
     let who = from.unwrap_or_else(|| "primary".into());
-    let (_pid, index, name, address) = resolve_player(&who)?;
+    let (player_id, index, name, _address) = resolve_player(&who)?;
     let amount_str = format!("{}", amount.round() as i128);
 
-    // Hard gate on the exact strings about to be signed — the preview's shape
-    // check plus this means a malformed destination can never reach a signer
-    // (the chain does NOT validate MsgPlayerSend's toAddress; a bad one is a
-    // silent burn, not a reject).
-    crate::mcp::send_guard::validate_send(&address, &to, &amount_str)
-        .map_err(|e| format!("refused: {e}"))?;
+    // Hard gate on the exact strings about to be signed. A player/guild is
+    // paid vault→vault; an outside address from the sender's vault.
+    let client = crate::mcp::cosmos_client::CosmosClient::new();
+    let (type_url, payload) = match resolve_destination(&client, &to).await.map_err(|e| format!("refused: {e}"))? {
+        Destination::Owner(owner) => (
+            "/structs.structs.MsgVaultSend",
+            crate::mcp::send_guard::vault_send_payload(&player_id, &owner, &denom, &amount_str)
+                .map_err(|e| format!("refused: {e}"))?,
+        ),
+        Destination::External(addr) => {
+            let (vault, _) = client.vault(&player_id).await.map_err(|e| format!("refused: {e}"))?;
+            crate::mcp::send_guard::validate_send(&vault, &addr, &amount_str)
+                .map_err(|e| format!("refused: {e}"))?;
+            (
+                "/structs.structs.MsgPlayerSend",
+                json!({
+                    "fromAddress": vault,
+                    "toAddress": addr,
+                    "amount": [{ "denom": denom, "amount": amount_str }],
+                }),
+            )
+        }
+    };
 
     let result = match index {
         // A vplayer signs through the same bridge every loop uses.
-        Some(i) => {
-            let payload = json!({
-                "fromAddress": address,
-                "toAddress": to,
-                "amount": [{ "denom": denom, "amount": amount_str }],
-            });
-            crate::mcp::tx_retry::sign_with_retry(
-                &app,
-                i,
-                "/structs.structs.MsgPlayerSend",
-                payload,
-                "board:transfer",
-            )
+        Some(i) => crate::mcp::tx_retry::sign_with_retry(&app, i, type_url, payload, "board:transfer")
             .await
-            .map(|_| ())
-        }
-        // The primary signs through the webview queue (`bank_send`). Sweep
-        // deliberately excludes the primary as a SOURCE, so this is the first
-        // place on the board it can send from.
-        None => {
-            let tx_args = json!({
-                "action_type": "bank_send",
-                "from_address": address,
-                "to_address": to,
-                "amount": format!("{amount_str}{denom}"),
-            });
-            crate::mcp::tx_retry::submit_once(&app, "bank_send", tx_args, "board:transfer")
-                .await
-                .and_then(|r| {
-                    if r.success {
-                        Ok(())
-                    } else {
-                        Err(r.error.unwrap_or_else(|| "unknown error".into()))
-                    }
-                })
-        }
+            .map(|_| ()),
+        // The primary signs with the device key (HD index 0 — a registered key
+        // of the primary). One attempt: the pinned webapp's queue cannot encode
+        // MsgVaultSend, and a payment is never blindly re-sent.
+        None => crate::mcp::tx_retry::sign_once(&app, 0, type_url, payload, "board:transfer")
+            .await
+            .map(|_| ()),
     };
 
     match result {
@@ -1382,9 +1542,9 @@ pub async fn mcp_allocation_set_power_impl(
             "allocation {allocation_id} is '{atype}' — only 'dynamic' allocations have an editable power"
         ));
     }
-    let args = json!({ "allocation_id": allocation_id, "power": power_mw.round() as i64 });
-    match crate::mcp::tx_retry::submit_once(&app, "allocation_update", args, "board:allocation_update").await {
-        Ok(r) if r.success => {
+    let payload = json!({ "allocationId": allocation_id, "power": power_mw.round() as i64 });
+    match crate::mcp::tx_retry::sign_as_primary(&app, "/structs.structs.MsgAllocationUpdate", payload, "board:allocation_update").await {
+        Ok(_) => {
             crate::mcp::board_feed::push(
                 &app,
                 crate::mcp::board_feed::Severity::Notice,
@@ -1396,7 +1556,6 @@ pub async fn mcp_allocation_set_power_impl(
             );
             Ok(json!({ "ok": true, "power_mw": power_mw }))
         }
-        Ok(r) => Err(r.error.unwrap_or_else(|| "rejected".into())),
         Err(e) => Err(e),
     }
 }
@@ -1414,6 +1573,14 @@ pub async fn mcp_allocation_connect(
     mcp_allocation_connect_impl(app, allocation_id, destination_id).await
 }
 
+/// `Substation.deletion_pending` (v0.22; the LCD spells it snake_case).
+pub fn substation_deletion_pending(sub: &Value) -> bool {
+    let s = sub.get("Substation").unwrap_or(sub);
+    s.get("deletion_pending")
+        .or_else(|| s.get("deletionPending"))
+        .is_some_and(|v| v.as_bool() == Some(true) || v.as_str() == Some("true"))
+}
+
 pub async fn mcp_allocation_connect_impl(
     app: tauri::AppHandle,
     allocation_id: String,
@@ -1428,11 +1595,19 @@ pub async fn mcp_allocation_connect_impl(
             "'{destination_id}' is not a substation id (they look like 4-1)"
         ));
     }
-    let args = json!({ "allocation_id": allocation_id, "destination_id": destination_id });
-    match crate::mcp::tx_retry::submit_once(
-        &app, "substation_allocation_connect", args, "board:allocation_connect",
+    // v0.22: a substation being deleted is migrating its connections away;
+    // new power into it goes with it.
+    let client = crate::mcp::cosmos_client::CosmosClient::new();
+    if let Ok(sub) = client.query_entity("substation", &destination_id).await {
+        if substation_deletion_pending(&sub) {
+            return Err(format!("refused: substation {destination_id} is pending deletion"));
+        }
+    }
+    let payload = json!({ "allocationId": allocation_id, "destinationId": destination_id });
+    match crate::mcp::tx_retry::sign_as_primary(
+        &app, "/structs.structs.MsgSubstationAllocationConnect", payload, "board:allocation_connect",
     ).await {
-        Ok(r) if r.success => {
+        Ok(_) => {
             crate::mcp::board_feed::push(
                 &app,
                 crate::mcp::board_feed::Severity::Notice,
@@ -1441,7 +1616,6 @@ pub async fn mcp_allocation_connect_impl(
             );
             Ok(json!({ "ok": true }))
         }
-        Ok(r) => Err(r.error.unwrap_or_else(|| "rejected".into())),
         Err(e) => Err(e),
     }
 }
@@ -1484,14 +1658,15 @@ pub async fn mcp_allocation_create_impl(
             return Err(format!("refused: {why}"));
         }
     }
-    let args = json!({
+    // `allocationType` is the chain's enum, by name (static | dynamic | automated).
+    let payload = json!({
         "controller": pid,
-        "source_object_id": source_object_id,
-        "allocation_type": allocation_type,
+        "sourceObjectId": source_object_id,
+        "allocationType": allocation_type,
         "power": power_mw.round() as i64,
     });
-    match crate::mcp::tx_retry::submit_once(&app, "allocation_create", args, "board:allocation_create").await {
-        Ok(r) if r.success => {
+    match crate::mcp::tx_retry::sign_as_primary(&app, "/structs.structs.MsgAllocationCreate", payload, "board:allocation_create").await {
+        Ok(_) => {
             crate::mcp::board_feed::push(
                 &app,
                 crate::mcp::board_feed::Severity::Notice,
@@ -1503,7 +1678,6 @@ pub async fn mcp_allocation_create_impl(
             );
             Ok(json!({ "ok": true }))
         }
-        Ok(r) => Err(r.error.unwrap_or_else(|| "rejected".into())),
         Err(e) => Err(e),
     }
 }
@@ -2641,5 +2815,18 @@ mod sendable_tests {
         assert!(!is_sendable("uguild.../../x"));
         assert!(!is_sendable("uguild.abc"));
         assert!(!is_sendable(""));
+    }
+}
+
+#[cfg(test)]
+mod substation_tests {
+    use super::*;
+
+    #[test]
+    fn substation_deletion_flag_reads_both_spellings() {
+        assert!(substation_deletion_pending(&json!({ "Substation": { "id": "4-1", "deletion_pending": true } })));
+        assert!(substation_deletion_pending(&json!({ "deletionPending": "true" })));
+        assert!(!substation_deletion_pending(&json!({ "Substation": { "id": "4-1", "deletion_pending": false } })));
+        assert!(!substation_deletion_pending(&json!({ "Substation": { "id": "4-1" } })));
     }
 }

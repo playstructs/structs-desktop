@@ -964,6 +964,54 @@ const tick = (ms) => new Promise((r) => setTimeout(r, ms));
   await until(() => (w.__HARNESS_CALLS__ || []).some((c) => c.cmd === 'terminal_guild_bank_mint'));
   const mintCall = (w.__HARNESS_CALLS__ || []).find((c) => c.cmd === 'terminal_guild_bank_mint');
   check('MINT signs through the app\'s own ledger with the figures typed', !!mintCall && mintCall.args.amountAlpha === 1000000 && mintCall.args.amountToken === 1000);
+  // v0.22 rank sales: quoted as you type, in the guild's own token; the
+  // purchase carries exactly the price the card showed.
+  run('RANK 0-1');
+  await until(() => d.querySelectorAll('#tm-grid [data-type="rank"] input').length === 2);
+  const rank = d.querySelector('#tm-grid [data-type="rank"]');
+  const [rankGuild, rankTo] = rank.querySelectorAll('input');
+  check('RANK 0-1 opens the rank ticket on that guild', rankGuild.value === '0-1');
+  rankTo.value = '50'; rankTo.dispatchEvent(new w.Event('input'));
+  await until(() => /down to 60/.test(rank.textContent));
+  check('a rank the guild does not sell is refused with the reason, before anything is signed', /sells ranks down to 60 only/.test(rank.textContent));
+  rankTo.value = '99'; rankTo.dispatchEvent(new w.Event('input'));
+  await until(() => /OHM/.test(rank.textContent));
+  check('the quote shows the move and the price in the token\'s own name', /#101 → #99/.test(rank.textContent) && /25 OHM/.test(rank.textContent) && /40 OHM/.test(rank.textContent), rank.textContent);
+  rank.querySelector('a.sui-mod-primary').click();
+  await tick(50);
+  const buyBtn = [...d.querySelectorAll('.ops-modal-overlay a, .ops-modal-overlay button')].find((b) => /^buy$/i.test(b.textContent.trim()));
+  check('BUY confirms first, repeating the guild, the move and the price', !!buyBtn && /0-1/.test(d.querySelector('.ops-modal-overlay').textContent) && /25 OHM from your vault/.test(d.querySelector('.ops-modal-overlay').textContent));
+  if (buyBtn) buyBtn.click();
+  await until(() => (w.__HARNESS_CALLS__ || []).some((c) => c.cmd === 'terminal_rank_purchase'));
+  const buyCall = (w.__HARNESS_CALLS__ || []).find((c) => c.cmd === 'terminal_rank_purchase');
+  check('…and the purchase carries exactly the quoted price as its maximum', !!buyCall && buyCall.args.guildId === '0-1' && buyCall.args.targetRank === 99 && buyCall.args.maxPrice === '25000000', JSON.stringify(buyCall && buyCall.args));
+  await until(() => /signed/.test(rank.textContent));
+  check('…and says it was signed, not merely queued', /signed/.test(rank.textContent) && !/queued/.test(rank.textContent));
+
+  run('FOUND');
+  await until(() => d.querySelectorAll('#tm-grid [data-type="found"] input').length === 3);
+  const found = d.querySelector('#tm-grid [data-type="found"]');
+  const [fReactor, fSub, fEnd] = found.querySelectorAll('input');
+  check('the endpoint is typed as a URL, not on a number pad', fEnd.getAttribute('inputmode') === 'url' && fReactor.getAttribute('inputmode') === 'numeric');
+  found.querySelector('a.sui-mod-primary').click();
+  await tick(50);
+  check('FOUND with nothing previewed signs nothing', !(w.__HARNESS_CALLS__ || []).some((c) => c.cmd === 'terminal_found_guild') && /wait for the preview/.test(found.textContent));
+  fReactor.value = '4-1'; fSub.value = '4-1'; fEnd.value = 'https://g.example/guild.json';
+  fEnd.dispatchEvent(new w.Event('input'));
+  await until(() => /not a reactor id/.test(found.textContent));
+  check('a founding the chain would refuse says why', /not a reactor id/.test(found.textContent));
+  fReactor.value = '3-1'; fReactor.dispatchEvent(new w.Event('input'));
+  await until(() => /burned/.test(found.textContent));
+  check('the preview shows the cost, what is burned and the vault', /cost/.test(found.textContent) && /burned/.test(found.textContent) && /in your vault/.test(found.textContent));
+  found.querySelector('a.sui-mod-primary').click();
+  await tick(50);
+  const foundBtn = [...d.querySelectorAll('.ops-modal-overlay a, .ops-modal-overlay button')].find((b) => /^found$/i.test(b.textContent.trim()));
+  check('FOUND confirms with the reactor, substation and endpoint', !!foundBtn && /3-1/.test(d.querySelector('.ops-modal-overlay').textContent) && /guild\.json/.test(d.querySelector('.ops-modal-overlay').textContent));
+  if (foundBtn) foundBtn.click();
+  await until(() => (w.__HARNESS_CALLS__ || []).some((c) => c.cmd === 'terminal_found_guild'));
+  const foundCall = (w.__HARNESS_CALLS__ || []).find((c) => c.cmd === 'terminal_found_guild');
+  check('…and signs what was confirmed', !!foundCall && foundCall.args.reactorId === '3-1' && foundCall.args.entrySubstationId === '4-1');
+
   run('TS 1-61');
   await until(() => d.querySelector('#tm-grid [data-type="sheet"] .pc-card'));
   const sheet = d.querySelector('#tm-grid [data-type="sheet"]');
@@ -1164,6 +1212,18 @@ const tick = (ms) => new Promise((r) => setTimeout(r, ms));
   {
     const ore = [...d.querySelectorAll('#tm-grid [data-type="wallet"] .pc-row')].find((r) => /not sendable/.test(r.textContent));
     check('ore offers the one thing you can do with it', ore.querySelector('.pc-act[title="Refine ore into alpha"]') !== null);
+    // v0.22: a coin still at the signing key is labelled and moved, not sent.
+    const kept = [...d.querySelectorAll('#tm-grid [data-type="wallet"] .pc-row')].find((r) => /\(retained\)/.test(r.textContent));
+    check('a retained balance is labelled and offers only Move to vault', !!kept && kept.querySelector('.pc-act[title="Move to vault"]') !== null && kept.querySelector('.pc-act[title="Deliver"]') === null);
+    if (kept) {
+      kept.querySelector('.pc-act[title="Move to vault"]').click();
+      await until(() => d.querySelector('.ops-modal-overlay'));
+      check('…which confirms first, naming the amount and the vault', /2\.5g|2\.50g/i.test(d.querySelector('.ops-modal-overlay').textContent) && /your vault/.test(d.querySelector('.ops-modal-overlay').textContent), d.querySelector('.ops-modal-overlay').textContent);
+      check('…and moves nothing before the confirm', !(w.__HARNESS_CALLS__ || []).some((c) => c.cmd === 'mcp_collect_retained'));
+      [...d.querySelectorAll('.ops-modal-overlay .sui-message-system-modal-cta-btn-wrapper a')][1].click();
+      await until(() => (w.__HARNESS_CALLS__ || []).some((c) => c.cmd === 'mcp_collect_retained'));
+      check('…then moves it for that wallet\'s player', (w.__HARNESS_CALLS__ || []).find((c) => c.cmd === 'mcp_collect_retained').args.player === 'primary');
+    }
   }
   const goRow = d.querySelector('#tm-grid [data-type="targets"] .pc-row.sc-bad');
   check('the target board draws catalogue rows: GO as the stripe and badge, the planet as a chip, the veto as a destructive door', goRow !== null && /GO/.test(goRow.querySelector('.sui-badge').textContent) && goRow.querySelector('.sc-chip[data-kind="planet"]') !== null && goRow.querySelector('.pc-act[title^="Never attack"]').classList.contains('sc-destructive'));
@@ -1184,7 +1244,8 @@ const tick = (ms) => new Promise((r) => setTimeout(r, ms));
     const prev = (w.__HARNESS_CALLS__ || []).find((c) => c.cmd === 'mcp_infusion_preview');
     check('…which previews before it signs, naming reactor and amount', prev.args.op === 'infuse' && prev.args.amountUalpha === 1000000 && !!prev.args.destinationId && !!prev.args.address);
     await until(() => fuel.querySelector('.tm-ticket-note .fstat'));
-    check('…and shows what the chain would do', /capacity gained/i.test(fuel.querySelector('.tm-ticket-note').textContent));
+    // v0.22: the infuse's NET effect (base share plus the diversity-bonus change).
+    check('…and shows what the chain would do', /net capacity/i.test(fuel.querySelector('.tm-ticket-note').textContent));
     fuel.querySelector('.tm-ticket a.sui-screen-btn').click();
     await until(() => d.querySelector('.ops-modal-overlay'));
     check('…asking before it signs', /Stake this alpha/i.test(d.querySelector('.ops-modal-overlay').textContent));

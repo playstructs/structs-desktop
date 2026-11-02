@@ -7,9 +7,12 @@
 //! of being hammered by 182 players' worth of scans.
 //!
 //! RETRY POLICY — resubmit only when non-inclusion is CERTAIN:
-//! * `SequenceMismatch` is the ONLY auto-retried class: the node rejected the
-//!   tx at CheckTx with the account sequence intact, so it definitively did
-//!   NOT land; waiting one block and re-signing is the documented remedy.
+//! * `SequenceMismatch` is auto-retried: the node rejected the tx at CheckTx
+//!   with the account sequence intact, so it definitively did NOT land;
+//!   waiting one block and re-signing is the documented remedy.
+//! * `BlockQuota` (v0.22 ante 2031/2033/2040/2041/2043) is auto-retried too:
+//!   rejected at CheckTx, or included and FAILED as a whole at delivery —
+//!   either way nothing executed, and the quota resets next block.
 //! * `Timeout` / `BridgeDown` / `RateLimited` are UNCERTAIN-OUTCOME: the tx
 //!   may have committed on-chain with only the ack lost (e.g. block inclusion
 //!   slower than the 60s bridge timeout). Blindly re-signing with a fresh
@@ -45,6 +48,11 @@ pub enum ErrorClass {
     InsufficientFunds,
     PlayerOffline,
     InvalidTarget,
+    /// A per-block quota at admission or delivery (v0.22 ante 2031/2033/
+    /// 2040/2041/2043): the player's 40-message cap, the per-address CheckTx
+    /// cap, the one-staking-op rule, a per-object throttle. The transaction did
+    /// not execute and the quota resets next block.
+    BlockQuota,
     RateLimited,
     Timeout,
     BridgeDown,
@@ -53,11 +61,11 @@ pub enum ErrorClass {
 
 impl ErrorClass {
     /// Whether the tx DEFINITIVELY did not land, making a resubmit safe.
-    /// Only SequenceMismatch qualifies — every other failure class is either
+    /// SequenceMismatch and BlockQuota qualify — every other failure class is either
     /// deterministic (retry can't help) or uncertain-outcome (retry can
     /// double-execute; see module docs).
     fn retryable(self) -> bool {
-        matches!(self, ErrorClass::SequenceMismatch)
+        matches!(self, ErrorClass::SequenceMismatch | ErrorClass::BlockQuota)
     }
 
     /// The `tx_attempts.outcome` value for a failed attempt of this class.
@@ -67,6 +75,7 @@ impl ErrorClass {
             ErrorClass::Timeout => "timeout",
             ErrorClass::BridgeDown => "bridge_error",
             ErrorClass::WorkFailure => "work_failure",
+            ErrorClass::BlockQuota => "block_quota",
             ErrorClass::InsufficientCharge
             | ErrorClass::InsufficientFunds
             | ErrorClass::PlayerOffline
@@ -76,7 +85,7 @@ impl ErrorClass {
     }
 
     fn delay_ms(self, _attempt: u32) -> u64 {
-        // Only SequenceMismatch is ever retried (see `retryable`).
+        // Both retryable classes clear at the next block (see `retryable`).
         SEQ_RETRY_BASE_MS
     }
 
@@ -127,6 +136,13 @@ pub fn classify(raw: &str) -> ErrorClass {
         || l.contains("code 8")
     {
         ErrorClass::InvalidTarget
+    } else if l.contains("exceeded per-block message cap")
+        || l.contains("exceeded checktx free-tx cap")
+        || l.contains("already submitted a free staking tx this block")
+        || l.contains("already attempted this block")
+        || l.contains("is throttled for this block")
+    {
+        ErrorClass::BlockQuota
     } else if l.contains("work failure") {
         // The proof's anchor disagreed with the chain's clock. Deterministic,
         // and NOT endpoint pressure — this used to fall through to the "429"
@@ -490,6 +506,24 @@ pub async fn submit_with_retry(
     Err(translate_error(&last_err))
 }
 
+/// Sign one message as the PRIMARY with the device key (HD index 0 — the key
+/// the game window signed in with, a registered key of the primary), on our
+/// own signer, one attempt.
+///
+/// For the primary's non-gameplay messages (allocations, substations, guild
+/// settings, vault sends). The v0.22 webapp queue refuses anything that is
+/// not a gameplay/transfer/reactor/generator INTENT once the chain is on the
+/// new protocol, and the pinned webapp cannot encode the new messages; this
+/// path works under both. Returns the chain response, not a "queued" ack.
+pub async fn sign_as_primary(
+    app: &tauri::AppHandle,
+    type_url: &str,
+    payload: Value,
+    context: impl Into<Context>,
+) -> Result<Value, String> {
+    sign_once(app, 0, type_url, payload, context).await
+}
+
 /// Single recorded VPLAYER sign attempt, NO retry — for interactive MCP paths
 /// (`structs_players act`) where the connected agent decides what happens
 /// next; the ledger still sees the attempt. Returns the chain response Value
@@ -586,6 +620,18 @@ mod tests {
         // A genuine endpoint timeout still classifies as Timeout.
         assert_eq!(classify("error sending request: operation timed out"), ErrorClass::Timeout);
         assert_eq!(classify("something novel"), ErrorClass::Other);
+        // v0.22 ante quotas: did not execute, clears next block, not pressure.
+        for q in [
+            "codespace ante code 2040: player exceeded per-block message cap",
+            "address exceeded CheckTx free-tx cap for this block",
+            "address already submitted a free staking tx this block",
+            "proof for this struct was already attempted this block",
+            "object is throttled for this block",
+        ] {
+            assert_eq!(classify(q), ErrorClass::BlockQuota, "{q}");
+        }
+        assert!(ErrorClass::BlockQuota.retryable());
+        assert!(!ErrorClass::BlockQuota.is_pressure());
         // 2026-09-04: a rejected proof's error text carries the proof input,
         // and a nonce containing the digits 429 read as an HTTP 429 — 94
         // stale-anchor rejections an hour were feeding AIMD as throttling.

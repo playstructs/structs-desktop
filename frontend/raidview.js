@@ -2931,11 +2931,27 @@
       var tgt = structsById[shot.targetStructId];
       var tgtAmbit = shot.targetStructOperatingAmbit || (tgt && tgt.ambit);
       var hb = numOf(shot.targetHealthBefore), ha = numOf(shot.targetHealthAfter);
+      // v0.22 (StructListener): a countered target's final health includes
+      // REBOUND from an explosive attacker its counter killed, which happens
+      // after the volley while the target is still alive. Show the volley's
+      // own damage first, then the counter, then the rebound. An evaded or
+      // blocked volley never damaged the target.
+      var countered = truthy(shot.targetCountered);
+      var missed = truthy(shot.evaded) || truthy(shot.evadedByPlanetaryDefenses) || truthy(shot.blocked);
+      // Without a `damage` figure there is no volley/rebound split to make.
+      var volleyDamage = missed ? 0 : numOf(shot.damage);
+      var hv = (countered && hb != null && volleyDamage != null)
+        ? Math.max(0, hb - volleyDamage)
+        : ha;
+      // A rebound only ever lowers health. Pre-v0.22 rows could pair a
+      // mid-volley `targetHealthBefore` with the whole volley's `damage`;
+      // never replay that as a heal.
+      if (hv != null && ha != null && hv < ha) hv = ha;
 
       if (truthy(shot.evaded)) {
         var art = EVADE_ART[shot.evadedCause];
         events.push({ structId: shot.targetStructId, typeSlug: tgt && tgt.type_slug,
-          names: art ? [art] : [], healthAfter: ha });
+          names: art ? [art] : [], healthAfter: hv });
       } else if (truthy(shot.evadedByPlanetaryDefenses)
         && shot.evadedByPlanetaryDefensesCause === 'lowOrbitBallisticInterceptorNetwork') {
         var sat = planetaryStructOfType(structsById, 'jamming_satellite');
@@ -2958,21 +2974,31 @@
         }
       }
 
-      if (hb != null && ha != null && hb !== ha) {
-        var rt = resolveShotAnimation(atkType, atkAmbit, tgtAmbit, weapon, ha, false, '');
+      if (hb != null && hv != null && hb !== hv) {
+        var rt = resolveShotAnimation(atkType, atkAmbit, tgtAmbit, weapon, hv, false, '');
         events.push({ structId: shot.targetStructId, typeSlug: tgt && tgt.type_slug,
-          names: rt ? rt.names : [], healthAfter: ha });
-        if (truthy(shot.targetDestroyed)) {
+          names: rt ? rt.names : [], healthAfter: hv });
+        if (truthy(shot.targetDestroyed) && !countered) {
           events.push({ structId: shot.targetStructId, typeSlug: tgt && tgt.type_slug,
             names: [destroyName(tgt, tgtAmbit)], healthAfter: 0 });
         }
       }
 
-      if (!truthy(shot.targetDestroyed) && truthy(shot.targetCountered)) {
+      if (countered) {
         attackAnim(shot.targetStructId, tgt && tgt.type_slug, shot.targetCounterWeaponSystem, true);
         attackerHit(shot.targetStructType || (tgt && tgt.type_name), tgtAmbit,
           shot.targetCounterWeaponSystem, numOf(shot.targetCounteredDamage),
           truthy(shot.targetCounterDestroyedAttacker));
+        // Rebound: the attacker's explosion lands after the counter.
+        if (ha != null && hv !== ha) {
+          var rr = resolveShotAnimation(atkType, atkAmbit, tgtAmbit, weapon, ha, false, '');
+          events.push({ structId: shot.targetStructId, typeSlug: tgt && tgt.type_slug,
+            names: rr ? rr.names : [], healthAfter: ha });
+          if (truthy(shot.targetDestroyed)) {
+            events.push({ structId: shot.targetStructId, typeSlug: tgt && tgt.type_slug,
+              names: [destroyName(tgt, tgtAmbit)], healthAfter: 0 });
+          }
+        }
       }
     });
 

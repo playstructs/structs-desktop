@@ -35,6 +35,7 @@ pub mod rates;
 pub mod game_stats;
 pub mod grass_native;
 pub mod guild_api;
+pub mod guild_economy;
 pub mod guild_auth;
 pub mod guild_power;
 pub mod loop_util;

@@ -1085,10 +1085,14 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
     window.Worker = new Proxy(OriginalWorker, {
       construct: function(target, args) {
         var url = args[0] || '';
+        // The v0.22 webapp bundles the worker: `new Worker(new URL(...,
+        // import.meta.url))` passes a URL object (and a hashed
+        // workers/TaskWorker.<hash>.js path), not the old string path.
+        var href = typeof url === 'string' ? url : (url && typeof url.href === 'string' ? url.href : '');
 
         // Not a TaskWorker — create a real Worker
-        if (typeof url !== 'string' || url.indexOf('TaskWorker') === -1) {
-          return new target(url);
+        if (href.indexOf('TaskWorker') === -1) {
+          return new target(url, args[1]);
         }
 
         console.info('[Structs Hasher] Intercepting TaskWorker → Rust backend');
@@ -1103,11 +1107,44 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
         var _unlisteners = [];
         var _terminated = false;
 
+        // Two worker protocols. Legacy: postMessage([state]) / reply
+        // {data: [state]}. v0.22 (TASK.WORKER_VERSION 'work-v022-1'):
+        // {version, revision, kind: 'start'|'update', state} / reply
+        // {version, revision, state}. TaskProcess drops a reply whose version
+        // differs or whose revision is not its latest, and terminates a worker
+        // that has not replied within TASK.WORKER_HANDSHAKE_TIMEOUT.
+        var _version = null;
+        var _revision = 0;
+        function reply(snapshot) {
+          if (!ws.onmessage) return;
+          ws.onmessage({ data: _version === null ? [snapshot] : { version: _version, revision: _revision, state: snapshot } });
+        }
+
         // Override postMessage to route to Rust
         var origPostMessage = ws.postMessage.bind(ws);
         ws.postMessage = function(data) {
           if (_terminated) return;
-          var state = data[0];
+          var state;
+          if (Array.isArray(data)) {
+            state = data[0];
+          } else if (data && typeof data === 'object' && data.state && typeof data.revision === 'number') {
+            if (data.revision <= _revision) return;
+            _version = data.version;
+            _revision = data.revision;
+            // Per-block checkpoint / rule updates for the running task. Rust
+            // tracks chain height itself (refresh_checkpoint) and re-reads live
+            // difficulty targets (retune.rs); only the revision matters here,
+            // so later progress replies carry the revision TaskProcess expects.
+            if (data.kind !== 'start') return;
+            state = data.state;
+            // Acknowledge at once, as the real worker does: a task waiting for
+            // its difficulty to decay may not report progress for minutes, and
+            // the handshake timeout would otherwise terminate it.
+            var ack = Object.assign({}, state, { status: state.status === 'starting' ? 'waiting' : state.status });
+            setTimeout(function() { if (!_terminated) reply(ack); }, 0);
+          } else {
+            return;
+          }
           _pid = state.object_id;
           var pid = _pid;
 
@@ -1131,14 +1168,14 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
               if (event.payload.object_id !== pid) return;
               if (!ws.onmessage) return;
               var snapshot = convertSnapshotDates(event.payload);
-              ws.onmessage({ data: [snapshot] });
+              reply(snapshot);
             }),
             window.StructsEvents.listen('hash_complete', function(event) {
               if (_terminated) return;
               if (event.payload.object_id !== pid) return;
               if (!ws.onmessage) return;
               var snapshot = convertSnapshotDates(event.payload);
-              ws.onmessage({ data: [snapshot] });
+              reply(snapshot);
               // Notify Rust for auto-chain policies (e.g., auto_refine after mine).
               // Arg names MUST be camelCase — Tauri v2 camelCases command args
               // across the bridge, so snake_case keys fail to deserialize and the
@@ -1367,7 +1404,12 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
           wallet_address: gs.signingAccount ? gs.signingAccount.address : null,
           player_name: kp && kp.player ? (kp.player.username || kp.player.name) : null,
           guild_id: kp && kp.player ? kp.player.guild_id : null,
-          alpha: kp && kp.player ? num(kp.player.alpha) : null,
+          // Whole Alpha. v0.22's `alpha` is a floored display string (null
+          // while the funds snapshot is stale); `spendable_alpha_p` is the
+          // exact vault balance in ualpha, so prefer it when present.
+          alpha: kp && kp.player
+            ? (kp.player.spendable_alpha_p != null ? num(kp.player.spendable_alpha_p) / 1e6 : num(kp.player.alpha))
+            : null,
           ore: kp && kp.player ? num(kp.player.ore) : null,
           stored_ore: kp && kp.player ? num(kp.player.stored_ore || kp.player.storedOre) : null,
           load: kp && kp.player ? num(kp.player.load) : null,
@@ -1440,12 +1482,42 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
     console.info('[Structs Sync] GameState sync to Rust enabled (Rust tick + JS fallback)');
   })();
 
+  // ── Web Locks probe ──
+  // The v0.22 webapp's durable signing journal serialises on Web Locks
+  // (Safari/WebKit 15.4+, secure contexts only); without them it cannot sign.
+  // Recorded once at boot so a "never signs" report is a log lookup.
+  (function probeWebLocks() {
+    var ok = !!(window.isSecureContext && navigator.locks && typeof navigator.locks.request === 'function');
+    var line = ok
+      ? 'web locks: available'
+      : 'web locks: MISSING (secureContext=' + !!window.isSecureContext + ', navigator.locks=' + !!navigator.locks
+        + ', ' + (navigator.userAgent || '') + ') — the v0.22 signing journal cannot run in this webview';
+    window.__STRUCTS_WEB_LOCKS__ = ok;
+    var tries = 0;
+    (function send() {
+      if (!window.__TAURI__ || !window.__TAURI__.core) {
+        if (++tries < 40) setTimeout(send, 250);
+        return;
+      }
+      window.__TAURI__.core.invoke('conn_log', { msg: line }).catch(function () {});
+    })();
+  })();
+
   // ── MCP Transaction Bridge ──
   // Listens for transaction requests from the Rust MCP server and
   // routes them through the webapp's SigningClientManager queue.
   (function setupTransactionBridge() {
-    window.StructsEvents.listen('mcp_transaction_request', function(event) {
-      var req = event.payload;
+    // v0.22's queue refuses a new enqueue while an earlier send is still
+    // broadcasting/accepted/unknown ("Resolve the existing submission before
+    // adding another intent"). That clears within a block or two, so the
+    // bridge waits and re-runs the request; it stays under Rust's 30 s
+    // bridge timeout. The pinned webapp never raises it.
+    var ENQUEUE_RETRY_MS = 2000, ENQUEUE_MAX_ATTEMPTS = 12;
+    function isEnqueueDeferral(e) {
+      return /Resolve the existing submission before adding another intent/.test(String((e && e.message) || e));
+    }
+    window.StructsEvents.listen('mcp_transaction_request', function(event) { handleTx(event.payload, 0); });
+    function handleTx(req, attempt) {
       var requestId = req.request_id;
       var action = req.action;
       var args = req.args || {};
@@ -1515,86 +1587,35 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
             promise = scm.queueMsgFleetMove(args.fleet_id, args.destination_id);
             break;
 
-          // ── Transfer ── (alpha send via MsgPlayerSend; queueMsgBankSend never
-          //    existed — amount is a Coin[] in ualpha, matching AlphaManager.)
-          case 'bank_send': {
-            // Last stop before the signing queue. The chain does NOT validate
-            // MsgPlayerSend's toAddress (a malformed one silently burns the
-            // funds at the empty address), so a bad send must die HERE. This
-            // also catches undefined args from any caller using the wrong key
-            // spelling — String(undefined) is 'undefined', not an address.
-            var bsFrom = String(args.from_address || '');
-            var bsTo = String(args.to_address || '');
-            // "1000000" or "1000000ualpha" or "500uguild.1" — the old
-            // digits-only strip turned "500uguild.1" into 5001 ualpha.
-            var bsParsed = /^([0-9]+)\s*([a-z][a-z0-9./_-]*)?$/.exec(String(args.amount || '').trim());
-            var bsAmt = bsParsed ? bsParsed[1] : '';
-            var bsDenom = (bsParsed && bsParsed[2]) || 'ualpha';
-            var bsBad = null;
-            if (!/^structs1[qpzry9x8gf2tvdw0s3jn54khce6mua7l]{38,80}$/.test(bsFrom)) bsBad = 'from_address "' + bsFrom + '" is not a structs1 address';
-            else if (!/^structs1[qpzry9x8gf2tvdw0s3jn54khce6mua7l]{38,80}$/.test(bsTo)) bsBad = 'to_address "' + bsTo + '" is not a structs1 address';
-            else if (bsFrom === bsTo) bsBad = 'from and to are the same address';
-            else if (!bsAmt || !/[1-9]/.test(bsAmt)) bsBad = 'amount "' + String(args.amount) + '" is not a positive integer amount (with optional denom suffix)';
-            if (bsBad) {
-              respondTx(requestId, false, null, 'bank_send refused: ' + bsBad);
-              return;
-            }
-            promise = scm.queueMsgPlayerSend(
-              bsFrom,
-              bsTo,
-              [{ denom: bsDenom, amount: bsAmt }]
-            );
-            break;
-          }
-
-          // ── Generator ──
-          case 'struct_generator_infuse':
-            promise = scm.queueMsgStructGeneratorInfuse(args.struct_id, args.amount);
-            break;
-
-          // ── Allocation ──
-          case 'allocation_create': {
-            // `allocationType` is a protobuf INT32 ENUM, not a string. Passing
-            // "dynamic" through made the encoder do Number("dynamic") → NaN and
-            // the tx died with "invalid int32: NaN" — after the bridge had
-            // already acked "queued", so the UI showed nothing and the ledger
-            // recorded a success that never reached the chain.
-            var ALLOC_TYPE = { static: 0, dynamic: 1, automated: 2, providerAgreement: 3 };
-            var allocType = typeof args.allocation_type === 'number'
-              ? args.allocation_type
-              : ALLOC_TYPE[String(args.allocation_type)];
-            if (allocType === undefined) {
-              respondTx(requestId, false, null,
-                'Unknown allocation type: ' + args.allocation_type);
-              return;
-            }
-            promise = scm.queueMsgAllocationCreate(
-              args.controller, args.source_object_id, allocType, args.power);
-            break;
-          }
-          case 'allocation_update':
-            promise = scm.queueMsgAllocationUpdate(args.allocation_id, args.power);
-            break;
-          case 'allocation_delete':
-            promise = scm.queueMsgAllocationDelete(args.allocation_id);
-            break;
-          case 'substation_allocation_connect':
-            promise = scm.queueMsgSubstationAllocationConnect(args.allocation_id, args.destination_id);
-            break;
-          case 'substation_allocation_disconnect':
-            promise = scm.queueMsgSubstationAllocationDisconnect(args.allocation_id);
-            break;
-
-          // ── Substation ──
-          case 'substation_player_connect':
-            promise = scm.queueMsgSubstationPlayerConnect(args.substation_id, args.player_id);
-            break;
+          // Economic actions (Alpha sends, generator fuel, allocations,
+          // substations, guild settings) are NOT on this bridge: the v0.22
+          // queue refuses every non-intent message once the chain is on the
+          // new protocol. Rust signs them natively with the device key
+          // (tx_retry::sign_as_primary), which works under either webapp.
 
           default:
             respondTx(requestId, false, null, 'Unknown action: ' + action);
             return;
         }
 
+        // An async queueMsg* refused at enqueue is an ALREADY-rejected promise;
+        // its handler runs before this timer, so the ack waits one tick and
+        // only acknowledges an enqueue the queue actually accepted.
+        var refused = null;
+        promise = Promise.resolve(promise);
+        promise.catch(function (e) { if (refused === null && isEnqueueDeferral(e)) refused = e; });
+        setTimeout(function () {
+          if (refused) {
+            if (attempt + 1 < ENQUEUE_MAX_ATTEMPTS) {
+              setTimeout(function () { handleTx(req, attempt + 1); }, ENQUEUE_RETRY_MS);
+            } else {
+              respondTx(requestId, false, null, 'signing queue busy: ' + String((refused && refused.message) || refused));
+            }
+            return;
+          }
+          acknowledge();
+        }, 0);
+        function acknowledge() {
         // Respond to the MCP IMMEDIATELY. The new signing queue resolves the
         // queueMsg* promise only on SETTLEMENT (terminal state) — which for a
         // charge-gated message can be minutes away while it waits for charge.
@@ -1637,12 +1658,18 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
           console.error('[Structs TX Bridge] Settle error:', action, err);
           reportSettled({ status: 'dropped', error: String(err), response: {} });
         });
+        }
 
       } catch (e) {
+        // v0.22's synchronous enqueue (build initiate) throws the same deferral.
+        if (isEnqueueDeferral(e) && attempt + 1 < ENQUEUE_MAX_ATTEMPTS) {
+          setTimeout(function () { handleTx(req, attempt + 1); }, ENQUEUE_RETRY_MS);
+          return;
+        }
         console.error('[Structs TX Bridge] Error:', e);
         respondTx(requestId, false, null, String(e));
       }
-    });
+    }
 
     function respondTx(requestId, success, txHash, error) {
       window.__TAURI__.core.invoke('mcp_transaction_response', {
@@ -1858,7 +1885,9 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
           case 'mutate': data = txq.mutate(args.op, args.id, args.new_index); break;
           default: respond(false, {}, 'unknown txq op: ' + op); return;
         }
-        respond(true, data, null);
+        // mutate answers a Promise on the v0.22 webapp (async cancel).
+        Promise.resolve(data).then(function (d) { respond(true, d, null); },
+          function (e) { respond(false, {}, String((e && e.message) || e)); });
       } catch (e) {
         respond(false, {}, String((e && e.message) || e));
       }

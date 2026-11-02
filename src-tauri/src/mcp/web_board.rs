@@ -1063,10 +1063,32 @@ async fn board_invoke(
             (Some(a), Some(t)) => from_result(crate::mcp::terminal::terminal_guild_bank_mint(st.app.clone(), a, t).await),
             _ => err_json("amountAlpha + amountToken required".into()),
         },
-        "terminal_guild_bank_redeem" => match (s("denom"), body.get("amount").and_then(|v| v.as_u64())) {
-            (Some(d), Some(a)) => from_result(crate::mcp::terminal::terminal_guild_bank_redeem(st.app.clone(), d, a).await),
-            _ => err_json("denom + amount required".into()),
+        "terminal_guild_bank_redeem" => match (
+            s("denom"),
+            body.get("amount").and_then(|v| v.as_u64()),
+            body.get("minAmountAlpha").and_then(|v| v.as_u64()),
+        ) {
+            (Some(d), Some(a), Some(m)) => from_result(crate::mcp::terminal::terminal_guild_bank_redeem(st.app.clone(), d, a, m).await),
+            _ => err_json("denom + amount + minAmountAlpha required".into()),
         },
+        "terminal_rank_quote" => match body.get("targetRank").and_then(|v| v.as_u64()) {
+            Some(t) => from_result(crate::mcp::terminal::terminal_rank_quote(s("guildId"), t).await),
+            None => err_json("targetRank required".into()),
+        },
+        "terminal_rank_purchase" => match (body.get("targetRank").and_then(|v| v.as_u64()), s("maxPrice")) {
+            (Some(t), Some(m)) => from_result(crate::mcp::terminal::terminal_rank_purchase_impl(st.app.clone(), s("guildId"), t, m).await),
+            _ => err_json("targetRank + maxPrice required".into()),
+        },
+        "terminal_found_guild_preview" => match (s("reactorId"), s("endpoint"), s("entrySubstationId")) {
+            (Some(r), Some(e), Some(sub)) => from_result(crate::mcp::terminal::terminal_found_guild_preview(r, e, sub).await),
+            _ => err_json("reactorId + endpoint + entrySubstationId required".into()),
+        },
+        "terminal_found_guild" => match (s("reactorId"), s("endpoint"), s("entrySubstationId")) {
+            (Some(r), Some(e), Some(sub)) => from_result(crate::mcp::guild_economy::found_guild(&st.app, &r, &e, &sub).await),
+            _ => err_json("reactorId + endpoint + entrySubstationId required".into()),
+        },
+        "mcp_collect_retained_preview" => from_result(board_pages::mcp_collect_retained_preview(s("player")).await),
+        "mcp_collect_retained" => from_result(board_pages::mcp_collect_retained_impl(st.app.clone(), s("player")).await),
         "mcp_render_map" => match s("player") {
             Some(p) => from_result(map::mcp_render_map(st.app.clone(), p).await),
             None => err_json("player required".into()),

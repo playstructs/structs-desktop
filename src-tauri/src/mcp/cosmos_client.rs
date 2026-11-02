@@ -353,6 +353,41 @@ impl CosmosClient {
             .unwrap_or_default())
     }
 
+    /// The protocol vault of an owner (`1-N` player or `0-N` guild), v0.22+:
+    /// `(address, provisioned)`. The address is deterministic and returned
+    /// before provisioning; liquid Alpha and guild tokens live here, not at
+    /// any signing address.
+    pub async fn vault(&self, owner_id: &str) -> Result<(String, bool), String> {
+        let base = self.reactor_api.read().unwrap().clone();
+        let v = get_json(&format!("{}/structs/vault/{}", base.trim_end_matches('/'), owner_id)).await?;
+        let addr = v.get("address").and_then(|a| a.as_str()).unwrap_or("").to_string();
+        if addr.is_empty() {
+            return Err(format!("vault query for {owner_id} returned no address"));
+        }
+        Ok((addr, v.get("provisioned").and_then(|p| p.as_bool()).unwrap_or(false)))
+    }
+
+    /// The player a REGISTERED signing address belongs to, or `None` for any
+    /// other address (a vault, a module, an external account).
+    pub async fn address_player(&self, address: &str) -> Result<Option<String>, String> {
+        Ok(self.address_record(address).await?.0)
+    }
+
+    /// `(player, permission bits)` of a signing address. Since v0.22 the
+    /// SIGNING KEY must hold each operation's bit itself (token transfer,
+    /// infuse, defuse, migrate…); a grant on the player object does not
+    /// supply a missing key bit.
+    pub async fn address_record(&self, address: &str) -> Result<(Option<String>, u64), String> {
+        let base = self.reactor_api.read().unwrap().clone();
+        let v = get_json(&format!("{}/structs/address/{}", base.trim_end_matches('/'), address)).await?;
+        let player = v.get("playerId").and_then(|p| p.as_str()).filter(|s| !s.is_empty()).map(String::from);
+        let perms = v
+            .get("permissions")
+            .and_then(|p| p.as_str().and_then(|s| s.parse().ok()).or_else(|| p.as_u64()))
+            .unwrap_or(0);
+        Ok((player, perms))
+    }
+
     /// Raw LCD GET for endpoints that are NOT Structs entities — the Cosmos SDK
     /// modules the game abstracts over. Reactor infusion IS staking delegation,
     /// so the in-flight state of a defusion (unbonding) or a migration
@@ -412,29 +447,6 @@ impl CosmosClient {
         }
         let v: Value = serde_json::from_str(&body).map_err(|e| format!("JSON parse error: {}", e))?;
         Ok((v, height, server_time))
-    }
-
-    /// How many of an entity type exist on-chain right now, via the LCD's
-    /// `pagination.count_total` (one request, no page walk). For structs this
-    /// counts LIVE objects only — the chain prunes destroyed structs, so it is
-    /// the honest "deployed" figure where the indexer's `struct` table keeps
-    /// every corpse (96k destroyed rows and counting).
-    pub async fn count_entities(&self, entity_type: &str) -> Result<u64, String> {
-        let path = Self::entity_path(entity_type)?;
-        let base = self.reactor_api.read().unwrap().clone();
-        let url = format!(
-            "{}/structs/{}?pagination.limit=1&pagination.count_total=true",
-            base.trim_end_matches('/'),
-            path
-        );
-        let v = get_json(&url).await?;
-        v.get("pagination")
-            .and_then(|p| p.get("total"))
-            .and_then(|t| {
-                t.as_u64()
-                    .or_else(|| t.as_str().and_then(|s| s.parse().ok()))
-            })
-            .ok_or_else(|| format!("LCD {} count: no pagination.total", entity_type))
     }
 
     /// The permission bitmask player `player_id` holds on object `object_id`.
@@ -603,7 +615,37 @@ impl CosmosClient {
         get_json(&url).await
     }
 
+    /// Every row of a Structs store, following `next_key`. Since v0.22.0 the
+    /// chain clamps every Structs-module page to [`LCD_MAX_PAGE`] rows and
+    /// always answers `pagination.total = 0`, so a single `limit=2000` read
+    /// silently returns only the first 1000 rows in key order.
+    pub async fn list_all_entities(&self, entity_type: &str, list_key: &str) -> Result<Vec<Value>, String> {
+        let mut rows = Vec::new();
+        let mut key: Option<String> = None;
+        for _ in 0..LCD_MAX_PAGES_PER_WALK {
+            let page = self.list_entities(entity_type, key.as_deref(), Some(LCD_MAX_PAGE)).await?;
+            if let Some(Value::Array(a)) = page.get(list_key) {
+                rows.extend(a.iter().cloned());
+            }
+            key = page
+                .get("pagination")
+                .and_then(|p| p.get("next_key"))
+                .and_then(|k| k.as_str())
+                .filter(|k| !k.is_empty())
+                .map(String::from);
+            if key.is_none() {
+                return Ok(rows);
+            }
+        }
+        Err(format!("{entity_type} store longer than {LCD_MAX_PAGES_PER_WALK} pages"))
+    }
+
 }
+
+/// The v0.22.0 chain's hard cap on a Structs-module query page.
+pub const LCD_MAX_PAGE: u32 = 1000;
+/// Safety bound for [`CosmosClient::list_all_entities`].
+const LCD_MAX_PAGES_PER_WALK: usize = 200;
 
 #[cfg(test)]
 mod tests {

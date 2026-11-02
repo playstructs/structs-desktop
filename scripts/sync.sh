@@ -31,6 +31,8 @@ cp "$WEBAPP_DIR/src/package.json" "$BUILD_DIR/package.json"
 cp "$WEBAPP_DIR/src/package-lock.json" "$BUILD_DIR/package-lock.json" 2>/dev/null || true
 cp "$WEBAPP_DIR/src/webpack.config.js" "$BUILD_DIR/webpack.config.js"
 cp "$WEBAPP_DIR/src/tsconfig.json" "$BUILD_DIR/tsconfig.json"
+# v0.22 webapp: webpack.config.js requires local plugins from src/webpack/.
+[ -d "$WEBAPP_DIR/src/webpack" ] && cp -r "$WEBAPP_DIR/src/webpack" "$BUILD_DIR/webpack"
 
 echo "==> Applying patches..."
 bash "$SCRIPT_DIR/apply-patches.sh" "$BUILD_DIR"
@@ -41,6 +43,26 @@ npm install
 
 echo "==> Building with webpack..."
 npx webpack --mode=production --no-devtool
+
+# v0.22 webapp emits content-hashed entry bundles (index.<hash>.js) plus a
+# manifest.json mapping "js/index.js" -> "js/index.<hash>.js" (Symfony reads it).
+# Our windows load the stable names, so alias each entry back to its plain name.
+# Lazy chunks keep their hashed names; webpack's runtime resolves those itself.
+if [ -f "$BUILD_DIR/public/js/manifest.json" ]; then
+  echo "==> Aliasing hashed entry bundles to stable names..."
+  node -e '
+    const fs = require("fs"), path = require("path");
+    const dir = process.argv[1];
+    const manifest = JSON.parse(fs.readFileSync(path.join(dir, "manifest.json"), "utf8"));
+    for (const [stable, hashed] of Object.entries(manifest)) {
+      const from = path.join(dir, path.basename(hashed));
+      const to = path.join(dir, path.basename(stable));
+      if (!fs.existsSync(from)) { console.error("ERROR: manifest names missing bundle " + hashed); process.exit(1); }
+      fs.copyFileSync(from, to);
+      console.log("    " + path.basename(stable) + " <- " + path.basename(hashed));
+    }
+  ' "$BUILD_DIR/public/js"
+fi
 
 echo "==> Stripping source maps (defense in depth)..."
 find "$BUILD_DIR/public/js" -name '*.map' -delete 2>/dev/null || true

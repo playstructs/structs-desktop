@@ -40,14 +40,14 @@ impl StructsMcpHandler {
         vec![
             Tool::new(
                 "structs_action",
-                "Execute a game action. Handles preflight checks and transaction signing. Actions: explore, build, mine, refine, attack, defend, activate, deactivate, move_fleet, transfer, deploy, raid, update_primary_reactor. Provide action name and args. Every action except resync changes game state on the chain; resync with hard: true reloads the app page and needs confirm: true. Send an action only when the user asked for it, and a soft resync only when the app's state is stale.",
+                "Execute a game action. Handles preflight checks and transaction signing. Actions: explore, build, mine, refine, attack, defend, activate, deactivate, move_fleet, transfer, deploy, raid, update_primary_reactor, rank_quote {target_rank, guild_id?} (read-only price of a better guild rank, or admission, in the guild's token), rank_purchase {target_rank, guild_id?, max_price?}, found_guild {reactor_id, endpoint, entry_substation_id} (previews unless confirm: true; costs 2 Alpha). Provide action name and args. Every action except resync, rank_quote and an unconfirmed found_guild changes game state on the chain; resync with hard: true reloads the app page and needs confirm: true. Send an action only when the user asked for it, and a soft resync only when the app's state is stale.",
                 schema(serde_json::json!({
                     "type": "object",
                     "properties": {
                         "action": {
                             "type": "string",
                             "description": "Action to perform",
-                            "enum": ["explore", "build", "mine", "refine", "attack", "defend", "activate", "deactivate", "move_fleet", "transfer", "deploy", "raid", "update_primary_reactor", "resync"]
+                            "enum": ["explore", "build", "mine", "refine", "attack", "defend", "activate", "deactivate", "move_fleet", "transfer", "deploy", "raid", "update_primary_reactor", "rank_quote", "rank_purchase", "found_guild", "resync"]
                         },
                         "args": {
                             "type": "object",
@@ -174,7 +174,7 @@ impl StructsMcpHandler {
                         "limit": { "type": "integer", "description": "roster: players per page (default 50, max 500)." },
                         "offset": { "type": "integer", "description": "roster: players to skip (paging; the reply names the next offset)." },
                         "action": { "type": "string", "description": "act: explore|build|activate|deactivate|deploy|defend|attack|player_send (direct) | mine|refine|raid (PoW, auto-completes)." },
-                        "args": { "type": "object", "description": "act: action args (same shapes as structs_action, except raid, which takes {fleet_id?, target_id} — fleet_id defaults to the acting player's own fleet; e.g. attack {attacker_id,target_id,weapon}, build {struct_type,ambit,slot}, player_send {to,amount})." }
+                        "args": { "type": "object", "description": "act: action args (same shapes as structs_action, except raid, which takes {fleet_id?, target_id} — fleet_id defaults to the acting player's own fleet; e.g. attack {attacker_id,target_id,weapon}, build {struct_type,ambit,slot}, player_send {to: player/guild id or registered address, amount})." }
                     },
                     "required": ["command"]
                 })),

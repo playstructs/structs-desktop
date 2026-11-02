@@ -73,7 +73,7 @@
     ['Command', ['help', 'next', 'alerts', 'watchlist', 'feed']],
     ['Explore', ['player', 'record', 'guild', 'members', 'planet', 'map', 'inspector', 'sheet', 'chart', 'people', 'stats', 'onboarding']],
     ['Armada', ['replication', 'armada', 'ops', 'build', 'fleet', 'pow', 'tasks', 'solve', 'queue', 'results', 'crew', 'crewpay']],
-    ['Industry', ['energy', 'grid', 'brownout', 'halt', 'allocations', 'fuel', 'market', 'book', 'ore', 'banks', 'gt', 'bank', 'wallet', 'deliver']],
+    ['Industry', ['energy', 'grid', 'brownout', 'halt', 'allocations', 'fuel', 'market', 'book', 'ore', 'banks', 'gt', 'bank', 'rank', 'found', 'wallet', 'deliver']],
     ['War', ['scout', 'tally', 'posture', 'targets', 'raids', 'log', 'grudges', 'vetoes', 'incidents']],
     ['System', ['health', 'sounds']],
   ];
@@ -1556,7 +1556,7 @@
     SOUNDS: ['sounds'], SFX: ['sounds'], AUDIO: ['sounds'],
     MKT: ['market'], MARKET: ['market'], PEOPLE: ['people'], TAPE: ['feed'], FLOW: ['feed'],
     DELIVER: ['deliver'], PAY: ['deliver'], SEND: ['deliver'], GT: ['gt', 'id'], GUILD: ['guild', 'id'],
-    BANKS: ['banks'], BANK: ['bank'], MINT: ['bank'], REDEEM: ['bank'], SHEET: ['sheet', 'id'], TS: ['sheet', 'id'], TEARSHEET: ['sheet', 'id'],
+    BANKS: ['banks'], BANK: ['bank'], MINT: ['bank'], REDEEM: ['bank'], RANK: ['rank', 'optid'], FOUND: ['found'], SHEET: ['sheet', 'id'], TS: ['sheet', 'id'], TEARSHEET: ['sheet', 'id'],
     PLAYER: ['player', 'id'], MAP: ['map', 'id'], PLANET: ['planet', 'id'], INSPECT: ['inspector', 'id'], WATCH: ['watchlist', 'ids'],
     // The structs.app link words (docs/links.md): an energy provider's offer and
     // a reactor have no card of their own, so they open in the inspector.
@@ -3148,6 +3148,7 @@
         }, {}));
         host.appendChild(doorRow([
           { label: 'Guild token', onClick: function () { add('gt', { id: p.id }); } },
+          { label: 'Buy a rank', onClick: function () { add('rank', { id: p.id }); } },
           { label: 'Tearsheet', onClick: function () { add('sheet', { id: p.id }); } },
         ]));
       });
@@ -4057,7 +4058,7 @@
       go.href = 'javascript:void(0)';
       form.appendChild(go);
       host.appendChild(form);
-      var alpha, token, denom, amount;
+      var alpha, token, denom, amount, minAlpha;
       function paint() {
         fields.innerHTML = '';
         if (readControl(side) === 'mint') {
@@ -4068,8 +4069,10 @@
         } else {
           denom = H.textBox('uguild.', 'uguild.0-1', function () {});
           amount = H.textBox('', 'tokens', function () {}); amount.setAttribute('inputmode', 'numeric');
+          minAlpha = H.textBox('', 'ualpha', function () {}); minAlpha.setAttribute('inputmode', 'numeric');
           fields.appendChild(H.field('Token denom', denom));
           fields.appendChild(H.field('Tokens to redeem', amount));
+          fields.appendChild(H.field('Minimum back (ualpha)', minAlpha));
         }
       }
       paint();
@@ -4082,9 +4085,9 @@
           if (!args.amountAlpha || !args.amountToken) { note.appendChild(H.stateBlock('error', 'Both figures are required.')); return; }
           summary = 'Mint ' + H.fmtInt(args.amountToken) + ' tokens for ' + H.fmtInt(args.amountAlpha) + ' ualpha (' + H.fmtAlpha(args.amountAlpha) + ')';
         } else {
-          args = { denom: readControl(denom), amount: Number(readControl(amount)) || 0 };
-          if (!/^uguild\.\d+-\d+$/.test(args.denom) || !args.amount) { note.appendChild(H.stateBlock('error', 'A guild token denom and an amount are required.')); return; }
-          summary = 'Redeem ' + H.fmtInt(args.amount) + ' ' + args.denom;
+          args = { denom: readControl(denom), amount: Number(readControl(amount)) || 0, minAmountAlpha: Number(readControl(minAlpha)) || 0 };
+          if (!/^uguild\.\d+-\d+$/.test(args.denom) || !args.amount || !args.minAmountAlpha) { note.appendChild(H.stateBlock('error', 'A guild token denom, an amount and a minimum are required.')); return; }
+          summary = 'Redeem ' + H.fmtInt(args.amount) + ' ' + args.denom + ' for at least ' + H.fmtInt(args.minAmountAlpha) + ' ualpha (' + H.fmtAlpha(args.minAmountAlpha) + ')';
         }
         var send = function () {
           H.busy(go, true);
@@ -4092,7 +4095,7 @@
             note.appendChild(H.stateBlock('ok', summary + ' — signed' + (r && r.tx ? ' · ' + r.tx : '')));
           }).catch(function (e) { note.appendChild(H.stateBlock('error', String(e))); }).then(function () { H.busy(go, false); });
         };
-        if (H.confirmModal) H.confirmModal('Guild bank', H.el('div', null, summary + '. This spends from your primary.'), 'Sign', send); else send();
+        if (H.confirmModal) H.confirmModal('Guild bank', H.el('div', null, summary + (mint ? '. This spends from your guild vault.' : '. This spends from your vault.')), 'Sign', send); else send();
       });
     },
   });

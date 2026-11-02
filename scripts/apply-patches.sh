@@ -39,6 +39,12 @@ sed -i.bak '/this.wsUrl = this.publicEndpoint/,/: `ws:\/\/${window.location.host
   s|this.wsUrl = this.publicEndpoint|this.wsUrl = window.__STRUCTS_CONFIG__?.clientWs \|\| (this.publicEndpoint|
   s|: `ws://${window.location.hostname}:26657`;|: `ws://${window.location.hostname}:26657`);|
 }' "$BUILD_DIR/js/managers/SigningClientManager.js"
+# v0.22 webapp (0.22.0-migration) shape: the constructor takes an explicit
+# `wsUrl` for isolated client instances and parenthesizes the ternary itself:
+#   this.wsUrl = wsUrl ?? (this.publicEndpoint ? ... : ...);
+# An explicit constructor endpoint still wins; our config comes next.
+sed -i.bak 's|this.wsUrl = wsUrl ?? (this.publicEndpoint|this.wsUrl = wsUrl ?? (window.__STRUCTS_CONFIG__?.clientWs \|\| null) ?? (this.publicEndpoint|' \
+  "$BUILD_DIR/js/managers/SigningClientManager.js"
 verify_patched "$BUILD_DIR/js/managers/SigningClientManager.js" '__STRUCTS_CONFIG__?.clientWs' "SigningClientManager.js clientWs override"
 
 echo "    Patching banner ViewModels (canvas renderer for crisp pixel art)..."
@@ -99,6 +105,15 @@ try {
         if (!layout || layout.classList.contains('hidden')) return false; // menu not open
         var r = MenuPage.router;
         if (!r || !r.currentController) return false;
+        // v0.22: goto aborts the page's navigation work and starts it again.
+        // A waiting screen (Generic.menuWaiting, the router's own
+        // non-restorable set) is tracking a send — re-rendering it strands
+        // it — and a form the player is typing in would lose the input.
+        var key = r.currentController + '.' + r.currentPage;
+        if (r.currentPage === 'menuWaiting'
+            || (r.nonRestorablePages && r.nonRestorablePages.has && r.nonRestorablePages.has(key))) return false;
+        var focused = document.activeElement;
+        if (focused && layout.contains(focused) && /^(INPUT|TEXTAREA|SELECT)$/.test(focused.tagName)) return false;
         r.goto(r.currentController, r.currentPage, r.currentOptions);
         return true;
       } catch (e) { console.warn('[reactor] refreshMenu', e); return false; }
@@ -780,13 +795,18 @@ try {
     if (!tx) return null;
     let preview = '';
     let truncated = false;
+    // v0.22 intent transactions carry `intent` and build `message` only at
+    // send time (null until then); a gameplay intent names its own typeUrl.
+    const intent = tx.intent || null;
     try {
-      preview = JSON.stringify(tx.message && tx.message.payload) || '';
+      preview = JSON.stringify((tx.message && tx.message.payload) || (intent && (intent.payload || intent))) || '';
       if (preview.length > 240) { preview = preview.slice(0, 240); truncated = true; }
     } catch (e) { preview = '(unserializable)'; }
-    const typeUrl = (tx.message && tx.message.typeUrl) || '';
+    const typeUrl = (tx.message && tx.message.typeUrl) || (intent && intent.typeUrl)
+      || (intent ? 'intent:' + intent.kind : '');
     return {
       id: tx.id,
+      intent_kind: intent ? intent.kind : null,
       type_url: typeUrl,
       type_short: typeUrl.replace(/^.*Msg/, ''),
       payload_preview: preview,
@@ -821,12 +841,15 @@ try {
         in_flight: __txJson(q.inFlight),
         action_queue: (q.actionQueue || []).map(__txJson),
         immediate_queue: (q.immediateQueue || []).map(__txJson),
+        // v0.22: sends whose outcome is not yet known (status `unknown`).
+        unresolved: q.unresolved instanceof Map ? [...q.unresolved.values()].map(__txJson) : [],
         etas: etas,
         percents: percents,
       };
     },
     // Thin dispatch to the queue's existing mutation API. All ops return a
-    // boolean (in-flight cancel returns false — surfaced, not thrown). A fresh
+    // boolean, or a Promise of one (v0.22 cancel); in-flight cancel answers
+    // false — surfaced, not thrown. A fresh
     // snapshot rides back so the board repaints in one round-trip.
     mutate(op, id, newIndex) {
       let ok = false;
@@ -835,6 +858,11 @@ try {
       else if (op === 'move_down') ok = signingClientManager.moveActionItemDown(id);
       else if (op === 'reorder') ok = signingClientManager.reorderActionQueue(id, newIndex);
       else throw new Error('unknown txq op ' + op);
+      // v0.22 webapp: cancelQueueItem is async (journal-locked) and resolves
+      // to whether the item was actually cancelled. Snapshot after it lands.
+      if (ok && typeof ok.then === 'function') {
+        return ok.then((v) => ({ ok: !!v, snapshot: this.snapshot() }));
+      }
       return { ok: !!ok, snapshot: this.snapshot() };
     },
   };

@@ -184,6 +184,111 @@ pub fn event_from_payload(nats_subject: &str, payload: &[u8]) -> Option<GameEven
     Some(GameEvent { category, subject, detail: Value::Object(detail), timestamp: now_ms() as f64 })
 }
 
+// ── oversized planet activity (v0.22 stubs) ────────────────────────────
+
+/// The key of a planet-activity row that Postgres NOTIFY could not carry.
+/// v0.22's indexer sends only `{stub, subject, planet_id, player_id, seq,
+/// time, category}` when a row exceeds 8 KB — the big multi-shot attacks.
+#[derive(Debug, PartialEq)]
+pub struct ActivityStub {
+    pub planet: String,
+    pub player: String,
+    pub seq: String,
+    pub time: String,
+    pub category: String,
+}
+
+/// `Some` when `event` is such a stub (a key with no detail), with the key
+/// checked the way the v0.22 webapp checks it before asking for the row.
+pub fn activity_stub(event: &GameEvent) -> Option<ActivityStub> {
+    let d = event.detail.as_object()?;
+    let is_stub = match d.get("stub") {
+        Some(Value::Bool(b)) => *b,
+        Some(Value::String(s)) => s == "true",
+        _ => false,
+    };
+    if !is_stub || !event.subject.starts_with("structs.planet.") {
+        return None;
+    }
+    let text = |k: &str| match d.get(k) {
+        Some(Value::String(s)) => Some(s.clone()),
+        Some(Value::Number(n)) => Some(n.to_string()),
+        _ => None,
+    };
+    let stub = ActivityStub {
+        planet: text("planet_id")?,
+        player: text("player_id")?,
+        seq: text("seq")?,
+        time: text("time")?,
+        category: event.category.clone(),
+    };
+    let ok = crate::mcp::types::PlanetId::parse(&stub.planet).is_ok()
+        && crate::mcp::types::PlayerId::parse(&stub.player).is_ok()
+        && event.subject == format!("structs.planet.{}.{}", stub.planet, stub.player)
+        && !stub.seq.is_empty()
+        && stub.seq.len() <= 10
+        && stub.seq.bytes().all(|b| b.is_ascii_digit())
+        && !stub.time.is_empty()
+        && stub.category.bytes().all(|b| b.is_ascii_lowercase() || b == b'_');
+    ok.then_some(stub)
+}
+
+/// Fetch the full row behind a stub and turn it into the event the stream
+/// would have carried. The row must match its key (planet, seq, time,
+/// category) — the same refusal the v0.22 webapp applies.
+async fn resolve_stub(stub: &ActivityStub, subject: &str) -> Result<GameEvent, String> {
+    let client = crate::mcp::cosmos_client::CosmosClient::new();
+    let path = format!(
+        "/api/planet-activity/planet/{}/event/{}?time={}",
+        stub.planet,
+        stub.seq,
+        crate::mcp::cosmos_client::encode_pagination_key(&stub.time)
+    );
+    let env = client.guild.get_envelope(&path).await?;
+    let row = env.get("data").cloned().unwrap_or(Value::Null);
+    let field = |k: &str| match row.get(k) {
+        Some(Value::String(s)) => s.clone(),
+        Some(Value::Number(n)) => n.to_string(),
+        _ => String::new(),
+    };
+    if field("planet_id") != stub.planet
+        || field("seq") != stub.seq
+        || field("time") != stub.time
+        || field("category") != stub.category
+        || !row.get("detail").is_some_and(|d| d.is_object())
+    {
+        return Err(format!("planet activity {}#{} does not match its notification", stub.planet, stub.seq));
+    }
+    let mut obj = row.as_object().cloned().unwrap_or_default();
+    obj.insert("subject".into(), json!(subject));
+    obj.insert("player_id".into(), json!(stub.player));
+    let bytes = serde_json::to_vec(&Value::Object(obj)).map_err(|e| e.to_string())?;
+    event_from_payload(subject, &bytes).ok_or_else(|| "resolved row has no category".to_string())
+}
+
+/// Ingest one GRASS event, first fetching the full row behind an oversized
+/// planet-activity stub. Resolution runs off the caller's path (the NATS
+/// loop must not wait on HTTP); a stub that cannot be resolved is logged and
+/// dropped — consumers read missing fields as zeros, which is worse than no
+/// event.
+pub fn ingest_resolving(app: &tauri::AppHandle, event: GameEvent) {
+    let Some(stub) = activity_stub(&event) else {
+        crate::mcp::event_buffer::ingest(app, event);
+        return;
+    };
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        match resolve_stub(&stub, &event.subject).await {
+            Ok(full) => crate::mcp::event_buffer::ingest(&app, full),
+            Err(e) => tlog(
+                "grass",
+                Sev::Warn,
+                format!("oversized {} on {} (seq {}) not resolved: {e}", stub.category, stub.planet, stub.seq),
+            ),
+        }
+    });
+}
+
 // ── supervisor ──────────────────────────────────────────────────────────
 
 fn configured_url() -> Option<String> {
@@ -307,7 +412,7 @@ async fn run_connection(app: &tauri::AppHandle, url: &str) -> Result<(), String>
         last_rx = now_ms();
         count_message();
         if let Some(event) = event_from_payload(msg.subject.as_str(), &msg.payload) {
-            crate::mcp::event_buffer::ingest(app, event);
+            ingest_resolving(app, event);
         }
     }
 }
@@ -357,6 +462,20 @@ mod tests {
         let e = event_from_payload(msg.subject.as_str(), &msg.payload).expect("block payload is an event");
         assert_eq!(e.category, "block");
         assert!(e.detail["height"].as_u64().unwrap_or(0) > 2_400_000);
+    }
+
+    #[test]
+    fn oversized_activity_is_recognised_by_its_key() {
+        let stub = br#"{"stub":true,"subject":"structs.planet.2-28299.1-1053","planet_id":"2-28299","player_id":"1-1053","seq":34,"time":"2026-11-01T12:00:00.123Z","category":"struct_attack"}"#;
+        let e = event_from_payload("structs.planet.2-28299.1-1053", stub).unwrap();
+        let k = activity_stub(&e).expect("a stub");
+        assert_eq!((k.planet.as_str(), k.player.as_str(), k.seq.as_str()), ("2-28299", "1-1053", "34"));
+        assert_eq!(k.category, "struct_attack");
+        // A full row is not a stub; a key that disagrees with its subject is refused.
+        let full = br#"{"subject":"structs.planet.2-28299.1-1053","category":"struct_status","seq":34,"time":"t","detail":{"status":7}}"#;
+        assert!(activity_stub(&event_from_payload("x", full).unwrap()).is_none());
+        let lying = br#"{"stub":"true","subject":"structs.planet.2-1.1-1","planet_id":"2-9","player_id":"1-1","seq":"1","time":"t","category":"struct_attack"}"#;
+        assert!(activity_stub(&event_from_payload("x", lying).unwrap()).is_none());
     }
 
     #[test]

@@ -85,8 +85,10 @@ pub async fn execute(
         "raid" => action_raid(app_handle, registry, &params.args).await,
         "update_primary_reactor" => action_update_primary_reactor(app_handle, &params.args).await,
         "resync" => action_resync(app_handle, &params.args).await,
+        "rank_quote" | "rank_purchase" => action_rank(app_handle, params.action.as_str(), &params.args).await,
+        "found_guild" => action_found_guild(app_handle, &params.args).await,
         other => vec![Content::text(format!(
-            "Unknown action '{}'. Available: explore, mine, refine, build, activate, deactivate, attack, defend, move_fleet, transfer, deploy, raid, update_primary_reactor, resync",
+            "Unknown action '{}'. Available: explore, mine, refine, build, activate, deactivate, attack, defend, move_fleet, transfer, deploy, raid, update_primary_reactor, rank_quote, rank_purchase, found_guild, resync",
             other
         ))],
     }
@@ -617,45 +619,47 @@ async fn action_transfer(app_handle: &tauri::AppHandle, args: &Value) -> Vec<Con
 
     if to_address.is_empty() || amount.is_empty() {
         return vec![Content::text(
-            "Error: 'to' (address) and 'amount' (e.g., '1000000ualpha') required.",
+            "Error: 'to' (player/guild id or address) and 'amount' (e.g., '1000000ualpha') required.",
         )];
     }
 
-    let from_address = {
-        let gs = GAME_STATE.read().unwrap();
-        gs.wallet_address.clone().unwrap_or_default()
+    // "1000000" or "1000000ualpha" or "500uguild.0-5".
+    let Some((digits, denom)) = split_amount(amount) else {
+        return vec![Content::text(format!(
+            "Transfer refused: amount '{amount}' is not a positive integer with an optional denom"
+        ))];
     };
 
-    // Both addresses must be well-formed before anything reaches a signer:
-    // the chain does not validate MsgPlayerSend's toAddress, so a malformed
-    // destination is a silent burn, not a reject.
-    if let Err(e) = crate::mcp::send_guard::validate_addr("sender", &from_address)
-        .and_then(|_| crate::mcp::send_guard::validate_addr("destination", to_address))
+    // v0.22: the primary pays from its vault — vault→vault to a player/guild
+    // (by id or registered address), or vault→address for anyone else. The
+    // Pay window's execute path re-runs its preview gates server-side.
+    match crate::mcp::tools::board_pages::mcp_transfer_execute_impl(
+        app_handle.clone(),
+        None,
+        to_address.to_string(),
+        denom.clone(),
+        digits as f64,
+    )
+    .await
     {
-        return vec![Content::text(format!("Transfer refused: {e}"))];
-    }
-
-    let tx_args = json!({
-        "action_type": "bank_send",
-        "from_address": from_address,
-        "to_address": to_address,
-        "amount": amount,
-    });
-
-    match crate::mcp::tx_retry::submit_once(app_handle, "bank_send", tx_args, "mcp:bank_send").await {
-        Ok(resp) if resp.success => vec![Content::text(format!(
-            "Transfer sent: {} to {}\nTx hash: {}{}",
-            amount,
-            to_address,
-            resp.tx_hash.unwrap_or_else(|| "pending".to_string()),
+        Ok(_) => vec![Content::text(format!(
+            "Transfer sent: {digits}{denom} to {to_address}{}",
             approval_surface("transfer", 1, to_address, "irreversible (funds leave wallet)", amount)
         ))],
-        Ok(resp) => vec![Content::text(format!(
-            "Transfer failed: {}",
-            translate_error(&resp.error.unwrap_or_else(|| "unknown error".to_string()))
-        ))],
-        Err(e) => vec![Content::text(format!("Error: {}", e))],
+        Err(e) => vec![Content::text(format!("Transfer failed: {}", translate_error(&e)))],
     }
+}
+
+/// Split "1000000ualpha" into (1000000, "ualpha"); a bare number is ualpha.
+fn split_amount(raw: &str) -> Option<(u64, String)> {
+    let t = raw.trim();
+    let cut = t.find(|c: char| !c.is_ascii_digit()).unwrap_or(t.len());
+    let n: u64 = t[..cut].parse().ok().filter(|n| *n > 0)?;
+    let denom = t[cut..].trim();
+    let denom = if denom.is_empty() { "ualpha" } else { denom };
+    (denom.starts_with(|c: char| c.is_ascii_lowercase())
+        && denom.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '/' | '_')))
+        .then(|| (n, denom.to_string()))
 }
 
 async fn action_deploy(app_handle: &tauri::AppHandle, args: &Value) -> Vec<Content> {
@@ -814,24 +818,62 @@ async fn action_update_primary_reactor(app_handle: &tauri::AppHandle, args: &Val
         )];
     }
 
-    let tx_args = json!({
-        "action_type": "guild_update_primary_reactor",
-        "guild_id": guild_id,
-        "reactor_id": reactor_id,
-    });
-
-    match crate::mcp::tx_retry::submit_once(app_handle, "guild_update_primary_reactor", tx_args, "mcp:guild_update_primary_reactor").await {
-        Ok(resp) if resp.success => vec![Content::text(format!(
+    match crate::mcp::tx_retry::sign_as_primary(
+        app_handle,
+        "/structs.structs.MsgGuildUpdatePrimaryReactor",
+        json!({ "guildId": guild_id, "reactorId": reactor_id }),
+        "mcp:guild_update_primary_reactor",
+    )
+    .await
+    {
+        Ok(resp) => vec![Content::text(format!(
             "Guild {} primary reactor updated to {}.\nTx hash: {}",
             guild_id,
             reactor_id,
-            resp.tx_hash.unwrap_or_else(|| "pending".to_string())
+            resp.get("transactionHash").and_then(|h| h.as_str()).unwrap_or("pending")
         ))],
-        Ok(resp) => vec![Content::text(format!(
-            "Update primary reactor failed: {}",
-            translate_error(&resp.error.unwrap_or_else(|| "unknown error".to_string()))
-        ))],
-        Err(e) => vec![Content::text(format!("Error: {}", e))],
+        Err(e) => vec![Content::text(format!("Update primary reactor failed: {}", translate_error(&e)))],
+    }
+}
+
+/// Quote or buy a better guild rank (v0.22), or admission to a guild that
+/// sells it. `{target_rank, guild_id?, max_price?}`; the price is in base
+/// units of the guild's token (`uguild.<guild>`) from your vault.
+async fn action_rank(app_handle: &tauri::AppHandle, action: &str, args: &Value) -> Vec<Content> {
+    let Some(target) = args.get("target_rank").and_then(|v| v.as_u64().or_else(|| v.as_str().and_then(|s| s.parse().ok()))) else {
+        return crate::mcp::handler::fail("Error: target_rank required (lower is better; e.g. 99).".to_string());
+    };
+    let guild_id = args.get("guild_id").and_then(|v| v.as_str()).map(String::from);
+    let max_price = args.get("max_price").and_then(|v| v.as_str().and_then(|s| s.parse().ok()).or_else(|| v.as_u64().map(u128::from)));
+    let res = if action == "rank_quote" {
+        crate::mcp::guild_economy::quote_rank(guild_id, target).await
+    } else {
+        crate::mcp::guild_economy::purchase_rank(app_handle, guild_id, target, max_price).await
+    };
+    match res {
+        Ok(v) => vec![Content::text(serde_json::to_string_pretty(&v).unwrap_or_default())],
+        Err(e) => crate::mcp::handler::fail(format!("{action} failed: {}", translate_error(&e))),
+    }
+}
+
+/// Found a guild (v0.22 paid route): `{reactor_id, endpoint,
+/// entry_substation_id}`. Without `confirm: true` it only previews — founding
+/// spends 2 Alpha from the vault and burns half of it.
+async fn action_found_guild(app_handle: &tauri::AppHandle, args: &Value) -> Vec<Content> {
+    let s = |k: &str| args.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let (reactor, endpoint, sub) = (s("reactor_id"), s("endpoint"), s("entry_substation_id"));
+    let confirmed = args.get("confirm").and_then(|v| v.as_bool()).unwrap_or(false);
+    let res = if confirmed {
+        crate::mcp::guild_economy::found_guild(app_handle, &reactor, &endpoint, &sub).await
+    } else {
+        crate::mcp::guild_economy::preview_found_guild(&reactor, &endpoint, &sub).await.map(|mut p| {
+            p["note"] = json!("preview only — send confirm:true to found the guild (spends 2 Alpha, 1 burned)");
+            p
+        })
+    };
+    match res {
+        Ok(v) => vec![Content::text(serde_json::to_string_pretty(&v).unwrap_or_default())],
+        Err(e) => crate::mcp::handler::fail(format!("found_guild failed: {}", translate_error(&e))),
     }
 }
 
@@ -996,6 +1038,16 @@ fn format_power(milliwatts: f64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn transfer_amounts_split_into_digits_and_denom() {
+        assert_eq!(split_amount("1000000"), Some((1_000_000, "ualpha".into())));
+        assert_eq!(split_amount("500uguild.0-5"), Some((500, "uguild.0-5".into())));
+        assert_eq!(split_amount(" 7ualpha "), Some((7, "ualpha".into())));
+        assert_eq!(split_amount("0ualpha"), None);
+        assert_eq!(split_amount("ualpha"), None);
+        assert_eq!(split_amount("1.5ualpha"), None);
+    }
 
     fn empty_type() -> StructTypeInfo {
         StructTypeInfo {

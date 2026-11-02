@@ -5,6 +5,15 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+/// Number-or-decimal-string → u64 for a required field. The v0.22 webapp keeps
+/// every 64-bit work value (`block_start`, `difficulty_target`,
+/// `block_checkpoint`, …) as an exact decimal string; older builds sent
+/// JSON numbers. Both must deserialize.
+fn lenient_u64<'de, D: serde::Deserializer<'de>>(d: D) -> Result<u64, D::Error> {
+    crate::mcp::types::numeric::<D, u64>(d)?
+        .ok_or_else(|| serde::de::Error::custom("missing u64"))
+}
+
 /// Parameters received from the JS Worker shim.
 /// Mirrors all TaskState fields needed to run the hasher and reconstruct state for JS.
 #[derive(Debug, Clone, Deserialize)]
@@ -17,25 +26,41 @@ pub struct TaskParams {
     pub identity: Option<String>,
     pub prefix: String,
     pub postfix: String,
+    #[serde(deserialize_with = "lenient_u64")]
     pub nonce_start: u64,
+    #[serde(deserialize_with = "lenient_u64")]
     pub nonce_current: u64,
+    #[serde(deserialize_with = "lenient_u64")]
     pub iterations: u64,
+    #[serde(deserialize_with = "lenient_u64")]
     pub iterations_since_last_start: u64,
+    #[serde(default, deserialize_with = "crate::mcp::types::numeric")]
     pub difficulty_start: Option<u64>,
+    #[serde(deserialize_with = "lenient_u64")]
     pub difficulty_target: u64,
+    #[serde(deserialize_with = "lenient_u64")]
     pub block_start: u64,
+    #[serde(deserialize_with = "lenient_u64")]
     pub block_checkpoint: u64,
     /// Milliseconds since epoch
     pub block_checkpoint_time: f64,
+    #[serde(default, deserialize_with = "crate::mcp::types::numeric")]
     pub block_current_estimated: Option<u64>,
     pub result_exists: bool,
     pub result_message: Option<String>,
     pub result_nonce: Option<String>,
     pub result_hash: Option<String>,
+    #[serde(deserialize_with = "lenient_u64")]
     pub result_difficulty: u64,
     pub estimated_hashrate: f64,
+    #[serde(deserialize_with = "lenient_u64")]
     pub estimated_block_start_offset: u64,
     pub status: String,
+    /// v0.22 webapp: indexed height the task's rules (difficulty_target) were
+    /// read at. Opaque to the hasher; echoed back so TaskManager keeps its
+    /// rule-precedence and proof-retry decisions across worker replies.
+    #[serde(default, deserialize_with = "crate::mcp::types::numeric")]
+    pub rules_height: Option<u64>,
 }
 
 impl TaskParams {
@@ -91,6 +116,7 @@ impl TaskParams {
             result_difficulty: 0,
             estimated_hashrate: 300.0,
             estimated_block_start_offset: 0,
+            rules_height: None,
             status: "starting".to_string(),
         }
     }
@@ -215,6 +241,8 @@ pub struct TaskStateSnapshot {
     /// Sent as ms epoch — JS shim converts to Date
     pub last_status_change_time: f64,
     pub process_end_time: Option<f64>,
+    /// Decimal string, as the v0.22 webapp keeps it; null when unknown.
+    pub rules_height: Option<String>,
 }
 
 impl TaskStateSnapshot {
@@ -249,6 +277,7 @@ impl TaskStateSnapshot {
             work_start_time: progress.work_start_time_ms,
             last_status_change_time: progress.last_status_change_time_ms,
             process_end_time: progress.process_end_time_ms,
+            rules_height: params.rules_height.map(|h| h.to_string()),
         }
     }
 }
@@ -305,4 +334,35 @@ pub fn now_millis() -> f64 {
         .unwrap()
         .as_secs_f64()
         * 1000.0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn worker_state(block_start: serde_json::Value, target: serde_json::Value) -> serde_json::Value {
+        serde_json::json!({
+            "status": "starting", "object_id": "5-12", "target_id": null, "object_type": "struct",
+            "task_type": "BUILD", "identity": null, "prefix": "5-12BUILD3374000NONCE", "postfix": "",
+            "nonce_start": 123, "nonce_current": 123, "iterations": 0, "iterations_since_last_start": 0,
+            "difficulty_start": null, "difficulty_target": target, "rules_height": "3374001",
+            "block_start": block_start, "block_checkpoint": block_start, "block_checkpoint_time": 1.0,
+            "block_current_estimated": 3374000, "result_exists": false, "result_message": null,
+            "result_nonce": null, "result_hash": null, "result_difficulty": 0,
+            "estimated_hashrate": 300.0, "estimated_block_start_offset": 0
+        })
+    }
+
+    #[test]
+    fn task_params_accept_v022_string_work_values() {
+        let p: TaskParams = serde_json::from_value(worker_state("3374000".into(), "10".into())).unwrap();
+        assert_eq!((p.block_start, p.block_checkpoint, p.difficulty_target), (3_374_000, 3_374_000, 10));
+        assert_eq!(p.rules_height, Some(3_374_001));
+    }
+
+    #[test]
+    fn task_params_still_accept_legacy_numbers() {
+        let p: TaskParams = serde_json::from_value(worker_state(3_374_000.into(), 700.into())).unwrap();
+        assert_eq!((p.block_start, p.difficulty_target), (3_374_000, 700));
+    }
 }

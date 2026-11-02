@@ -168,6 +168,10 @@ fn main() {
             mcp::terminal::terminal_guild_banks,
             mcp::terminal::terminal_guild_bank_history,
             mcp::terminal::terminal_guild_bank_redeem,
+            mcp::terminal::terminal_rank_quote,
+            mcp::terminal::terminal_rank_purchase,
+            mcp::terminal::terminal_found_guild_preview,
+            mcp::terminal::terminal_found_guild,
             mcp::terminal::terminal_series,
             mcp::terminal::terminal_series_metrics,
             mcp::charts::terminal_chart_catalog,
@@ -301,6 +305,8 @@ fn main() {
             mcp::tools::board_pages::mcp_allocation_set_power,
             mcp::tools::board_pages::mcp_allocation_connect,
             mcp::tools::board_pages::mcp_allocation_create,
+            mcp::tools::board_pages::mcp_collect_retained_preview,
+            mcp::tools::board_pages::mcp_collect_retained,
             mcp::tools::infusions::mcp_infusions,
             mcp::tools::infusions::mcp_infusion_preview,
             mcp::tools::infusions::mcp_infusion_infuse,
@@ -586,7 +592,9 @@ try {{
 (function() {{
     const originalFetch = window.fetch;
     window.fetch = async function(input, init) {{
-        const url = (typeof input === 'string') ? input : input.url;
+        const url = (typeof input === 'string') ? input
+            : (input instanceof URL) ? input.href
+            : input.url;
 
         // Skip Tauri's own IPC transport. On Windows WebView2, Tauri 2 implements
         // tauri.core.invoke() on top of `fetch('http://ipc.localhost/...')`. If we
@@ -607,8 +615,15 @@ try {{
 
         // Only proxy absolute HTTP URLs (not relative, not ws://, not blob:, etc.)
         if (url.startsWith('http://') || url.startsWith('https://')) {{
+            const method = ((init && init.method) || (input instanceof Request && input.method) || 'GET').toUpperCase();
+            const signal = (init && init.signal) || (input instanceof Request ? input.signal : null);
+            const aborted = () => new DOMException('The operation was aborted.', 'AbortError');
+            // A direct fetch after a proxy failure is a SECOND request. Only
+            // idempotent methods may take it: a POST (the v0.22 logout, a
+            // signup) that the proxy already sent must never go out twice.
+            const idempotent = method === 'GET' || method === 'HEAD' || method === 'OPTIONS';
+            if (signal && signal.aborted) throw aborted();
             try {{
-                const method = (init && init.method) || 'GET';
                 const headers = {{}};
                 if (init && init.headers) {{
                     const h = (init.headers instanceof Headers) ? Object.fromEntries(init.headers) : init.headers;
@@ -628,15 +643,28 @@ try {{
                     return originalFetch.call(this, input, init);
                 }}
 
-                const result = await tauri.core.invoke('proxy_fetch', {{
+                const call = tauri.core.invoke('proxy_fetch', {{
                     req: {{ url, method, headers, body }}
                 }});
+                // Honour the caller's AbortSignal (the v0.22 webapp aborts page
+                // work on navigation and bounds every request with one). The
+                // proxied request may still complete in Rust; its answer is
+                // simply not delivered, exactly like an aborted fetch.
+                const result = signal
+                    ? await Promise.race([call, new Promise((_, rej) =>
+                        signal.addEventListener('abort', () => rej(aborted()), {{ once: true }}))])
+                    : await call;
 
                 return new Response(result.body, {{
                     status: result.status,
                     headers: result.headers,
                 }});
             }} catch (e) {{
+                if ((e && e.name === 'AbortError') || (signal && signal.aborted)) throw aborted();
+                if (!idempotent) {{
+                    console.warn('[Structs Proxy] Proxy failed; not re-sending a ' + method + ':', url, e);
+                    throw new TypeError('Failed to fetch: ' + String((e && e.message) || e));
+                }}
                 console.warn('[Structs Proxy] Proxy failed, falling back to direct fetch:', url, e);
                 return originalFetch.call(this, input, init);
             }}

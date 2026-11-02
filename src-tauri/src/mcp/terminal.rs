@@ -1276,7 +1276,8 @@ fn creator_address() -> Result<String, String> {
 }
 
 /// Mint guild tokens against alpha: `amount_alpha` ualpha goes into the
-/// guild's collateral pool, `amount_token` uguild come out.
+/// guild's collateral pool, `amount_token` uguild come out. Since v0.22 the
+/// Alpha is spent from — and the tokens issued into — the GUILD vault.
 #[tauri::command]
 pub async fn terminal_guild_bank_mint(app: tauri::AppHandle, amount_alpha: u64, amount_token: u64) -> Result<Value, String> {
     if amount_alpha == 0 || amount_token == 0 {
@@ -1291,18 +1292,82 @@ pub async fn terminal_guild_bank_mint(app: tauri::AppHandle, amount_alpha: u64, 
 
 /// Redeem guild tokens for their share of the collateral.
 #[tauri::command]
-pub async fn terminal_guild_bank_redeem(app: tauri::AppHandle, denom: String, amount: u64) -> Result<Value, String> {
+pub async fn terminal_guild_bank_redeem(app: tauri::AppHandle, denom: String, amount: u64, min_amount_alpha: u64) -> Result<Value, String> {
     if amount == 0 {
         return Err("an amount of tokens is required".into());
+    }
+    // v0.22 refuses a zero minimum: the floor is what stops fees or the
+    // collateral ratio from burning tokens for less Alpha than expected.
+    if min_amount_alpha == 0 {
+        return Err("a minimum Alpha return is required".into());
     }
     if !denom.starts_with("uguild.") {
         return Err(format!("{denom} is not a guild token"));
     }
     let creator = creator_address()?;
-    let payload = json!({ "creator": creator, "amountToken": { "denom": denom, "amount": amount.to_string() } });
+    let payload = json!({
+        "creator": creator,
+        "amountToken": { "denom": denom, "amount": amount.to_string() },
+        "minAmountAlpha": min_amount_alpha.to_string(),
+    });
     let res = crate::mcp::tx_retry::sign_with_retry(&app, 0, "/structs.structs.MsgGuildBankRedeem", payload, "terminal guild bank redeem").await?;
-    Ok(json!({ "ok": true, "denom": denom, "amount": amount,
+    Ok(json!({ "ok": true, "denom": denom, "amount": amount, "min_amount_alpha": min_amount_alpha,
                "tx": res.get("transactionHash").and_then(|h| h.as_str()).unwrap_or("(pending)") }))
+}
+
+// ── Guild rank sales and founding (v0.22) ───────────────────────────────────
+//
+// The Terminal's rank and founding tickets. Quotes and previews only read;
+// the two writers re-run them server-side (guild_economy) before signing, so
+// a stale card cannot sign a price it did not show.
+
+/// Price a better rank (or admission) in `guild_id`, default your own guild.
+#[tauri::command]
+pub async fn terminal_rank_quote(guild_id: Option<String>, target_rank: u64) -> Result<Value, String> {
+    crate::mcp::guild_economy::quote_rank(guild_id, target_rank).await
+}
+
+/// Buy the quoted rank. `max_price` (base units, a decimal string — exact)
+/// is the most the card showed; the chain rejects without payment above it.
+#[tauri::command]
+pub async fn terminal_rank_purchase(
+    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+    guild_id: Option<String>,
+    target_rank: u64,
+    max_price: String,
+) -> Result<Value, String> {
+    crate::mcp::tools::board_pages::require_trusted(&window)?;
+    terminal_rank_purchase_impl(app, guild_id, target_rank, max_price).await
+}
+
+pub async fn terminal_rank_purchase_impl(
+    app: tauri::AppHandle,
+    guild_id: Option<String>,
+    target_rank: u64,
+    max_price: String,
+) -> Result<Value, String> {
+    let max: u128 = max_price.trim().parse().map_err(|_| format!("'{max_price}' is not a whole-number price"))?;
+    crate::mcp::guild_economy::purchase_rank(&app, guild_id, target_rank, Some(max)).await
+}
+
+/// What founding a guild would cost and whether it would be accepted.
+#[tauri::command]
+pub async fn terminal_found_guild_preview(reactor_id: String, endpoint: String, entry_substation_id: String) -> Result<Value, String> {
+    crate::mcp::guild_economy::preview_found_guild(&reactor_id, &endpoint, &entry_substation_id).await
+}
+
+/// Found the guild (2 Alpha from your vault, half burned).
+#[tauri::command]
+pub async fn terminal_found_guild(
+    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+    reactor_id: String,
+    endpoint: String,
+    entry_substation_id: String,
+) -> Result<Value, String> {
+    crate::mcp::tools::board_pages::require_trusted(&window)?;
+    crate::mcp::guild_economy::found_guild(&app, &reactor_id, &endpoint, &entry_substation_id).await
 }
 
 /* ── The stat store (`/api/stat/...`) ───────────────────────────────────────

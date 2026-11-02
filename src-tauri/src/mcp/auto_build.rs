@@ -24,7 +24,18 @@ use crate::mcp::cosmos_client::CosmosClient;
 
 const FILENAME: &str = "auto_build.json";
 pub(crate) const SLOTS_PER_AMBIT: usize = 4;
-const BUILD_CHARGE: u64 = 8;
+/// Charge a build initiate needs before the type is chosen: the largest
+/// `buildCharge` in the synced struct catalogue (1 for every type since
+/// v0.22; it was 8). The old constant until the catalogue has synced, so an
+/// unknown never builds early.
+fn build_charge() -> u64 {
+    crate::game_state::GAME_STATE
+        .read()
+        .ok()
+        .and_then(|gs| gs.struct_types.values().filter_map(|t| t.build_charge).max())
+        .filter(|c| *c > 0)
+        .unwrap_or(8)
+}
 
 /// Priority-ordered defensive loadout: (target location_type, ambit, type name,
 /// want-count). Cheap/high-value first (shields, then evasive ships), heavy Ore
@@ -485,11 +496,12 @@ async fn initiate_verified_on_chain(
     let Ok(charge) = crate::mcp::verify::player_charge(client, pid, crate::mcp::types::Block::new(current_block)).await else {
         return InitiateCheck::ReadFailed;
     };
-    if !charge.covers(BUILD_CHARGE) {
+    let need = build_charge();
+    if !charge.covers(need) {
         crate::mcp::telemetry::tlog(
             "auto_build",
             crate::mcp::telemetry::Sev::Notice,
-            format!("perception drift: {pid} charge {charge} < {BUILD_CHARGE} on chain — initiate skipped"),
+            format!("perception drift: {pid} charge {charge} < {need} on chain — initiate skipped"),
         );
         return InitiateCheck::NoCharge;
     }
@@ -849,7 +861,7 @@ async fn scan(
                 let ga = player.get("gridAttributes");
                 let last_action = read_u64_field(ga, "lastAction");
                 let charge = crate::mcp::types::Block::new(current_block).since(crate::mcp::types::Block::new(last_action));
-                if charge < BUILD_CHARGE {
+                if charge < build_charge() {
                     return; // not enough charge to build this scan
                 }
                 let structs_load = parse_f64(ga.and_then(|x| x.get("structsLoad")));

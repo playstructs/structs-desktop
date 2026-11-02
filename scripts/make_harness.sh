@@ -463,6 +463,21 @@ cat > "$FIX" <<'EOF'
     terminal_guild_bank_history: { guild_id: '0-1', denom: 'uguild.0-1', current_supply: 2000000, series: (function () { var out = []; for (var i = 0; i < 48; i++) out.push({ bucket: '2026-09-0' + (1 + Math.floor(i / 24)) + 'T' + (i % 24) + ':00', minted: i % 7 ? 0 : 1000, burned: 0, infused: 0, supply: 1950000 + i * 1000 }); return out; })() },
     terminal_guild_bank_mint: { ok: true, amount_alpha: 1000000, amount_token: 1000, tx: 'ABC' },
     terminal_guild_bank_redeem: { ok: true, denom: 'uguild.0-1', amount: 5, tx: 'DEF' },
+    // v0.22 rank sales: member of 0-1 at #101; ranks below 60 are not on sale.
+    terminal_rank_quote: function (args) {
+      var gid = args.guildId || '0-1', r = args.targetRank;
+      if (r < 60) return { ok: false, refusal: 'this guild sells ranks down to 60 only', guild_id: gid, target_rank: r };
+      return { ok: true, refusal: null, guild_id: gid, member: gid === '0-1', current_guild_id: '0-1', current_rank: 101,
+        entry_rank: 101, minimum_rank: 60, target_rank: r, price: '25000000', denom: 'uguild.' + gid, balance: '40000000',
+        denom_info: { exponent: 6, display_name: 'OHM', base_name: 'uohm' }, kind: gid === '0-1' ? 'rank_purchase' : 'join_by_rank_purchase' };
+    },
+    terminal_rank_purchase: { ok: true, tx: 'RANKTX' },
+    terminal_found_guild_preview: function (args) {
+      var bad = !/^3-\d+$/.test(args.reactorId || '');
+      return { ok: !bad, problems: bad ? ["'" + args.reactorId + "' is not a reactor id (they look like 3-1)"] : [],
+        founder: '1-194', cost_ualpha: '2000000', burned_ualpha: '1000000', collateral_ualpha: '1000000', vault_ualpha: '136101019988' };
+    },
+    terminal_found_guild: { ok: true, tx: 'FOUNDTX' },
     terminal_tearsheet: { kind: 'player', id: '1-61', height: 4200719,
       identity: { username: 'JPEG', pfp_attrs: '{"head":12,"neck":2,"body":7,"arms":3,"background":3}', tag: 'OH', guild_name: 'Orbital Hydro', planet_id: '2-223', fleet_id: '9-61' },
       standing: { planet_id: '2-223', fleet_id: '9-61', guild_id: '0-2', last_action: 4200700, ago_blocks: 19, charge: 19, known: true },
@@ -976,8 +991,13 @@ cat > "$FIX" <<'EOF'
         { denom: 'ualpha', amount: 40230, amount_p: 40230000000, sendable: true, display_name: 'Alpha', base_name: 'ualpha', exponent: 6 },
         { denom: 'uguild.0-1', amount: 12, amount_p: 12000000, sendable: true, display_name: 'Hydro', base_name: 'uhydro', exponent: 6, guild_id: '0-1', guild_tag: 'OH' },
         { denom: 'ore', amount: 3, sendable: false, display_name: 'Ore', base_name: 'g', exponent: 0 },
+        // v0.22: still at the signing key, not in the vault.
+        { denom: 'ualpha', amount: 2500000, sendable: false, retained: true, display_name: 'Alpha', base_name: 'ualpha', exponent: 6 },
       ],
     },
+    mcp_collect_retained_preview: { ok: true, problems: [], player: { player_id: '1-194', index: null, name: 'primary', address: 'structs12wll0unjn6rzmjchnqy8e07txfeaf4w8y3x6ne' },
+      vault_address: 'structs1xyf5r4evxttxftjdse68kx0uqd44lmntyerrss', coins: [{ denom: 'ualpha', amount: '2500000' }] },
+    mcp_collect_retained: { ok: true, moved: [{ denom: 'ualpha', amount: '2500000' }], tx: 'COLLECTTX' },
     /* The REAL shape: an object, never an array. This fixture said `[]` for
      * as long as it has existed, which is exactly the shape the card's
      * `Array.isArray(recent)` back-fill guard expected — so a bug that made

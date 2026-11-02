@@ -188,7 +188,11 @@ async fn sub_stats(client: &CosmosClient, sub: &str) -> (u64, f64, f64) {
         .ok()
         .map(|v| {
             let g = |k: &str| num(v.pointer(&format!("/gridAttributes/{k}")));
-            (g("connectionCount") as u64, (g("capacity") - g("load")).max(0.0), g("connectionCapacity"))
+            (
+                g("connectionCount") as u64,
+                crate::mcp::guild_power::substation_usable(g("capacity"), g("load")),
+                g("connectionCapacity"),
+            )
         })
         .unwrap_or((0, 0.0, 0.0))
 }
@@ -556,12 +560,14 @@ async fn share_into(app: &tauri::AppHandle, client: &CosmosClient, pid: &str, de
     let existing = crate::mcp::guild_power::find_dynamic_allocation(client, &pid, dest).await;
     let out = match existing {
         Some((id, _)) if power_mw == 0.0 => {
-            let args = json!({ "allocation_id": id });
-            match crate::mcp::tx_retry::submit_once(&app, "allocation_delete", args, "energy:stop_sharing").await {
-                Ok(r) if r.success => json!({ "ok": true, "stopped": id }),
-                Ok(r) => return Err(r.error.unwrap_or_else(|| "rejected".into())),
-                Err(e) => return Err(e),
-            }
+            crate::mcp::tx_retry::sign_as_primary(
+                &app,
+                "/structs.structs.MsgAllocationDelete",
+                json!({ "allocationId": id }),
+                "energy:stop_sharing",
+            )
+            .await?;
+            json!({ "ok": true, "stopped": id })
         }
         Some((id, current)) => {
             let next = current as f64 + power_mw;
@@ -591,8 +597,7 @@ fn index_of(id: &str) -> u64 {
 /// The highest-index entity of `kind` matching `keep` — how we find what a
 /// create just made, since the create answers no id.
 async fn newest(client: &CosmosClient, kind: &str, list_key: &str, keep: impl Fn(&Value) -> bool) -> Option<Value> {
-    let list = client.list_entities(kind, None, Some(2000)).await.ok()?;
-    let arr = list.get(list_key).and_then(|a| a.as_array())?;
+    let arr = client.list_all_entities(kind, list_key).await.ok()?;
     arr.iter()
         .filter(|a| keep(a))
         .max_by_key(|a| a.get("id").and_then(|i| i.as_str()).map(index_of).unwrap_or(0))
@@ -832,21 +837,35 @@ pub async fn tick(app: &tauri::AppHandle) {
     if grams < 0.01 {
         return;
     }
-    let (Some(address), Some(reactor)) = (
+    let (Some(address), Some(pid)) = (
         v.get("address").and_then(|a| a.as_str()).filter(|a| !a.is_empty()),
-        v.pointer("/reactor/id").and_then(|r| r.as_str()),
+        v.get("player_id").and_then(|p| p.as_str()).filter(|p| !p.is_empty()),
     ) else {
         return;
+    };
+    // The guild's reactor while it still raises power; otherwise the best
+    // reactor that does (v0.22 portfolio bonus — more stake in a concentrated
+    // reactor can lower power, which is the opposite of keeping you powered).
+    let client = CosmosClient::new();
+    let prefer = v.pointer("/reactor/id").and_then(|r| r.as_str());
+    let reactor = match crate::mcp::tools::infusions::plan_infuse_target(&client, pid, grams * UALPHA_PER_GRAM, prefer).await {
+        Ok(Some((id, _, _))) => id,
+        Ok(None) => {
+            let msg = format!("keep me powered: no reactor would raise power with {grams:.2} g — kept it liquid");
+            crate::mcp::board_feed::push(app, crate::mcp::board_feed::Severity::Notice, "energy", msg);
+            return;
+        }
+        Err(_) => return,
     };
     let res = crate::mcp::tools::infusions::mcp_infusion_infuse_impl(
         app.clone(),
         address.to_string(),
-        reactor.to_string(),
+        reactor.clone(),
         grams * UALPHA_PER_GRAM,
     )
     .await;
     let msg = match res {
-        Ok(_) => format!("kept you powered: infused {grams:.2} g"),
+        Ok(_) => format!("kept you powered: infused {grams:.2} g into reactor {reactor}"),
         Err(e) => format!("keep me powered: infuse {grams:.2} g failed — {e}"),
     };
     crate::mcp::board_feed::push(app, crate::mcp::board_feed::Severity::Notice, "energy", msg);

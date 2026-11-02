@@ -32,6 +32,41 @@ fn http() -> &'static Client {
     shared_client()
 }
 
+/// The longest `Retry-After` worth waiting out inline; anything longer comes
+/// back as the 429 it is and the caller's next scan tries again.
+const MAX_INLINE_RETRY_AFTER_SECS: u64 = 10;
+
+/// `Retry-After` in whole seconds (the guild server sends delta-seconds).
+fn retry_after_secs(resp: &reqwest::Response) -> Option<u64> {
+    resp.headers()
+        .get(reqwest::header::RETRY_AFTER)?
+        .to_str()
+        .ok()?
+        .trim()
+        .parse()
+        .ok()
+}
+
+/// GET, waiting out ONE short 429 the way the server asks (`Retry-After`).
+async fn send_get(url: &str) -> Result<reqwest::Response, String> {
+    let send = || async {
+        http()
+            .get(url)
+            .send()
+            .await
+            .map_err(|e| format!("Guild API HTTP error: {}", e))
+    };
+    let resp = send().await?;
+    if resp.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
+        if let Some(secs) = retry_after_secs(&resp).filter(|s| *s <= MAX_INLINE_RETRY_AFTER_SECS) {
+            tokio::time::sleep(std::time::Duration::from_secs(secs.max(1))).await;
+            note_request();
+            return send().await;
+        }
+    }
+    Ok(resp)
+}
+
 // ── Request accounting ──────────────────────────────────────────────────────
 // How hard is THIS client hitting the shared Guild API? The infra team can
 // see aggregate load but not who causes it; these counters make our own
@@ -321,11 +356,7 @@ impl GuildApiClient {
     async fn get_once(&self, path: &str) -> Result<Value, String> {
         note_request();
         let url = self.build_url(path);
-        let resp = http()
-            .get(&url)
-            .send()
-            .await
-            .map_err(|e| format!("Guild API HTTP error: {}", e))?;
+        let resp = send_get(&url).await?;
 
         let status = resp.status();
         let body = resp
@@ -751,11 +782,7 @@ impl GuildApiClient {
     async fn get_envelope_once(&self, path: &str) -> Result<Value, String> {
         note_request();
         let url = self.build_url(path);
-        let resp = http()
-            .get(&url)
-            .send()
-            .await
-            .map_err(|e| format!("Guild API HTTP error: {}", e))?;
+        let resp = send_get(&url).await?;
         let status = resp.status();
         let body = resp
             .text()
@@ -1589,11 +1616,7 @@ impl GuildApiClient {
     async fn get_with_total(&self, path: &str) -> Result<(Value, Option<u64>), String> {
         note_request();
         let url = self.build_url(path);
-        let resp = http()
-            .get(&url)
-            .send()
-            .await
-            .map_err(|e| format!("Guild API HTTP error: {}", e))?;
+        let resp = send_get(&url).await?;
         let status = resp.status();
         let body = resp
             .text()

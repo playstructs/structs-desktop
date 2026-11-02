@@ -124,9 +124,9 @@ const P_RAID: usize = 10;
 const P_MINE: usize = 12;
 const P_REFINE: usize = 13;
 
-/// Bulk page size. The LCD's query-gas ceiling (25M) is hit around ~110k
-/// rows of the widest store; 60k is comfortably under it on every store.
-pub const PAGE_LIMIT: u32 = 60_000;
+/// Bulk page size: v0.22 clamps every Structs-module page to 1000 rows (a
+/// larger request is silently served 1000), so ask for exactly that.
+pub const PAGE_LIMIT: u32 = crate::mcp::cosmos_client::LCD_MAX_PAGE;
 
 /// One row of the `struct` table — the bare, attribute-free record.
 #[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -1535,7 +1535,8 @@ pub async fn hot_refresh_ore_clocks(client: &CosmosClient) -> Result<usize, Stri
     if HOT_REFRESHING.swap(true, Ordering::SeqCst) {
         return Err("hot refresh already in flight".into());
     }
-    // The chain's planet_attribute store, forward-only. This used to walk
+    // The chain's planet_attribute store, forward-only — only the mine/refine
+    // clock range (see `lcd_planet_clock_sweep`). This used to walk
     // the guild's `view.work` — a server-side join over exactly the stores
     // the snapshot holds (planet clocks 12/13, struct build clocks, status)
     // that paged at 100 rows and 500'd on deep pages. Nothing here needs it.
@@ -1550,8 +1551,14 @@ pub async fn hot_refresh_ore_clocks(client: &CosmosClient) -> Result<usize, Stri
 /// Sweep the mine/refine clocks from the chain's own planet_attribute
 /// store. Clocks only move forward, so a value below the one held is the
 /// store lagging our stream and is refused, exactly as for the work view.
+///
+/// The store is keyed by `attributeId` (`<attr>-<planet>`), lexicographic,
+/// so attributes 12 and 13 are one contiguous range: `12-…` up to `14-`.
+/// Measured 2026-11-01: 401k+ rows in the whole store (400+ pages at the
+/// v0.22 1000-row cap, every two minutes) against ~91k clock rows.
 async fn lcd_planet_clock_sweep(client: &CosmosClient) -> Result<usize, String> {
-    let (rows, _, _) = walk_store(client, "/structs/planet_attribute", "planetAttributeRecords", None).await?;
+    let (rows, _, _) =
+        walk_store(client, "/structs/planet_attribute", "planetAttributeRecords", Some("12-"), Some("14-")).await?;
     if rows.is_empty() {
         return Err("planet_attribute store returned no rows".into());
     }
@@ -2054,15 +2061,15 @@ pub fn install_snapshot(snap: Snapshot, source: &'static str) {
 /// The original source: the chain's own stores in 60k-row pages.
 async fn lcd_pages(client: &CosmosClient, t0: f64) -> Result<Snapshot, String> {
     let result = tokio::join!(
-        walk_store(client, "/structs/struct", "Struct", None),
+        walk_store(client, "/structs/struct", "Struct", None, None),
         // The struct_attribute store rejects an un-keyed walk (query gas), but
         // walks fine from its first key.
-        walk_store(client, "/structs/struct_attribute", "structAttributeRecords", Some("0-")),
-        walk_store(client, "/structs/planet_attribute", "planetAttributeRecords", None),
-        walk_store(client, "/structs/grid", "gridRecords", None),
-        walk_store(client, "/structs/player", "Player", None),
-        walk_store(client, "/structs/planet", "Planet", None),
-        walk_store(client, "/structs/fleet", "Fleet", None),
+        walk_store(client, "/structs/struct_attribute", "structAttributeRecords", Some("0-"), None),
+        walk_store(client, "/structs/planet_attribute", "planetAttributeRecords", None, None),
+        walk_store(client, "/structs/grid", "gridRecords", None, None),
+        walk_store(client, "/structs/player", "Player", None, None),
+        walk_store(client, "/structs/planet", "Planet", None, None),
+        walk_store(client, "/structs/fleet", "Fleet", None, None),
     );
     let (st, sa, pa, gr, pl, pn, fl) = (result.0?, result.1?, result.2?, result.3?, result.4?, result.5?, result.6?);
     let heights = [st.1, sa.1, pa.1, gr.1, pl.1, pn.1, fl.1];
@@ -2077,41 +2084,27 @@ async fn lcd_pages(client: &CosmosClient, t0: f64) -> Result<Snapshot, String> {
     Ok(snap)
 }
 
+/// Walk an LCD store from `start_key` (raw, unencoded) to the end, or until
+/// the next key reaches `end_before`.
 async fn walk_store(
     client: &CosmosClient,
     path: &str,
     list_key: &str,
     start_key: Option<&str>,
+    end_before: Option<&str>,
 ) -> Result<(Vec<Value>, u64, f64), String> {
     use base64::Engine as _;
+    let b64 = &base64::engine::general_purpose::STANDARD;
     let mut rows = Vec::new();
-    let mut key: Option<String> = start_key.map(|k| base64::engine::general_purpose::STANDARD.encode(k));
+    let mut key: Option<String> = start_key.map(|k| b64.encode(k));
     let mut height = 0;
     let mut server_time = 0.0;
-    let mut limit = PAGE_LIMIT;
     loop {
         let q = match &key {
-            Some(k) => format!("{path}?pagination.limit={limit}&pagination.key={}", super::cosmos_client::encode_pagination_key(k)),
-            None => format!("{path}?pagination.limit={limit}"),
+            Some(k) => format!("{path}?pagination.limit={PAGE_LIMIT}&pagination.key={}", super::cosmos_client::encode_pagination_key(k)),
+            None => format!("{path}?pagination.limit={PAGE_LIMIT}"),
         };
-        let (body, h, st) = match client.lcd_get_bulk(&q).await {
-            Ok(x) => x,
-            // A page too big for the node's query-gas budget is not a dead
-            // store: shrink the page and ask again for the same key.
-            Err(e) if is_query_gas_error(&e) => match next_page_limit_after_gas(limit) {
-                Some(smaller) => {
-                    crate::mcp::telemetry::tlog(
-                        "perception",
-                        crate::mcp::telemetry::Sev::Warn,
-                        format!("{path}: page of {limit} rows exceeded the node's query gas; retrying at {smaller}"),
-                    );
-                    limit = smaller;
-                    continue;
-                }
-                None => return Err(e),
-            },
-            Err(e) => return Err(e),
-        };
+        let (body, h, st) = client.lcd_get_bulk(&q).await?;
         height = height.max(h);
         server_time = f64::max(server_time, st);
         if let Some(arr) = body.get(list_key).and_then(|v| v.as_array()) {
@@ -2123,29 +2116,14 @@ async fn walk_store(
             .and_then(|k| k.as_str())
             .filter(|k| !k.is_empty())
             .map(String::from);
-        if key.is_none() {
-            break;
+        let Some(next) = &key else { break };
+        if let Some(end) = end_before {
+            if b64.decode(next).is_ok_and(|raw| raw.as_slice() >= end.as_bytes()) {
+                break;
+            }
         }
     }
     Ok((rows, height, server_time))
-}
-
-/// The node refused the page for its query-gas budget (not a transport or
-/// not-found failure).
-fn is_query_gas_error(e: &str) -> bool {
-    let l = e.to_ascii_lowercase();
-    l.contains("out of gas") || l.contains("gas limit exceeded")
-}
-
-/// The next, smaller LCD page to try after a query-gas refusal; `None` once
-/// the page is already at the floor (then the store really is unreadable).
-fn next_page_limit_after_gas(limit: u32) -> Option<u32> {
-    const FLOOR: u32 = 2_000;
-    if limit <= FLOOR {
-        None
-    } else {
-        Some((limit / 2).max(FLOOR))
-    }
 }
 
 /// Pull a whole-galaxy snapshot and install it. ~11 requests; the pages run
@@ -2241,15 +2219,6 @@ async fn join_running_refresh() -> Result<Value, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn lcd_page_shrinks_on_query_gas_and_stops_at_the_floor() {
-        assert!(is_query_gas_error("rpc error: code = ResourceExhausted desc = out of gas: Query gas limit exceeded"));
-        assert!(!is_query_gas_error("codespace structs code 1050: object not found"));
-        assert_eq!(next_page_limit_after_gas(60_000), Some(30_000));
-        assert_eq!(next_page_limit_after_gas(3_000), Some(2_000));
-        assert_eq!(next_page_limit_after_gas(2_000), None);
-    }
 
     #[test]
     fn guild_walk_cap_clears_the_october_2026_store_size() {

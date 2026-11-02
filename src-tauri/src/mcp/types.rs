@@ -470,7 +470,14 @@ impl Subject {
             ["consensus", ..] => (SubjectFamily::Consensus, None, None),
             ["structs", "planet", ..] => (SubjectFamily::Planet, obj(2), player_at(3)),
             ["structs", "grid", ..] => (SubjectFamily::Grid, obj(3), player_at(4)),
-            ["structs", "inventory", ..] => (SubjectFamily::Inventory, player_at(4).map(|p| ObjectId { kind: ObjectKind::Player, index: p.index() }), player_at(4)),
+            // The denom may itself contain dots (`ualpha.infused`,
+            // `uguild.0-5`), so the player is read from the END:
+            // `….<guild>.<player>.<address>`.
+            ["structs", "inventory", rest @ ..] if rest.len() >= 4 => {
+                let p = player_at(segs.len() - 2);
+                (SubjectFamily::Inventory, p.as_ref().map(|p| ObjectId { kind: ObjectKind::Player, index: p.index() }), p)
+            }
+            ["structs", "inventory", ..] => (SubjectFamily::Inventory, None, None),
             _ => (SubjectFamily::Other, None, None),
         };
         Self { raw: raw.to_string(), family, object, player }
@@ -960,6 +967,16 @@ mod tests {
         let i = Subject::parse("structs.inventory.ualpha.0-1.1-194.structs12wll0unjn6rzmjchnqy8e07txfeaf4w8y3x6ne");
         assert_eq!(i.family, SubjectFamily::Inventory);
         assert_eq!(i.player.unwrap().as_str(), "1-194");
+        // Dotted denoms (v0.22 vault/staking movements) must not shift the player.
+        for subj in [
+            "structs.inventory.ualpha.infused.0-1.1-194.structs12wll0unjn6rzmjchnqy8e07txfeaf4w8y3x6ne",
+            "structs.inventory.uguild.0-5.0-1.1-194.structs12wll0unjn6rzmjchnqy8e07txfeaf4w8y3x6ne",
+        ] {
+            let d = Subject::parse(subj);
+            assert_eq!(d.family, SubjectFamily::Inventory);
+            assert_eq!(d.player.as_ref().map(|p| p.as_str()), Some("1-194"), "{subj}");
+        }
+        assert_eq!(Subject::parse("structs.inventory.uguild.0-5.0-5.noPlayer.structs1x").player, None);
         assert_eq!(Subject::parse("consensus").family, SubjectFamily::Consensus);
         assert_eq!(Subject::parse("structs.planet.noPlanet.noPlayer").object, None);
         assert_eq!(Subject::parse("structs.planet.2-1.noPlayer").player, None, "'noPlayer' is the trigger's placeholder, not an id");
