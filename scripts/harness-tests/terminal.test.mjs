@@ -1012,6 +1012,74 @@ const tick = (ms) => new Promise((r) => setTimeout(r, ms));
   const foundCall = (w.__HARNESS_CALLS__ || []).find((c) => c.cmd === 'terminal_found_guild');
   check('…and signs what was confirmed', !!foundCall && foundCall.args.reactorId === '3-1' && foundCall.args.entrySubstationId === '4-1');
 
+  // v0.22 guild management: the overview names who really holds admin,
+  // flags rank grants whose admin the chain no longer honours, and turns
+  // a pending request into Admit / Turn down — each confirmed before signing.
+  run('ADMIN 0-1');
+  await until(() => /Direct grants/.test((d.querySelector('#tm-grid [data-type="guildadmin"]') || {}).textContent || ''));
+  const gadm = d.querySelector('#tm-grid [data-type="guildadmin"]');
+  check('ADMIN shows the owner, members, entry rank and your standing', /owner 1-1/.test(gadm.textContent) && /3,312/.test(gadm.textContent) && /#101/.test(gadm.textContent) && /member #50/.test(gadm.textContent), gadm.textContent);
+  check('…lists direct grants, owner first, in short bit names', /1-1 · owner/.test(gadm.textContent) && /membership · provider open/.test(gadm.textContent));
+  check('…and flags a rank grant whose admin v0.22 no longer honours', /#10 and better/.test(gadm.textContent) && /admin no longer applies/.test(gadm.textContent));
+  const admit = [...gadm.querySelectorAll('a')].find((a) => /^Admit$/.test(a.textContent.trim()));
+  check('a pending request offers Admit and Turn down', !!admit && /Request: 1-777/.test(gadm.textContent) && [...gadm.querySelectorAll('a')].some((a) => /Turn down/.test(a.textContent)));
+  if (admit) admit.click();
+  await until(() => d.querySelector('.ops-modal-overlay') && /Admit 1-777/.test(d.querySelector('.ops-modal-overlay').textContent));
+  const admitBtn = [...d.querySelectorAll('.ops-modal-overlay a, .ops-modal-overlay button')].find((b) => /^sign$/i.test(b.textContent.trim()));
+  check('Admit confirms with what it will do before signing', !!admitBtn && !(w.__HARNESS_CALLS__ || []).some((c) => c.cmd === 'terminal_guild_admin'));
+  if (admitBtn) admitBtn.click();
+  await until(() => (w.__HARNESS_CALLS__ || []).some((c) => c.cmd === 'terminal_guild_admin'));
+  const admitCall = (w.__HARNESS_CALLS__ || []).find((c) => c.cmd === 'terminal_guild_admin');
+  check('…and signs the approve for that player', !!admitCall && admitCall.args.action === 'approve' && admitCall.args.args.player === '1-777', JSON.stringify(admitCall && admitCall.args));
+
+  run('GSET 0-1');
+  await until(() => d.querySelectorAll('#tm-grid [data-type="guildset"] input').length >= 3);
+  const gset = d.querySelector('#tm-grid [data-type="guildset"]');
+  const [gMin, gBase, gStep] = gset.querySelectorAll('input');
+  gMin.value = '1'; gBase.value = '10000000'; gStep.value = '5000000';
+  gStep.dispatchEvent(new w.Event('input'));
+  await until(() => /sells ranks down to 1/.test(gset.textContent));
+  check('GSET previews a rank-sale change and warns when admin is missing', /first step 10000000, each next step 5000000 more/.test(gset.textContent) && /granted directly/.test(gset.textContent), gset.textContent);
+
+  run('RECRUIT 0-1');
+  await until(() => d.querySelectorAll('#tm-grid [data-type="guildmember"] input').length >= 1);
+  const gmem = d.querySelector('#tm-grid [data-type="guildmember"]');
+  const gPlayer = gmem.querySelector('input');
+  gPlayer.value = '4-2'; gPlayer.dispatchEvent(new w.Event('input'));
+  await until(() => /not a player id/.test(gmem.textContent));
+  check('RECRUIT refuses a non-player id with the reason', /not a player id/.test(gmem.textContent));
+  gPlayer.value = '1-42'; gPlayer.dispatchEvent(new w.Event('input'));
+  await until(() => /Invite 1-42 to 0-1/.test(gmem.textContent));
+  check('…and previews an invite for a real one', /Invite 1-42 to 0-1/.test(gmem.textContent));
+
+  // Selling energy: each provider's terms, pools and buyers, with Collect.
+  run('PROVIDERS');
+  await until(() => /10-6/.test((d.querySelector('#tm-grid [data-type="providers"]') || {}).textContent || ''));
+  const provs = d.querySelector('#tm-grid [data-type="providers"]');
+  check('PROVIDERS lists each provider with who it sells to, buyers and both pools', /10-5 · 4-15/.test(provs.textContent) && /anyone/.test(provs.textContent) && /nobody new/.test(provs.textContent) && /1 buyers/.test(provs.textContent) && /collateral/.test(provs.textContent), provs.textContent);
+  const collect = [...provs.querySelectorAll('a')].find((a) => /^Collect$/.test(a.textContent.trim()));
+  if (collect) collect.click();
+  await until(() => d.querySelector('.ops-modal-overlay') && /Collect 10-5/.test(d.querySelector('.ops-modal-overlay').textContent));
+  const collectBtn = [...d.querySelectorAll('.ops-modal-overlay a, .ops-modal-overlay button')].find((b) => /^sign$/i.test(b.textContent.trim()));
+  check('Collect confirms with the earnings waiting', !!collectBtn && /Earnings now/.test(d.querySelector('.ops-modal-overlay').textContent));
+  if (collectBtn) collectBtn.click();
+  await until(() => (w.__HARNESS_CALLS__ || []).some((c) => c.cmd === 'terminal_provider_action'));
+  const collectCall = (w.__HARNESS_CALLS__ || []).find((c) => c.cmd === 'terminal_provider_action');
+  check('…and signs a withdraw of that provider', !!collectCall && collectCall.args.providerId === '10-5' && collectCall.args.action === 'withdraw');
+
+  run('TERMS 10-5');
+  await until(() => d.querySelectorAll('#tm-grid [data-type="provider"] input').length >= 2);
+  const pterm = d.querySelector('#tm-grid [data-type="provider"]');
+  const pInputs = pterm.querySelectorAll('input');
+  check('TERMS opens the provider ticket on that provider', pInputs[0].value === '10-5');
+  const pVal = pInputs[pInputs.length - 1];
+  pVal.value = '500'; pVal.dispatchEvent(new w.Event('input'));
+  await until(() => /below the capacity minimum/.test(pterm.textContent));
+  check('a limit the chain would refuse says why', /below the capacity minimum/.test(pterm.textContent));
+  pVal.value = '50000'; pVal.dispatchEvent(new w.Event('input'));
+  await until(() => /largest contract becomes 50000/.test(pterm.textContent));
+  check('…and a good one previews the change and the open contracts', /largest contract becomes 50000/.test(pterm.textContent) && /open contracts/.test(pterm.textContent));
+
   run('TS 1-61');
   await until(() => d.querySelector('#tm-grid [data-type="sheet"] .pc-card'));
   const sheet = d.querySelector('#tm-grid [data-type="sheet"]');

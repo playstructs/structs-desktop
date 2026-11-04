@@ -49,10 +49,10 @@ pub fn build<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
             .close_window()
             .build()?;
 
-        // The webapp only offers Combat Training once, at the end of signup
-        // (OrientationEndViewModel). Anyone who skipped it — or who signed up
-        // before it existed — has no way back in, so the desktop app carries
-        // its own entry point.
+        // The webapp offers Combat Training on its own terms, once per install
+        // (TutorialMode.offerIfUndecided). Anyone who answered it — skipped it,
+        // or played it and wants another run — has no way back in from the game,
+        // so the desktop app carries its own entry point.
         let tutorial_item = MenuItemBuilder::with_id(TUTORIAL_MENU_ID, "Combat Training")
             .build(app)?;
         let help_menu = SubmenuBuilder::new(app, "Help")

@@ -1370,6 +1370,58 @@ pub async fn terminal_found_guild(
     crate::mcp::guild_economy::found_guild(&app, &reactor_id, &endpoint, &entry_substation_id).await
 }
 
+// ── Guild management and energy selling (v0.22) ─────────────────────────────
+//
+// One preview and one signer each: the action name picks the chain message
+// (guild_admin::ACTIONS, providers::ACTIONS) and `args` carries its fields.
+// The signers re-run the preview server-side before signing.
+
+/// A guild's settings, grants, pending invites/requests and your standing.
+#[tauri::command]
+pub async fn terminal_guild_admin_overview(guild_id: Option<String>) -> Result<Value, String> {
+    crate::mcp::guild_admin::overview(guild_id).await
+}
+
+#[tauri::command]
+pub async fn terminal_guild_admin_preview(guild_id: Option<String>, action: String, args: Value) -> Result<Value, String> {
+    crate::mcp::guild_admin::preview(guild_id, &action, &args).await
+}
+
+#[tauri::command]
+pub async fn terminal_guild_admin(
+    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+    guild_id: Option<String>,
+    action: String,
+    args: Value,
+) -> Result<Value, String> {
+    crate::mcp::tools::board_pages::require_trusted(&window)?;
+    crate::mcp::guild_admin::execute(&app, guild_id, &action, &args).await
+}
+
+/// Your providers: terms, pools, buyers.
+#[tauri::command]
+pub async fn terminal_providers() -> Result<Value, String> {
+    crate::mcp::providers::list().await
+}
+
+#[tauri::command]
+pub async fn terminal_provider_preview(provider_id: String, action: String, args: Value) -> Result<Value, String> {
+    crate::mcp::providers::preview(&provider_id, &action, &args).await
+}
+
+#[tauri::command]
+pub async fn terminal_provider_action(
+    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+    provider_id: String,
+    action: String,
+    args: Value,
+) -> Result<Value, String> {
+    crate::mcp::tools::board_pages::require_trusted(&window)?;
+    crate::mcp::providers::execute(&app, &provider_id, &action, &args).await
+}
+
 /* ── The stat store (`/api/stat/...`) ───────────────────────────────────────
  *
  * The guild indexes a time series per object — ten metrics, sampled whenever

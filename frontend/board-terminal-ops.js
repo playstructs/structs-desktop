@@ -3418,4 +3418,313 @@
     },
   });
 
+  // ── Guild management (v0.22) ──────────────────────────────────────────
+  // Settings, who holds which grant, rank grants (v0.22: a rank carrying
+  // admin no longer makes anyone an admin), pending invites and requests,
+  // and your own standing. Every change is one chain message, previewed by
+  // mcp/guild_admin.rs and re-checked there before it is signed.
+  var BYPASS = [{ value: 'closed', label: 'nobody' }, { value: 'permissioned', label: 'granted players' }, { value: 'member', label: 'any member' }];
+  function guildPreview(guildId, action, args) {
+    return invoke('terminal_guild_admin_preview', { guildId: guildId || null, action: action, args: args })
+      .then(function (r) { return r && r.ok === false ? { ok: false, refusal: (r.problems || []).join('; '), warnings: r.warnings } : r; });
+  }
+  function confirmRows(pv) {
+    var body = H.el('div');
+    body.appendChild(H.fact('Guild', pv.guild_id || pv.provider_id || ''));
+    body.appendChild(H.fact('Change', pv.summary));
+    (pv.warnings || []).forEach(function (w) { body.appendChild(H.stateBlock('warning', String(w))); });
+    return body;
+  }
+  // A one-press change from a row (approve, decline…): preview, confirm, sign.
+  function guildDoor(guildId, action, args, ctx) {
+    guildPreview(guildId, action, args).then(function (pv) {
+      if (!pv || pv.ok === false) { Board.stamp && Board.stamp(action + ': ' + ((pv && pv.refusal) || 'refused')); return; }
+      H.confirmModal(pv.summary + '?', confirmRows(pv), 'Sign', function () {
+        invoke('terminal_guild_admin', { guildId: guildId || null, action: action, args: args })
+          .then(function () { Board.stamp && Board.stamp(pv.summary); T.refresh(ctx.id, true); })
+          .catch(function (e) { Board.stamp && Board.stamp(action + ': ' + e); });
+      });
+    }).catch(function (e) { Board.stamp && Board.stamp(action + ': ' + e); });
+  }
+  var ADMIN_LABELS = { 'names and pictures': 'UGC', 'token burn': 'burn', 'token mint': 'mint', 'entry substation': 'entry sub', 'join rules': 'join rules' };
+  var shortBits = function (labels) {
+    return (labels || []).filter(function (l) { return !/^hash /.test(l); }).map(function (l) { return ADMIN_LABELS[l] || l; }).join(' · ') || '—';
+  };
+
+  T.register('guildadmin', {
+    label: 'Guild admin', cadenceMs: 30000,
+    describe: function (p) { return 'Guild admin' + (p && p.id ? ' · ' + p.id : ''); },
+    params: [{ key: 'id', label: 'Guild id', kind: 'id', kinds: [0], placeholder: 'your guild' }],
+    render: function (host, p, ctx) {
+      return invoke('terminal_guild_admin_overview', { guildId: (p && p.id) || null }).then(function (d) {
+        host.innerHTML = '';
+        var me = d.me || {};
+        var sale = d.rank_sale || {};
+        var selling = Number(sale.minimum_rank) > 0;
+        cap(host, (d.name || d.guild_id) + ' · owner ' + d.owner);
+        host.appendChild(tiles([
+          ['members', d.member_count == null ? '—' : H.fmtInt(d.member_count), 'sui-icon-players', d.member_count == null ? 'muted' : null],
+          ['entry rank', '#' + d.entry_rank],
+          ['join stake', H.fmtAlpha(Number(d.join_minimum) || 0), 'sui-icon-alpha-matter'],
+          ['rank sales', selling ? 'to #' + sale.minimum_rank : 'off', null, selling ? 'live' : 'muted'],
+          ['you', me.owner ? 'owner' : me.admin ? 'admin' : me.member ? 'member #' + me.rank : 'not a member', null, me.admin ? 'ok' : 'muted'],
+        ]));
+
+        var pending = d.pending || [];
+        if (pending.length) {
+          cap(host, 'Waiting');
+          pending.forEach(function (a) {
+            var invite = a.kind === 'invite';
+            var line = (invite ? 'Invite: ' : 'Request: ') + a.player_id + (a.mine ? ' (you)' : '') + ' → ' + a.guild_id;
+            host.appendChild(H.el('div', 'fstat-l', line));
+            var doors = [];
+            if (a.mine && invite) {
+              doors.push({ label: 'Accept', primary: true, onClick: function () { guildDoor(a.guild_id, 'accept_invite', {}, ctx); } });
+              doors.push({ label: 'Decline', onClick: function () { guildDoor(a.guild_id, 'decline_invite', {}, ctx); } });
+            } else if (a.mine) {
+              doors.push({ label: 'Withdraw', onClick: function () { guildDoor(a.guild_id, 'request_revoke', {}, ctx); } });
+            } else if (invite) {
+              doors.push({ label: 'Withdraw invite', onClick: function () { guildDoor(a.guild_id, 'invite_revoke', { player: a.player_id }, ctx); } });
+            } else {
+              doors.push({ label: 'Admit', primary: true, onClick: function () { guildDoor(a.guild_id, 'approve', { player: a.player_id }, ctx); } });
+              doors.push({ label: 'Turn down', onClick: function () { guildDoor(a.guild_id, 'deny', { player: a.player_id }, ctx); } });
+            }
+            host.appendChild(doorRow(doors));
+          });
+        }
+
+        cap(host, 'Direct grants');
+        var table = H.resultTable();
+        (d.grants || []).forEach(function (g) {
+          table.appendChild(H.resultRow({
+            title: g.player_id + (g.owner ? ' · owner' : g.admin ? ' · admin' : ''),
+            subtitle: shortBits(g.labels),
+            onClick: function () { add('player', { id: g.player_id }); },
+          }));
+        });
+        if (!(d.grants || []).length) table.appendChild(H.resultRow({ title: 'none' }));
+        host.appendChild(table);
+
+        if ((d.rank_grants || []).length) {
+          cap(host, 'Rank grants');
+          var rt = H.resultTable();
+          d.rank_grants.forEach(function (r) {
+            rt.appendChild(H.resultRow({
+              title: '#' + r.rank + ' and better',
+              subtitle: shortBits(r.labels) + (r.stale_admin ? ' · admin no longer applies' : ''),
+            }));
+          });
+          host.appendChild(rt);
+        }
+
+        var doors = [];
+        if (me.member) {
+          doors.push({ label: 'Members', primary: true, onClick: function () { add('guildmember', { id: d.guild_id }); } });
+          doors.push({ label: 'Settings', onClick: function () { add('guildset', { id: d.guild_id }); } });
+        } else {
+          doors.push({ label: 'Ask to join', primary: true, onClick: function () { guildDoor(d.guild_id, 'request', {}, ctx); } });
+        }
+        doors.push({ label: 'Buy a rank', onClick: function () { add('rank', { id: d.guild_id }); } });
+        host.appendChild(doorRow(doors));
+      }).catch(function (e) { fail(host, 'Guild admin', e); });
+    },
+  });
+
+  // Invite, admit, remove, re-rank, and grant or take admin.
+  var MEMBER_ACTIONS = [
+    { value: 'invite', label: 'Invite' }, { value: 'approve', label: 'Admit a request' },
+    { value: 'deny', label: 'Turn down a request' }, { value: 'invite_revoke', label: 'Withdraw an invite' },
+    { value: 'set_rank', label: 'Change rank' }, { value: 'grant_admin', label: 'Make admin' },
+    { value: 'revoke_admin', label: 'Remove admin' }, { value: 'kick', label: 'Remove from guild' },
+  ];
+  T.register('guildmember', {
+    label: 'Guild member ticket', cadenceMs: 0,
+    describe: function (p) { return 'Guild members' + (p && p.id ? ' · ' + p.id : ''); },
+    params: [{ key: 'id', label: 'Guild id', kind: 'id', kinds: [0], placeholder: 'your guild' }],
+    render: function (host, p) {
+      host.innerHTML = '';
+      var pv = null;
+      var guild = (p && p.id) || null;
+      var argsOf = function (v) { return { player: v.player, rank: v.rank, substation: v.sub }; };
+      host.appendChild(ticket({
+        cta: 'Sign',
+        doneText: 'signed',
+        fields: function (v) {
+          var f = [
+            { key: 'action', label: 'Do', kind: 'choice', options: MEMBER_ACTIONS, value: v.action || 'invite' },
+            { key: 'player', label: 'Player', kind: 'text', placeholder: '1-42' },
+          ];
+          var a = v.action || 'invite';
+          if (a === 'set_rank') f.push({ key: 'rank', label: 'Rank', placeholder: '50' });
+          if (a === 'invite' || a === 'approve') f.push({ key: 'sub', label: 'Substation', kind: 'text', placeholder: 'entry substation' });
+          return f;
+        },
+        preview: function (v) {
+          pv = null;
+          if (!v.player) return null;
+          return guildPreview(guild, v.action || 'invite', argsOf(v));
+        },
+        facts: function (r) { pv = r; return [['change', r.summary, null, 'live']]; },
+        confirm: function () { return pv ? { title: pv.summary + '?', cta: 'Sign', rows: [['Guild', pv.guild_id], ['Message', pv.message]] } : null; },
+        submit: function (v) {
+          if (!pv) return Promise.reject(new Error('fill in the player and wait for the check'));
+          return invoke('terminal_guild_admin', { guildId: guild, action: v.action || 'invite', args: argsOf(v) });
+        },
+      }));
+    },
+  });
+
+  // The guild's own settings, one at a time.
+  var SETTINGS = [
+    { value: 'rank_sale', label: 'Rank sales' }, { value: 'entry_rank', label: 'Entry rank' },
+    { value: 'entry_substation', label: 'Entry substation' }, { value: 'join_minimum', label: 'Stake to join' },
+    { value: 'bypass_request', label: 'Waive stake on request' }, { value: 'bypass_invite', label: 'Waive stake on invite' },
+    { value: 'convert_in_fee', label: 'Fee into the token' }, { value: 'convert_out_fee', label: 'Fee out of the token' },
+    { value: 'name', label: 'Name' }, { value: 'endpoint', label: 'Endpoint' },
+  ];
+  function settingFields(a) {
+    switch (a) {
+      case 'rank_sale': return [
+        { key: 'minimum_rank', label: 'Best rank sold', placeholder: '0 = off' },
+        { key: 'base', label: 'First step (base units)', placeholder: '10000000' },
+        { key: 'step', label: 'Each next step adds', placeholder: '5000000' },
+        { key: 'join_enabled', label: 'Non-members may buy in', kind: 'choice', options: [{ value: 'false', label: 'no' }, { value: 'true', label: 'yes' }] },
+      ];
+      case 'entry_rank': return [{ key: 'rank', label: 'Rank', placeholder: '101' }];
+      case 'entry_substation': return [{ key: 'substation', label: 'Substation', kind: 'text', placeholder: '4-1' }];
+      case 'join_minimum': return [{ key: 'amount', label: 'Infused (ualpha)', placeholder: '0' }];
+      case 'bypass_request': case 'bypass_invite': return [{ key: 'level', label: 'Who may waive', kind: 'choice', options: BYPASS }];
+      case 'convert_in_fee': case 'convert_out_fee': return [{ key: 'fee', label: 'Fee (0.05 = 5%)', inputmode: 'decimal', placeholder: '0.05' }];
+      case 'name': return [{ key: 'name', label: 'Name', kind: 'text', inputmode: 'text' }];
+      case 'endpoint': return [{ key: 'endpoint', label: 'Endpoint', kind: 'text', inputmode: 'url', placeholder: 'https://…/guild.json' }];
+    }
+    return [];
+  }
+  T.register('guildset', {
+    label: 'Guild settings ticket', cadenceMs: 0,
+    describe: function (p) { return 'Guild settings' + (p && p.id ? ' · ' + p.id : ''); },
+    params: [{ key: 'id', label: 'Guild id', kind: 'id', kinds: [0], placeholder: 'your guild' }],
+    render: function (host, p) {
+      host.innerHTML = '';
+      var pv = null;
+      var guild = (p && p.id) || null;
+      var argsOf = function (v) { var a = {}; Object.keys(v).forEach(function (k) { if (k !== 'setting') a[k] = v[k]; }); return a; };
+      host.appendChild(ticket({
+        cta: 'Sign',
+        doneText: 'signed',
+        fields: function (v) {
+          var a = v.setting || 'rank_sale';
+          return [{ key: 'setting', label: 'Setting', kind: 'choice', options: SETTINGS, value: a }].concat(settingFields(a));
+        },
+        preview: function (v) {
+          pv = null;
+          var a = v.setting || 'rank_sale';
+          var need = settingFields(a).filter(function (f) { return f.kind !== 'choice' && f.key !== 'base' && f.key !== 'step'; });
+          if (need.some(function (f) { return !v[f.key]; })) return null;
+          return guildPreview(guild, a, argsOf(v));
+        },
+        facts: function (r) { pv = r; return [['change', r.summary, null, 'live']]; },
+        confirm: function () { return pv ? { title: pv.summary + '?', cta: 'Sign', rows: [['Guild', pv.guild_id], ['Message', pv.message]] } : null; },
+        submit: function (v) {
+          if (!pv) return Promise.reject(new Error('fill in the setting and wait for the check'));
+          return invoke('terminal_guild_admin', { guildId: guild, action: v.setting || 'rank_sale', args: argsOf(v) });
+        },
+      }));
+    },
+  });
+
+  // ── Selling energy (v0.22) ────────────────────────────────────────────
+  // The providers you own: terms, both pools, who is buying. Collect sends
+  // the earnings pool (after settling everything earned so far) to your
+  // vault; mcp/providers.rs previews and re-checks every change.
+  var coinsText = function (coins) {
+    return (coins || []).length ? coins.map(function (c) { return H.denomQty(Number(c.amount), c.denom) + ' ' + H.denomName(c.denom); }).join(' · ') : 'empty';
+  };
+  var POLICY = { openMarket: 'anyone', guildMarket: 'granted players', closedMarket: 'nobody new' };
+  function providerDoor(id, action, args, ctx) {
+    invoke('terminal_provider_preview', { providerId: id, action: action, args: args }).then(function (pv) {
+      if (!pv || pv.ok === false) { Board.stamp && Board.stamp(action + ': ' + ((pv && pv.problems) || []).join('; ')); return; }
+      var body = confirmRows(pv);
+      body.appendChild(H.fact('Earnings now', coinsText(pv.earnings)));
+      H.confirmModal(pv.summary + '?', body, action === 'delete' ? 'Delete' : 'Sign', function () {
+        invoke('terminal_provider_action', { providerId: id, action: action, args: args })
+          .then(function () { Board.stamp && Board.stamp(pv.summary); T.refresh(ctx.id, true); })
+          .catch(function (e) { Board.stamp && Board.stamp(action + ': ' + e); });
+      });
+    }).catch(function (e) { Board.stamp && Board.stamp(action + ': ' + e); });
+  }
+  T.register('providers', {
+    label: 'Providers', cadenceMs: 30000,
+    describe: function () { return 'Providers'; },
+    render: function (host, p, ctx) {
+      return invoke('terminal_providers').then(function (d) {
+        host.innerHTML = '';
+        var list = (d && d.providers) || [];
+        if (!list.length) { host.appendChild(H.stateBlock('info', 'You own no providers.')); return; }
+        list.forEach(function (pr) {
+          cap(host, pr.id + ' · ' + pr.substation_id + (pr.guild_owned ? ' · guild' : '') + (pr.substation_closing ? ' · substation closing' : ''));
+          host.appendChild(tiles([
+            ['sells to', POLICY[pr.access] || pr.access, null, pr.access === 'closedMarket' ? 'muted' : null],
+            ['rate', H.denomQty(Number((pr.rate || {}).amount) || 0, (pr.rate || {}).denom) + ' / mW·block'],
+            ['sold', H.fmtNum(pr.sold_mw || 0) + ' mW · ' + (pr.agreements || []).length + ' buyers', null, pr.sold_mw ? 'live' : 'muted'],
+            ['earnings', coinsText(pr.earnings), null, (pr.earnings || []).length ? 'ok' : 'muted'],
+            ['collateral', coinsText(pr.collateral), null, 'muted'],
+          ]));
+          host.appendChild(doorRow([
+            { label: 'Collect', primary: true, onClick: function () { providerDoor(pr.id, 'withdraw', {}, ctx); } },
+            { label: 'Terms', onClick: function () { add('provider', { id: pr.id }); } },
+          ]));
+        });
+      }).catch(function (e) { fail(host, 'Providers', e); });
+    },
+  });
+
+  var PROVIDER_ACTIONS = [
+    { value: 'capacity_min', label: 'Smallest contract (mW)' }, { value: 'capacity_max', label: 'Largest contract (mW)' },
+    { value: 'duration_min', label: 'Shortest contract (blocks)' }, { value: 'duration_max', label: 'Longest contract (blocks)' },
+    { value: 'access', label: 'Who may buy' }, { value: 'withdraw', label: 'Collect earnings' }, { value: 'delete', label: 'Delete' },
+  ];
+  T.register('provider', {
+    label: 'Provider ticket', cadenceMs: 0,
+    describe: function (p) { return 'Provider' + (p && p.id ? ' · ' + p.id : ''); },
+    params: [{ key: 'id', label: 'Provider id', kind: 'id', kinds: [10], placeholder: '10-5' }],
+    render: function (host, p) {
+      host.innerHTML = '';
+      var pv = null;
+      var argsOf = function (v) { return { value: v.value, policy: v.policy }; };
+      host.appendChild(ticket({
+        cta: 'Sign',
+        doneText: 'signed',
+        fields: function (v) {
+          var a = v.action || 'capacity_max';
+          var f = [
+            { key: 'provider', label: 'Provider', kind: 'text', value: (p && p.id) || '', placeholder: '10-5' },
+            { key: 'action', label: 'Change', kind: 'choice', options: PROVIDER_ACTIONS, value: a },
+          ];
+          if (a === 'access') f.push({ key: 'policy', label: 'Sells to', kind: 'choice', options: [{ value: 'open', label: 'anyone' }, { value: 'guild', label: 'granted players' }, { value: 'closed', label: 'nobody new' }] });
+          else if (a !== 'withdraw' && a !== 'delete') f.push({ key: 'value', label: 'New value', placeholder: '1000' });
+          return f;
+        },
+        preview: function (v) {
+          pv = null;
+          var a = v.action || 'capacity_max';
+          if (!v.provider || (/^(capacity|duration)_/.test(a) && !v.value)) return null;
+          return invoke('terminal_provider_preview', { providerId: v.provider, action: a, args: argsOf(v) })
+            .then(function (r) { return r && r.ok === false ? { ok: false, refusal: (r.problems || []).join('; '), warnings: r.warnings } : r; });
+        },
+        facts: function (r) {
+          pv = r;
+          return [['change', r.summary, null, 'live'], ['earnings now', coinsText(r.earnings), null, 'muted'], ['open contracts', String(r.open_agreements || 0), null, 'muted']];
+        },
+        confirm: function (v) {
+          return pv ? { title: pv.summary + '?', cta: (v.action === 'delete' ? 'Delete' : 'Sign'), rows: [['Provider', pv.provider_id], ['Message', pv.message]] } : null;
+        },
+        submit: function (v) {
+          if (!pv) return Promise.reject(new Error('fill in the change and wait for the check'));
+          return invoke('terminal_provider_action', { providerId: v.provider, action: v.action || 'capacity_max', args: argsOf(v) });
+        },
+      }));
+    },
+  });
+
 })();

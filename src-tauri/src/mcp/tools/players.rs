@@ -1362,23 +1362,24 @@ pub async fn execute(
             // connection dilutes each player's share (connectionCapacity ==
             // capacity / connectionCount). Block if we can't sustain another at
             // the minimum draw — separate from the hard MAX cap above.
-            let guild_id_opt = { crate::game_state::GAME_STATE.read().unwrap().guild_id.clone() };
-            if let Some(gid) = guild_id_opt.as_deref().filter(|s| !s.is_empty()) {
-                if let Ok(gp) = crate::mcp::guild_power::resolve_guild_power(client, gid).await {
-                    if gp.sub_capacity > 0.0
-                        && gp.share_if_one_more < crate::mcp::guild_power::MIN_PLAYER_DRAW_MW
-                    {
-                        return vec![Content::text(format!(
-                            "BLOCKED: guild substation {} can't power another player. \
-                             capacity {:.1} kW / {} connections → {:.2} kW each if one more joins, \
-                             below the ~{:.1} kW minimum draw. Free capacity or grow the reactor first.",
-                            gp.substation_id,
-                            gp.sub_capacity / 1e6,
-                            gp.sub_connection_count,
-                            gp.share_if_one_more / 1e6,
-                            crate::mcp::guild_power::MIN_PLAYER_DRAW_MW / 1e6,
-                        ))];
-                    }
+            let gid = match crate::mcp::virtual_players::signup_guild(params.guild_id.clone()) {
+                Ok(g) => g,
+                Err(e) => return vec![Content::text(format!("BLOCKED: {e}."))],
+            };
+            if let Ok(gp) = crate::mcp::guild_power::resolve_guild_power(client, &gid).await {
+                if gp.sub_capacity > 0.0
+                    && gp.share_if_one_more < crate::mcp::guild_power::MIN_PLAYER_DRAW_MW
+                {
+                    return vec![Content::text(format!(
+                        "BLOCKED: guild substation {} can't power another player. \
+                         capacity {:.1} kW / {} connections → {:.2} kW each if one more joins, \
+                         below the ~{:.1} kW minimum draw. Free capacity or grow the reactor first.",
+                        gp.substation_id,
+                        gp.sub_capacity / 1e6,
+                        gp.sub_connection_count,
+                        gp.share_if_one_more / 1e6,
+                        crate::mcp::guild_power::MIN_PLAYER_DRAW_MW / 1e6,
+                    ))];
                 }
             }
 
@@ -1387,7 +1388,7 @@ pub async fn execute(
             let result = vplayer_bridge::call(
                 app_handle,
                 "signup",
-                json!({ "index": index, "name": name, "guild_id": params.guild_id }),
+                json!({ "index": index, "name": name, "guild_id": gid }),
                 180,
             )
             .await;

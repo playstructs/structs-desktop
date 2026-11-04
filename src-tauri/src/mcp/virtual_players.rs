@@ -519,6 +519,11 @@ mod tests {
         let store: VirtualPlayerStore = serde_json::from_str(json).unwrap();
         assert_eq!(store.players[0].role, VPlayerRole::Bait);
     }
+
+    #[test]
+    fn signup_guild_prefers_the_requested_guild() {
+        assert_eq!(signup_guild(Some("0-4".into())), Ok("0-4".to_string()));
+    }
 }
 
 // ── THE signup path ──────────────────────────────────────────────────────────
@@ -536,6 +541,23 @@ pub struct Spawned {
     /// guild membership — no planet, no fleet, no Command Ship — until
     /// `auto_harvest` explores it.
     pub explored: bool,
+}
+
+/// The guild a signup must join: the caller's `requested` id, else the
+/// primary's synced guild. Never "none": the façade only refuses a signup
+/// whose guild differs from the one the active guild API serves, so an
+/// unchecked signup lands in whatever guild that API happens to be.
+pub fn signup_guild(requested: Option<String>) -> Result<String, String> {
+    requested
+        .filter(|s| !s.is_empty())
+        .or_else(|| {
+            crate::game_state::GAME_STATE
+                .read()
+                .ok()
+                .and_then(|g| g.guild_id.clone())
+                .filter(|s| !s.is_empty())
+        })
+        .ok_or_else(|| "primary's guild not synced yet; signup refused until it is".to_string())
 }
 
 /// Birth one virtual player: derive HD `index` → guild signup through the
@@ -559,6 +581,7 @@ pub async fn spawn_one(
     use crate::mcp::telemetry::{tlog, Sev};
     use serde_json::json;
 
+    let guild_id = signup_guild(guild_id)?;
     let data = crate::mcp::vplayer_bridge::call(
         app,
         "signup",

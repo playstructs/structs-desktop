@@ -1087,6 +1087,24 @@ async fn board_invoke(
             (Some(r), Some(e), Some(sub)) => from_result(crate::mcp::guild_economy::found_guild(&st.app, &r, &e, &sub).await),
             _ => err_json("reactorId + endpoint + entrySubstationId required".into()),
         },
+        "terminal_guild_admin_overview" => from_result(crate::mcp::guild_admin::overview(s("guildId")).await),
+        "terminal_guild_admin_preview" => match s("action") {
+            Some(a) => from_result(crate::mcp::guild_admin::preview(s("guildId"), &a, body.get("args").unwrap_or(&Value::Null)).await),
+            None => err_json("action required".into()),
+        },
+        "terminal_guild_admin" => match s("action") {
+            Some(a) => from_result(crate::mcp::guild_admin::execute(&st.app, s("guildId"), &a, body.get("args").unwrap_or(&Value::Null)).await),
+            None => err_json("action required".into()),
+        },
+        "terminal_providers" => from_result(crate::mcp::providers::list().await),
+        "terminal_provider_preview" => match (s("providerId"), s("action")) {
+            (Some(p), Some(a)) => from_result(crate::mcp::providers::preview(&p, &a, body.get("args").unwrap_or(&Value::Null)).await),
+            _ => err_json("providerId + action required".into()),
+        },
+        "terminal_provider_action" => match (s("providerId"), s("action")) {
+            (Some(p), Some(a)) => from_result(crate::mcp::providers::execute(&st.app, &p, &a, body.get("args").unwrap_or(&Value::Null)).await),
+            _ => err_json("providerId + action required".into()),
+        },
         "mcp_collect_retained_preview" => from_result(board_pages::mcp_collect_retained_preview(s("player")).await),
         "mcp_collect_retained" => from_result(board_pages::mcp_collect_retained_impl(st.app.clone(), s("player")).await),
         "mcp_render_map" => match s("player") {

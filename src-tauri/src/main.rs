@@ -76,16 +76,19 @@ fn main() {
                 // the webapp's own replay confirmation, so this menu entry and
                 // Account > Combat Tutorial are one path into TutorialMode's
                 // launch (which carries the player's energy into the
-                // simulation). The fallback mirrors that launch directly: set
-                // the session flag the webapp reads at boot, clear any "just
-                // exited" flag, reload. sessionStorage (not local) so the
-                // tutorial never outlives the app session.
+                // simulation, and marks the run a replay so it ends by handing
+                // the player back to the game rather than through the FTL jump).
+                // The fallback mirrors that launch directly: set the session
+                // flags the webapp reads at boot, clear any "just exited" flag,
+                // reload. sessionStorage (not local) so the tutorial never
+                // outlives the app session.
                 if let Some(window) = app.get_webview_window("main") {
                     let script = r#"if (window.StructsTutorial) {
                         window.StructsTutorial.replay() || window.StructsTutorial.launch();
                     } else {
                         try {
                             sessionStorage.setItem('tutorialActive', '1');
+                            sessionStorage.setItem('tutorialReplay', '1');
                             sessionStorage.removeItem('tutorialExited');
                         } catch (e) {}
                         location.reload();
@@ -172,6 +175,12 @@ fn main() {
             mcp::terminal::terminal_rank_purchase,
             mcp::terminal::terminal_found_guild_preview,
             mcp::terminal::terminal_found_guild,
+            mcp::terminal::terminal_guild_admin_overview,
+            mcp::terminal::terminal_guild_admin_preview,
+            mcp::terminal::terminal_guild_admin,
+            mcp::terminal::terminal_providers,
+            mcp::terminal::terminal_provider_preview,
+            mcp::terminal::terminal_provider_action,
             mcp::terminal::terminal_series,
             mcp::terminal::terminal_series_metrics,
             mcp::charts::terminal_chart_catalog,

@@ -459,16 +459,18 @@ try {
     },
     // Derive index N → sign the guild-join proxy message → POST /auth/signup →
     // poll the address until the chain assigns a player id.
-    // Optional requestedGuildId: signup always goes through the ACTIVE guild's
-    // API (a guild API only serves its own guild), so a mismatch is an error,
-    // not a redirect — switch the active guild first for cross-guild signup.
+    // requestedGuildId is required: signup always goes through the ACTIVE
+    // guild's API (a guild API only serves its own guild), so a mismatch is an
+    // error, not a redirect — switch the active guild first for cross-guild
+    // signup. Without it the join would land wherever that API points.
     async signup(index, name, requestedGuildId) {
+      if (!requestedGuildId) throw new Error('signup needs the guild to join');
       const a = await __vpDerive(index);
       const address = a.address;
       const pubkeyHex = walletManager.bytesToHex(a.pubkey);
       const guildId = gameState.thisGuild && gameState.thisGuild.id;
       if (!guildId) throw new Error('guild not loaded yet');
-      if (requestedGuildId && requestedGuildId !== guildId) {
+      if (requestedGuildId !== guildId) {
         throw new Error('signup targets guild ' + requestedGuildId + ' but active infrastructure serves guild ' + guildId + '; switch the active guild first');
       }
       const message = guildAPI.buildGuildMembershipJoinProxyMessage(guildId, address, 0);
@@ -884,12 +886,15 @@ sed -i.bak "s|export const ONBOARDING_INTERFACE_NAME = 'structs-webapp';|export 
   "$BUILD_DIR/js/telemetry/OnboardingTelemetry.js"
 verify_patched "$BUILD_DIR/js/telemetry/OnboardingTelemetry.js" "ONBOARDING_INTERFACE_NAME = 'structs-desktop'" "OnboardingTelemetry.js interface name"
 
-# ── Combat Training offer contract ──
-# frontend/structs-config.js re-offers the tutorial to players who never went
-# through it. It cannot import the webapp's own constants (the bundle keeps them
-# module-private), so it mirrors them by value. If upstream renames any of
-# these, the offer silently never fires — this turns that into a build failure.
-echo "    Verifying Combat Training offer contract..."
+# ── Combat Training contract ──
+# The webapp owns the tutorial offer (TutorialMode.offerIfUndecided, webapp
+# 3255fc77). frontend/structs-config.js no longer decides who gets asked, but it
+# still mirrors TutorialMode's session flags by value for its own entry point
+# (Help ▸ Combat Training), because the bundle keeps the class module-private.
+# If upstream renames one of these, or drops the offer it now owns, the desktop
+# app would silently stop launching the tutorial or stop offering it to anyone —
+# this turns either into a build failure.
+echo "    Verifying Combat Training contract..."
 verify_contract() {
   local file="$1" needle="$2" desc="$3"
   [ -f "$file" ] || { echo "ERROR: $desc — $file is gone (webapp refactor?); update frontend/structs-config.js"; exit 1; }
@@ -899,26 +904,28 @@ verify_contract() {
 TUT="$BUILD_DIR/js/tutorial/TutorialMode.js"
 verify_contract "$TUT" "ACTIVE_KEY = 'tutorialActive'" "TutorialMode active flag"
 verify_contract "$TUT" "EXITED_KEY = 'tutorialExited'" "TutorialMode exited flag"
-# The VALUES matter as much as the keys: EXITED_KEY held a bare '1' until the
-# Combat Training menu landed (webapp 7d950abc), which silently stopped the
-# offer seeing a finished tutorial. Pin the values and the energy hand-off too.
-verify_contract "$TUT" "EXIT_COMPLETED = 'completed'" "TutorialMode completed exit value"
-verify_contract "$TUT" "EXIT_ABANDONED = 'abandoned'" "TutorialMode abandoned exit value"
+# A menu launch is always a replay: the player is in the game already, so the
+# run must hand them back to it instead of bridging them in through the FTL jump.
+verify_contract "$TUT" "REPLAY_KEY = 'tutorialReplay'" "TutorialMode replay flag"
 verify_contract "$TUT" "PLAYER_ENERGY_KEY = 'tutorialPlayerEnergy'" "TutorialMode energy hand-off key"
 verify_contract "$TUT" "PLAYER_ENERGY_FIELDS = ['load', 'structs_load', 'capacity', 'connection_capacity']" \
   "TutorialMode energy hand-off fields"
+# The offer itself. structs-config.js dropped its own re-offer on the strength of
+# these two: the decision helper, and the boot call site that reaches a logged-in
+# player. Losing either would offer nobody, silently, which is the one failure
+# the old re-offer existed to prevent.
+verify_contract "$TUT" "static offerIfUndecided()" "TutorialMode offer decision"
+verify_contract "$BUILD_DIR/js/index.js" "TutorialMode.offerIfUndecided()" "offer runs at boot"
+verify_contract "$BUILD_DIR/js/controllers/AuthController.js" "orientationEnd()" "Auth.orientationEnd route"
+# Step keys read by the Onboarding card (src-tauri/src/mcp/onboarding.rs), which
+# splits each session's funnel on them.
 TEL="$BUILD_DIR/js/telemetry/OnboardingTelemetry.js"
-verify_contract "$TEL" "SESSION_ID: 'onboardingSessionId'" "onboarding session key"
 verify_contract "$TEL" "'orientation.tutorial_offer'" "tutorial offer step key"
 verify_contract "$BUILD_DIR/js/index.js" "'tutorial.end.ftl_jump'" "tutorial completion step key"
-OFR="$BUILD_DIR/js/view_models/signup/OrientationEndViewModel.js"
-verify_contract "$OFR" "launchTutorial" "offer page Launch button id"
-verify_contract "$OFR" "skipTutorial" "offer page Skip button id"
-verify_contract "$BUILD_DIR/js/controllers/AuthController.js" "orientationEnd()" "Auth.orientationEnd route"
-# Help > Combat Training hands off to the webapp's own replay confirmation.
+# Help ▸ Combat Training hands off to the webapp's own replay confirmation.
 verify_contract "$BUILD_DIR/js/controllers/AccountController.js" "startTutorial()" "Account.startTutorial route"
-verify_contract "$BUILD_DIR/js/view_models/account/AccountStartTutorialViewModel.js" "TutorialMode.launch()" \
-  "Account replay confirmation launches the tutorial"
+verify_contract "$BUILD_DIR/js/view_models/account/AccountStartTutorialViewModel.js" "TutorialMode.launch(true)" \
+  "Account replay confirmation launches the tutorial as a replay"
 
 # Clean up .bak files
 find "$BUILD_DIR" -name "*.bak" -delete

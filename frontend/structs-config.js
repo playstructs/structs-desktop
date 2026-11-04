@@ -1052,6 +1052,36 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
   })();
 
   // ── Rust Hasher: Worker Shim ──
+  // v0.22 work difficulty (structsd types.CalculateDifficulty), exactly as the
+  // webapp's util/WorkDifficulty.js computes it: 64 − max{k ≤ 63 : range^k ≤
+  // age^63}, 64 when age ≤ 1 or range ≤ 1. BigInt — the powers overflow f64.
+  function integerWorkDifficulty(age, range) {
+    age = BigInt(age); range = BigInt(range);
+    if (age <= 1n || range <= 1n) return 64;
+    var ceiling = age ** 63n, power = 1n, exponent = 0;
+    for (var k = 1; k <= 63; k++) {
+      power *= range;
+      if (power > ceiling) break;
+      exponent = k;
+    }
+    return 64 - exponent;
+  }
+  // Would the webapp accept this proof at `height`? (TaskState.checkResultHashDifficulty
+  // minus the sha256 re-check, which Rust's own verifier already did.) Unknown
+  // inputs answer true: this only ever DELAYS a proof, never withholds one.
+  function proofEligibleAt(snap, height) {
+    try {
+      var hash = String(snap.result_hash || '');
+      if (!/^[a-f0-9]{64}$/.test(hash) || height == null) return true;
+      var start = BigInt(snap.block_start || 0), current = BigInt(height);
+      if (start === 0n) return true;
+      if (current < start) return false;
+      var need = integerWorkDifficulty(current - start, snap.difficulty_target || 0);
+      return hash.match(/^0*/)[0].length >= need;
+    } catch (e) { return true; }
+  }
+  window.__STRUCTS_PROOF_ELIGIBLE__ = proofEligibleAt;
+
   // Intercepts WebWorker creation for TaskWorker.js and routes hashing
   // to the Rust backend via Tauri commands. Uses a Proxy on the Worker
   // constructor to create real Worker instances (satisfying instanceof
@@ -1175,7 +1205,12 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
               if (event.payload.object_id !== pid) return;
               if (!ws.onmessage) return;
               var snapshot = convertSnapshotDates(event.payload);
-              reply(snapshot);
+              // v0.22's TaskManager re-checks a finished proof at the height IT
+              // has observed and RESTARTS the task when the proof falls short.
+              // Rust finishes against an estimated age that can run a block or
+              // two ahead, so a good proof would be thrown away and re-hashed.
+              // Difficulty only falls with age: hold it until it is accepted.
+              deliverWhenEligible(snapshot);
               // Notify Rust for auto-chain policies (e.g., auto_refine after mine).
               // Arg names MUST be camelCase — Tauri v2 camelCases command args
               // across the bridge, so snake_case keys fail to deserialize and the
@@ -1198,6 +1233,16 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
             console.error('[Structs Hasher] Failed to start task:', pid, e);
           });
         };
+
+        function deliverWhenEligible(snapshot) {
+          var started = Date.now();
+          (function check() {
+            if (_terminated) return;
+            var height = window.gameState && window.gameState.currentBlockHeight;
+            if (proofEligibleAt(snapshot, height) || Date.now() - started > 120000) { reply(snapshot); return; }
+            setTimeout(check, 1000);
+          })();
+        }
 
         // Override terminate to stop the Rust task
         var origTerminate = ws.terminate.bind(ws);
@@ -4382,63 +4427,37 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
   })();
 
 
-  // ── Combat Training offer ───────────────────────────────────────────────────
-  // The webapp offers the tutorial exactly once, on the last page of signup
-  // (OrientationEndViewModel). Press Skip Tutorial there and there is no way
-  // back in, and every player who signed up before the tutorial existed never
-  // saw it at all. This re-offers that same page — Launch Tutorial / Skip
-  // Tutorial — to players who have never been through it, and never asks a
-  // player who has already answered.
+  // ── Combat Training entry point ─────────────────────────────────────────────
+  // The webapp owns the offer. Until webapp 3255fc77 it only ever asked once, on
+  // the last page of signup (OrientationEndViewModel) — press Skip there and
+  // there was no way back in, and every player who signed up before the tutorial
+  // existed was never asked at all. This file used to make up that gap with a
+  // re-offer of its own: the player's onboarding history from the guild API, a
+  // localStorage record of everything after signup (which telemetry can never
+  // see), and a poll that put the webapp's own Launch/Skip page up once the
+  // player was settled on the map.
   //
-  // "Has this player been through it" has two sources:
-  //   * the guild API. GET /api/onboarding/player/<id> returns the onboarding
-  //     events of the session the player's signup finished in: a `reached`
-  //     tutorial.end.ftl_jump row means they completed the tutorial, a
-  //     `skipped` orientation.tutorial_offer row means they pressed Skip
-  //     Tutorial. No rows at all — every player who signed up before this
-  //     telemetry — means they were never offered it.
-  //   * localStorage, for everything after signup. OnboardingTelemetry records
-  //     nothing without a signup session, and only ever attaches a player id
-  //     to the signup.employee_record event, so a tutorial launched from the
-  //     app can never reach the server: that answer has to be kept here.
+  // TutorialMode.offerIfUndecided() now does that upstream. localStorage
+  // `tutorialStarted` / `tutorialSkipped` answer it, and the offer opens from
+  // index.js at boot, from device activation and from account recovery. Two
+  // offers would race each other for the same menu, so ours is gone;
+  // scripts/apply-patches.sh pins offerIfUndecided and its boot call site, so
+  // losing the upstream offer fails the build rather than quietly offering
+  // nobody. The one thing upstream has no equivalent of is the desktop app's own
+  // way in — Help ▸ Combat Training — so that is all that stays here.
   (function () {
-    var STORE_KEY = 'structsTutorialChoice';  // { "<player id>": {choice, at, launches} }
-    var FTL_STEP = 'tutorial.end.ftl_jump';
-    var OFFER_STEP = 'orientation.tutorial_offer';
-    /** Launches with no completion before the offer gives up on this player. */
-    var MAX_LAUNCHES = 3;
-    var POLL_MS = 500;
-    /** How long after boot the offer may still appear, for a player who sits in a menu. */
-    var WINDOW_MS = 180000;
-    /** Quiet time on the map before the offer shows, so it never races the game in. */
-    var SETTLE_MS = 1500;
-
-    // TutorialMode's own flags and energy hand-off. The bundle keeps the class
-    // module-private, so these are mirrored here; scripts/apply-patches.sh fails
-    // the build if TutorialMode stops declaring them. This file runs before
-    // js/index.js, which consumes `tutorialExited` while booting — so how the
-    // player left the tutorial is readable here and nowhere later.
+    // TutorialMode's session flags and energy hand-off. The bundle keeps the
+    // class module-private, so these are mirrored by value; apply-patches.sh
+    // fails the build if TutorialMode stops declaring any of them.
     var ACTIVE_KEY = 'tutorialActive';
     var EXITED_KEY = 'tutorialExited';
+    var REPLAY_KEY = 'tutorialReplay';
     var ENERGY_KEY = 'tutorialPlayerEnergy';
     var ENERGY_FIELDS = ['load', 'structs_load', 'capacity', 'connection_capacity'];
-    var EXIT_COMPLETED = 'completed';
-    var EXIT_ABANDONED = 'abandoned';
-
-    var inTutorial = false;
-    var exitedHow = null;
-    var signupSession = false;
-    try {
-      inTutorial = new URLSearchParams(document.location.search).has('tutorial')
-        || sessionStorage.getItem(ACTIVE_KEY) === '1';
-      // 'completed' or 'abandoned' since the Combat Training menu landed; it was
-      // a bare '1' before, which is why this is read as a value, not a boolean.
-      exitedHow = sessionStorage.getItem(EXITED_KEY);
-      // Signup ran in this tab, so the webapp's own offer has already been made.
-      signupSession = !!sessionStorage.getItem('onboardingSessionId');
-    } catch (e) {}
-
-    var offered = false;
+    // Upstream's durable record of whether this install has answered the offer.
+    // Per install, not per player: localStorage, with no player id in the key.
+    var STARTED_KEY = 'tutorialStarted';
+    var SKIPPED_KEY = 'tutorialSkipped';
 
     function log(msg) {
       try {
@@ -4448,31 +4467,6 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
       } catch (e) {}
     }
 
-    function readStore() {
-      try { return JSON.parse(localStorage.getItem(STORE_KEY)) || {}; } catch (e) { return {}; }
-    }
-
-    function writeStore(store) {
-      try { localStorage.setItem(STORE_KEY, JSON.stringify(store)); } catch (e) {}
-    }
-
-    function readChoice(pid) {
-      var entry = readStore()[pid];
-      return entry && typeof entry === 'object' ? entry : null;
-    }
-
-    function writeChoice(pid, choice) {
-      if (!pid) return;
-      var store = readStore();
-      var entry = store[pid] && typeof store[pid] === 'object' ? store[pid] : {};
-      entry.choice = choice;
-      entry.at = Date.now();
-      if (choice === 'launched') entry.launches = (Number(entry.launches) || 0) + 1;
-      store[pid] = entry;
-      writeStore(store);
-      log(pid + ' -> ' + choice + (choice === 'launched' ? ' (attempt ' + entry.launches + ')' : ''));
-    }
-
     function playerId() {
       try {
         var kp = window.gameState && window.gameState.keyPlayers && window.gameState.keyPlayers.player;
@@ -4480,105 +4474,13 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
       } catch (e) { return null; }
     }
 
-    /** The player is in the game, out of the loading screen, with no menu open. */
-    function gameReady() {
-      if (!playerId()) return false;
-      var loading = document.getElementById('loading-screen');
-      if (loading && !loading.classList.contains('hidden')) return false;
-      var menu = document.getElementById('menu-page-layout');
-      if (menu && !menu.classList.contains('hidden')) return false;
-      return true;
-    }
-
-    function whenPlayerKnown(fn) {
-      var giveUpAt = Date.now() + 60000;
-      var timer = setInterval(function () {
-        var pid = playerId();
-        if (pid) { clearInterval(timer); fn(pid); return; }
-        if (Date.now() > giveUpAt) clearInterval(timer);
-      }, POLL_MS);
-    }
-
-    /** @return {Promise<{known: boolean, completed?: boolean, declined?: boolean, why?: string}>} */
-    function serverStatus(pid) {
-      return window.fetch('/api/onboarding/player/' + encodeURIComponent(pid), {
-        method: 'GET',
-        headers: { 'Content-Type': 'application/json' }
-      }).then(function (res) {
-        if (!res.ok) return { known: false, why: 'HTTP ' + res.status };
-        return res.json().then(function (body) {
-          var rows = body && body.data;
-          if (!rows || !Array.isArray(rows)) return { known: false, why: 'unexpected response' };
-          var status = { known: true, completed: false, declined: false, rows: rows.length };
-          rows.forEach(function (row) {
-            if (!row) return;
-            if (row.step_key === FTL_STEP && row.kind === 'reached') status.completed = true;
-            if (row.step_key === OFFER_STEP && row.kind === 'skipped') status.declined = true;
-          });
-          return status;
-        });
-      }).catch(function (err) {
-        return { known: false, why: String((err && err.message) || err) };
-      });
-    }
-
     /**
-     * An unreachable or unreadable history means say nothing: a veteran player
-     * must never be handed a tutorial offer because one request failed.
-     *
-     * @return {Promise<boolean>}
-     */
-    function shouldOffer(pid) {
-      var local = readChoice(pid);
-      if (local && (local.choice === EXIT_COMPLETED || local.choice === EXIT_ABANDONED
-        || local.choice === 'declined')) {
-        return Promise.resolve(false);
-      }
-      // Launched, and gone before either ending: they quit the app part way
-      // through (walking out through Abandon Tutorial records that instead), so
-      // they still haven't been through it. The offer stands — but not forever.
-      if (local && (Number(local.launches) || 0) >= MAX_LAUNCHES) {
-        log(pid + ' started it ' + local.launches + 'x without finishing — not offering again');
-        return Promise.resolve(false);
-      }
-      return serverStatus(pid).then(function (status) {
-        if (!status.known) {
-          log('onboarding history unavailable (' + status.why + ') — not offering');
-          return false;
-        }
-        if (status.completed || status.declined) {
-          log(pid + ' already ' + (status.completed ? 'completed' : 'declined') + ' it during signup');
-          return false;
-        }
-        return true;
-      });
-    }
-
-    /** Shows the webapp's own Launch Tutorial / Skip Tutorial page. */
-    function offer() {
-      var mp = window.menuPage;
-      if (!mp || !mp.router) return false;
-      try {
-        // Preview mode is the webapp's own idiom for a page that must not
-        // become the restored page (HUDViewModel uses it for profiles): goto
-        // then writes neither `currentMenuPage` nor the router's current page,
-        // so a reload comes back to the game instead of to this offer. The
-        // click handler below puts the router back in default mode.
-        mp.router.enablePreviewMode();
-        mp.router.goto('Auth', 'orientationEnd');
-        mp.open();
-        restoreModeOnClose();
-        return true;
-      } catch (e) {
-        log('offer failed: ' + e);
-        return false;
-      }
-    }
-
-    /**
-     * Preview mode has to outlive the offer page, because Skip Tutorial walks on
-     * to a confirmation and that goto must not be saved as the restored page
-     * either. It ends when the player is back on the map.
+     * Preview mode is the webapp's own idiom for a page that must not become the
+     * restored page (HUDViewModel uses it for profiles): goto writes neither
+     * `currentMenuPage` nor the router's current page, so a reload comes back to
+     * the game instead of to this confirmation. It has to outlive the page,
+     * because walking on to the tutorial is another goto — it ends when the
+     * player is back on the map.
      */
     function restoreModeOnClose() {
       var layout = document.getElementById('menu-page-layout');
@@ -4591,92 +4493,38 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
       watch.observe(layout, { attributes: true, attributeFilter: ['class'] });
     }
 
-    // The page's own handlers reload (Launch Tutorial) or go to a confirmation
-    // (Skip Tutorial), so the answer is recorded in the capture phase, ahead of
-    // them. Skip is taken at its word rather than waiting for the confirmation:
-    // cancelling it comes straight back to this page, where any later answer
-    // overwrites this one, and the buttons' ids are the page's own while the
-    // confirmation shares `tutorial-confirm-btn` with restart and abandon.
-    document.addEventListener('click', function (ev) {
-      var el = ev.target && ev.target.closest
-        ? ev.target.closest('#launchTutorial, #skipTutorial')
-        : null;
-      if (!el) return;
-      writeChoice(playerId(), el.id === 'skipTutorial' ? 'declined' : 'launched');
-    }, true);
-
-    // Back from the tutorial, either way. The player left through the FTL jump
-    // (completed) or through Abandon Tutorial in its own menu (abandoned); both
-    // mean they have seen it and neither is asked again.
-    if (exitedHow === EXIT_COMPLETED || exitedHow === EXIT_ABANDONED) {
-      whenPlayerKnown(function (pid) { writeChoice(pid, exitedHow); });
-    }
-
-    function start() {
-      if (inTutorial || exitedHow || signupSession) return;
-
-      var pid = null;
-      var decided = null;   // null until the history answers
-      var asking = false;
-      var quietSince = 0;
-      var giveUpAt = Date.now() + WINDOW_MS;
-
-      var timer = setInterval(function () {
-        if (offered || Date.now() > giveUpAt) { clearInterval(timer); return; }
-        if (!gameReady()) { quietSince = 0; return; }   // a menu is open — wait
-        if (!quietSince) quietSince = Date.now();
-        if (!pid) pid = playerId();
-
-        if (decided === null) {
-          if (!asking) {
-            asking = true;
-            shouldOffer(pid).then(function (yes) { decided = yes; });
-          }
-          return;
-        }
-        if (!decided) { clearInterval(timer); return; }
-        if (Date.now() - quietSince < SETTLE_MS) return;
-
-        // A failed offer leaves the poll running (the game's own menuPage may
-        // not be wired yet); the window above is what ends it.
-        offered = offer();
-        if (offered) {
-          clearInterval(timer);
-          log('offered Combat Training to ' + pid);
-        }
-      }, POLL_MS);
+    /** Opens a menu page in preview mode. @return {boolean} */
+    function show(controller, page) {
+      var mp = window.menuPage;
+      if (!mp || !mp.router) return false;
+      try {
+        mp.router.enablePreviewMode();
+        mp.router.goto(controller, page);
+        mp.open();
+        restoreModeOnClose();
+        return true;
+      } catch (e) {
+        log(controller + '.' + page + ' failed: ' + e);
+        return false;
+      }
     }
 
     // Help ▸ Combat Training (menu.rs) and the console reach the tutorial here.
     window.StructsTutorial = {
       /**
        * Opens the webapp's own replay confirmation (Account ▸ Combat Tutorial),
-       * so the menu entry and the in-game one are the same single path into
-       * TutorialMode.launch() — which carries the player's energy into the
-       * simulation. This is what Help ▸ Combat Training calls.
+       * so the menu entry and the in-game one are a single path into
+       * TutorialMode.launch(true) — which carries the player's energy into the
+       * simulation and marks the run as a replay. This is what the menu calls.
        */
-      replay: function () {
-        var mp = window.menuPage;
-        if (!mp || !mp.router) return false;
-        try {
-          mp.router.enablePreviewMode();
-          mp.router.goto('Account', 'startTutorial');
-          mp.open();
-          restoreModeOnClose();
-          return true;
-        } catch (e) {
-          log('replay failed: ' + e);
-          return false;
-        }
-      },
+      replay: function () { return show('Account', 'startTutorial'); },
       /**
-       * Starts the tutorial directly, mirroring TutorialMode.launch() —
-       * including the energy hand-off, so the simulation shows the player's own
+       * Starts the tutorial directly, mirroring TutorialMode.launch(true),
+       * energy hand-off included, so the simulation shows the player's own
        * figures rather than made-up ones. Prefer replay(); this is the fallback
-       * for a window where the game's menu is not wired up.
+       * for a window whose game menu is not wired up.
        */
       launch: function () {
-        writeChoice(playerId(), 'launched');
         try {
           var p = (window.gameState && window.gameState.keyPlayers
             && window.gameState.keyPlayers.player && window.gameState.keyPlayers.player.player) || null;
@@ -4688,35 +4536,50 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
             sessionStorage.removeItem(ENERGY_KEY);
           }
           sessionStorage.setItem(ACTIVE_KEY, '1');
+          // Anyone reaching the tutorial from this menu is already in the game,
+          // so the run ends by handing them back to it rather than through the
+          // FTL jump that bridges a new player in (TutorialController, EXIT_REPLAYED).
+          sessionStorage.setItem(REPLAY_KEY, '1');
           sessionStorage.removeItem(EXITED_KEY);
         } catch (e) {}
+        log((playerId() || 'player') + ' launched Combat Training from the menu');
         window.location.reload();
       },
-      /** Shows the Launch/Skip page now, whatever this player answered before. */
-      offer: function () { offered = offer(); return offered; },
+      /** Shows the webapp's Launch/Skip page now, whatever this install answered. */
+      offer: function () { return show('Auth', 'orientationEnd'); },
       status: function () {
-        var pid = playerId();
+        var started = null, skipped = null, active = null, exited = null, replay = null;
+        try {
+          started = localStorage.getItem(STARTED_KEY);
+          skipped = localStorage.getItem(SKIPPED_KEY);
+          active = sessionStorage.getItem(ACTIVE_KEY);
+          exited = sessionStorage.getItem(EXITED_KEY);
+          replay = sessionStorage.getItem(REPLAY_KEY);
+        } catch (e) {}
         return {
-          player: pid,
-          local: pid ? readChoice(pid) : null,
-          inTutorial: inTutorial,
-          exitedHow: exitedHow,
-          offered: offered
+          player: playerId(),
+          // What the webapp's own offer will do on the next boot.
+          decided: !!(started || skipped),
+          startedTutorial: started === '1',
+          skippedTutorial: skipped === '1',
+          inTutorial: active === '1',
+          isReplay: replay === '1',
+          exitedHow: exited
         };
       },
-      /** Forgets this player's answer, so the offer returns on the next boot. */
+      /**
+       * Clears upstream's decision, so its offer returns on the next boot. The
+       * record is per install, so this forgets it for every player on this one.
+       */
       forget: function () {
-        var pid = playerId();
-        if (!pid) return false;
-        var store = readStore();
-        delete store[pid];
-        writeStore(store);
+        try {
+          localStorage.removeItem(STARTED_KEY);
+          localStorage.removeItem(SKIPPED_KEY);
+        } catch (e) { return false; }
+        log('forgot the Combat Training answer — the offer returns on the next boot');
         return true;
       }
     };
-
-    if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', start);
-    else start();
   })();
 
 

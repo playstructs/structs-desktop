@@ -71,9 +71,9 @@
    * fails on it: a new card that nobody filed is a card nobody will find. */
   var CARD_GROUPS = [
     ['Command', ['help', 'next', 'alerts', 'watchlist', 'feed']],
-    ['Explore', ['player', 'record', 'guild', 'members', 'planet', 'map', 'inspector', 'sheet', 'chart', 'people', 'stats', 'onboarding']],
+    ['Explore', ['player', 'record', 'guild', 'guildadmin', 'guildmember', 'guildset', 'members', 'planet', 'map', 'inspector', 'sheet', 'chart', 'people', 'stats', 'onboarding']],
     ['Armada', ['replication', 'armada', 'ops', 'build', 'fleet', 'pow', 'tasks', 'solve', 'queue', 'results', 'crew', 'crewpay']],
-    ['Industry', ['energy', 'grid', 'brownout', 'halt', 'allocations', 'fuel', 'market', 'book', 'ore', 'banks', 'gt', 'bank', 'rank', 'found', 'wallet', 'deliver']],
+    ['Industry', ['energy', 'grid', 'brownout', 'halt', 'allocations', 'fuel', 'market', 'book', 'ore', 'banks', 'gt', 'bank', 'rank', 'found', 'providers', 'provider', 'wallet', 'deliver']],
     ['War', ['scout', 'tally', 'posture', 'targets', 'raids', 'log', 'grudges', 'vetoes', 'incidents']],
     ['System', ['health', 'sounds']],
   ];
@@ -1556,7 +1556,7 @@
     SOUNDS: ['sounds'], SFX: ['sounds'], AUDIO: ['sounds'],
     MKT: ['market'], MARKET: ['market'], PEOPLE: ['people'], TAPE: ['feed'], FLOW: ['feed'],
     DELIVER: ['deliver'], PAY: ['deliver'], SEND: ['deliver'], GT: ['gt', 'id'], GUILD: ['guild', 'id'],
-    BANKS: ['banks'], BANK: ['bank'], MINT: ['bank'], REDEEM: ['bank'], RANK: ['rank', 'optid'], FOUND: ['found'], SHEET: ['sheet', 'id'], TS: ['sheet', 'id'], TEARSHEET: ['sheet', 'id'],
+    BANKS: ['banks'], BANK: ['bank'], MINT: ['bank'], REDEEM: ['bank'], RANK: ['rank', 'optid'], FOUND: ['found'], ADMIN: ['guildadmin', 'optid'], RECRUIT: ['guildmember', 'optid'], INVITE: ['guildmember', 'optid'], GSET: ['guildset', 'optid'], PROVIDERS: ['providers'], SELLING: ['providers'], TERMS: ['provider', 'optid'], SHEET: ['sheet', 'id'], TS: ['sheet', 'id'], TEARSHEET: ['sheet', 'id'],
     PLAYER: ['player', 'id'], MAP: ['map', 'id'], PLANET: ['planet', 'id'], INSPECT: ['inspector', 'id'], WATCH: ['watchlist', 'ids'],
     // The structs.app link words (docs/links.md): an energy provider's offer and
     // a reactor have no card of their own, so they open in the inspector.
@@ -3149,6 +3149,7 @@
         host.appendChild(doorRow([
           { label: 'Guild token', onClick: function () { add('gt', { id: p.id }); } },
           { label: 'Buy a rank', onClick: function () { add('rank', { id: p.id }); } },
+          { label: 'Admin', onClick: function () { add('guildadmin', { id: p.id }); } },
           { label: 'Tearsheet', onClick: function () { add('sheet', { id: p.id }); } },
         ]));
       });

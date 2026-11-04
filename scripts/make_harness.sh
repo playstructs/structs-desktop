@@ -478,6 +478,49 @@ cat > "$FIX" <<'EOF'
         founder: '1-194', cost_ualpha: '2000000', burned_ualpha: '1000000', collateral_ualpha: '1000000', vault_ualpha: '136101019988' };
     },
     terminal_found_guild: { ok: true, tx: 'FOUNDTX' },
+    // v0.22 guild management: 1-194 is a member of 0-1 at #50 with no admin.
+    terminal_guild_admin_overview: function (args) {
+      return { ok: true, guild_id: args.guildId || '0-1', name: 'SN Corp', owner: '1-1', endpoint: 'https://g.example/guild.json',
+        entry_rank: 101, entry_substation_id: '4-1', join_minimum: '0', bypass_by_request: 'closed', bypass_by_invite: 'closed',
+        convert_in_fee: '0.000000000000000000', convert_out_fee: '0.000000000000000000',
+        rank_sale: { base_price: '0', step_increase: '0', minimum_rank: '0', join_enabled: false },
+        member_count: 3312, officers: [{ player_id: '1-1', rank: 1 }],
+        grants: [{ player_id: '1-1', bits: '17166862', labels: ['admin', 'update', 'membership'], admin: true, owner: true },
+                 { player_id: '1-56', bits: '262656', labels: ['membership', 'provider open'], admin: false, owner: false }],
+        rank_grants: [{ rank: 1, bits: '16777216', labels: ['names and pictures'], stale_admin: false },
+                      { rank: 10, bits: '2', labels: ['admin'], stale_admin: true }],
+        pending: [{ guild_id: '0-1', player_id: '1-777', kind: 'request', status: 'proposed', proposer: '1-777', substation_id: '', mine: false }],
+        me: { player_id: '1-194', member: true, rank: 50, owner: false, direct_bits: [], rank_bits: [], admin: false, key_bits: ['play', 'admin', 'membership'] } };
+    },
+    terminal_guild_admin_preview: function (args) {
+      var a = args.action, x = args.args || {};
+      var who = x.player || '';
+      if ((a === 'kick' || a === 'invite' || a === 'approve' || a === 'set_rank') && !/^1-\d+$/.test(who)) return { ok: false, problems: ["'" + who + "' is not a player id (they look like 1-42)"], warnings: [] };
+      var summary = { approve: 'Admit ' + who + ' to 0-1', invite: 'Invite ' + who + ' to 0-1', kick: 'Remove ' + who + ' from 0-1',
+        set_rank: "Set " + who + "'s rank in 0-1 to " + x.rank, rank_sale: '0-1 sells ranks down to ' + x.minimum_rank + ': first step ' + (x.base || 0) + ', each next step ' + (x.step || 0) + ' more' }[a] || a;
+      return { ok: true, problems: [], warnings: a === 'rank_sale' ? ['you hold no admin grant on this guild (since v0.22 admin must be granted directly — a rank no longer gives it)'] : [],
+        guild_id: args.guildId || '0-1', action: a, summary: summary, message: 'MsgGuild', payload: {} };
+    },
+    terminal_guild_admin: { ok: true, tx: 'GUILDTX' },
+    // v0.22 providers: 10-5 open with one buyer and earnings waiting; 10-6 closed and idle.
+    terminal_providers: { ok: true, owner: '1-194', height: 3420000, providers: [
+      { id: '10-5', owner: '1-194', guild_owned: false, substation_id: '4-15', substation_closing: false, rate: { denom: 'ualpha', amount: '2' }, access: 'openMarket',
+        capacity_min: 1000, capacity_max: 1000000, duration_min: 100, duration_max: 10000, provider_penalty: '0', consumer_penalty: '0',
+        earnings: [{ denom: 'ualpha', amount: '3500000' }], collateral: [{ denom: 'ualpha', amount: '9000000' }],
+        agreements: [{ id: '11-1', owner: '1-7', capacity_mw: 5000, start_block: 3410000, end_block: 3430000, blocks_left: 10000 }], sold_mw: 5000, income_per_block: 10000 },
+      { id: '10-6', owner: '1-194', guild_owned: false, substation_id: '4-15', substation_closing: false, rate: { denom: 'ualpha', amount: '1' }, access: 'closedMarket',
+        capacity_min: 1000, capacity_max: 1000, duration_min: 10, duration_max: 10, provider_penalty: '0', consumer_penalty: '0',
+        earnings: [], collateral: [], agreements: [], sold_mw: 0, income_per_block: 0 },
+    ] },
+    terminal_provider_preview: function (args) {
+      var a = args.action, x = args.args || {};
+      if (a === 'capacity_max' && Number(x.value) < 1000) return { ok: false, problems: [x.value + ' is below the capacity minimum (1000)'], warnings: [] };
+      var summary = { withdraw: 'Collect ' + args.providerId + "'s earnings into your vault", capacity_max: args.providerId + "'s largest contract becomes " + x.value + ' mW',
+        'delete': 'Delete ' + args.providerId + ': open contracts close, both pools go to your vault' }[a] || a;
+      return { ok: true, problems: [], warnings: [], provider_id: args.providerId, action: a, summary: summary, message: 'MsgProvider',
+        payload: {}, earnings: args.providerId === '10-5' ? [{ denom: 'ualpha', amount: '3500000' }] : [], collateral: [], open_agreements: args.providerId === '10-5' ? 1 : 0 };
+    },
+    terminal_provider_action: { ok: true, tx: 'PROVTX' },
     terminal_tearsheet: { kind: 'player', id: '1-61', height: 4200719,
       identity: { username: 'JPEG', pfp_attrs: '{"head":12,"neck":2,"body":7,"arms":3,"background":3}', tag: 'OH', guild_name: 'Orbital Hydro', planet_id: '2-223', fleet_id: '9-61' },
       standing: { planet_id: '2-223', fleet_id: '9-61', guild_id: '0-2', last_action: 4200700, ago_blocks: 19, charge: 19, known: true },

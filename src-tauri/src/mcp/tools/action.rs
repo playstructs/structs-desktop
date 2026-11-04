@@ -87,8 +87,10 @@ pub async fn execute(
         "resync" => action_resync(app_handle, &params.args).await,
         "rank_quote" | "rank_purchase" => action_rank(app_handle, params.action.as_str(), &params.args).await,
         "found_guild" => action_found_guild(app_handle, &params.args).await,
+        "guild" => action_guild(app_handle, &params.args).await,
+        "provider" => action_provider(app_handle, &params.args).await,
         other => vec![Content::text(format!(
-            "Unknown action '{}'. Available: explore, mine, refine, build, activate, deactivate, attack, defend, move_fleet, transfer, deploy, raid, update_primary_reactor, rank_quote, rank_purchase, found_guild, resync",
+            "Unknown action '{}'. Available: explore, mine, refine, build, activate, deactivate, attack, defend, move_fleet, transfer, deploy, raid, update_primary_reactor, rank_quote, rank_purchase, found_guild, guild, provider, resync",
             other
         ))],
     }
@@ -874,6 +876,51 @@ async fn action_found_guild(app_handle: &tauri::AppHandle, args: &Value) -> Vec<
     match res {
         Ok(v) => vec![Content::text(serde_json::to_string_pretty(&v).unwrap_or_default())],
         Err(e) => crate::mcp::handler::fail(format!("found_guild failed: {}", translate_error(&e))),
+    }
+}
+
+/// Guild management and your own membership (v0.22): `{op, guild_id?, ...}`.
+/// `op: overview` reads; every other op (guild_admin::ACTIONS) previews
+/// unless `confirm: true`. The op's fields ride in the same args object.
+async fn action_guild(app_handle: &tauri::AppHandle, args: &Value) -> Vec<Content> {
+    let op = args.get("op").and_then(|v| v.as_str()).unwrap_or("overview");
+    let guild_id = args.get("guild_id").and_then(|v| v.as_str()).map(String::from);
+    let confirmed = args.get("confirm").and_then(|v| v.as_bool()).unwrap_or(false);
+    let res = match op {
+        "overview" => crate::mcp::guild_admin::overview(guild_id).await,
+        _ if confirmed => crate::mcp::guild_admin::execute(app_handle, guild_id, op, args).await,
+        _ => crate::mcp::guild_admin::preview(guild_id, op, args).await.map(|mut p| {
+            p["note"] = json!("preview only — send confirm:true to sign it");
+            p
+        }),
+    };
+    match res {
+        Ok(v) => vec![Content::text(serde_json::to_string_pretty(&v).unwrap_or_default())],
+        Err(e) => crate::mcp::handler::fail(format!("guild {op} failed: {}", translate_error(&e))),
+    }
+}
+
+/// Your energy providers (v0.22): `{op, provider_id?, ...}`. `op: list`
+/// reads; every other op (providers::ACTIONS) needs `provider_id` and
+/// previews unless `confirm: true`.
+async fn action_provider(app_handle: &tauri::AppHandle, args: &Value) -> Vec<Content> {
+    let op = args.get("op").and_then(|v| v.as_str()).unwrap_or("list");
+    let confirmed = args.get("confirm").and_then(|v| v.as_bool()).unwrap_or(false);
+    let res = if op == "list" {
+        crate::mcp::providers::list().await
+    } else {
+        match args.get("provider_id").and_then(|v| v.as_str()) {
+            None => Err("provider_id required (e.g. 10-5)".to_string()),
+            Some(id) if confirmed => crate::mcp::providers::execute(app_handle, id, op, args).await,
+            Some(id) => crate::mcp::providers::preview(id, op, args).await.map(|mut p| {
+                p["note"] = json!("preview only — send confirm:true to sign it");
+                p
+            }),
+        }
+    };
+    match res {
+        Ok(v) => vec![Content::text(serde_json::to_string_pretty(&v).unwrap_or_default())],
+        Err(e) => crate::mcp::handler::fail(format!("provider {op} failed: {}", translate_error(&e))),
     }
 }
 
