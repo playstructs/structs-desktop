@@ -17,7 +17,7 @@
 .ob-hud .ob-tile .fstat-l2 { order: 2; }
 /* Filters, then the page beside its rail. */
 .ob-controls { align-items: center; }
-.ob-controls .sui-checkbox-container label { margin-left: var(--spacing-lg); }
+#board-layout .ob-controls .sui-checkbox-container.has-label label { margin-left: calc(var(--form-input-height-total) + var(--spacing-md)); }
 .ob-status { margin-left: auto; display: inline-flex; align-items: center; gap: var(--spacing-sm); text-decoration: none; color: var(--text-body); }
 .ob-status.is-bad { color: var(--text-warning); }
 .ob-status.is-bad .ob-src-mark { background: var(--text-warning); }
