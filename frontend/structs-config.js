@@ -3740,6 +3740,10 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
     } else {
       document.addEventListener('DOMContentLoaded', function () { setTimeout(runCheck, 3000); });
     }
+    // The game stays open for days: a release cut meanwhile must still show.
+    setInterval(function () {
+      if (!document.getElementById('structs-update-banner')) runCheck();
+    }, 60 * 60 * 1000);
   })();
 
   /* ── [structs-universe] sound hooks ───────────────────────────────────────

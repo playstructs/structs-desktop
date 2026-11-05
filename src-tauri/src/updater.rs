@@ -293,8 +293,12 @@ pub fn auto_update_disabled() -> bool {
     env_hold || !crate::mcp::config::McpConfig::load().auto_update_enabled
 }
 
-/// Spawn the startup update check. Runs once, shortly after launch, off the main
-/// thread. Safe to call unconditionally — it no-ops when already up to date.
+/// How often a running app looks again. It can stay up for days, and a check
+/// made only at launch never sees a release cut in between.
+const RECHECK: Duration = Duration::from_secs(3_600);
+
+/// Spawn the update check: shortly after launch, then every `RECHECK`, off the
+/// main thread. Safe to call unconditionally — it no-ops when already up to date.
 pub fn check_and_stage_on_startup(app: tauri::AppHandle) {
     if auto_update_disabled() {
         eprintln!("[Structs Update] auto-update held (STRUCTS_NO_AUTO_UPDATE / auto_update_enabled=false) — staying on v{}", env!("CARGO_PKG_VERSION"));
@@ -304,15 +308,25 @@ pub fn check_and_stage_on_startup(app: tauri::AppHandle) {
         // Let the app settle (window, IPC, notification permission, initial PoW)
         // before competing for network/CPU.
         tokio::time::sleep(Duration::from_secs(25)).await;
-        match run_startup_update(&app).await {
-            Ok(Some(v)) => eprintln!("[Structs Update] v{v} staged — restart to apply"),
-            Ok(None) => {}
-            Err(e) => eprintln!("[Structs Update] startup check: {e}"),
+        let mut remind = true;
+        loop {
+            match run_startup_update(&app, remind).await {
+                Ok(Some(v)) => eprintln!("[Structs Update] v{v} staged — restart to apply"),
+                Ok(None) => {}
+                Err(e) => eprintln!("[Structs Update] update check: {e}"),
+            }
+            remind = false;
+            tokio::time::sleep(RECHECK).await;
+            if auto_update_disabled() {
+                return;
+            }
         }
     });
 }
 
-async fn run_startup_update(app: &tauri::AppHandle) -> Result<Option<String>, String> {
+/// `remind`: say so if an update is already downloaded. Once a launch: the
+/// hourly pass must not nag about a restart the player is putting off.
+async fn run_startup_update(app: &tauri::AppHandle, remind: bool) -> Result<Option<String>, String> {
     let updater = app.updater().map_err(|e| e.to_string())?;
     let update = match updater.check().await.map_err(|e| e.to_string())? {
         Some(u) => u,
@@ -323,11 +337,13 @@ async fn run_startup_update(app: &tauri::AppHandle) -> Result<Option<String>, St
     // Already downloaded on a previous run and the user hasn't restarted yet —
     // don't re-download, just re-remind.
     if already_staged(&version) {
-        crate::notifications::notify_on(
-            "update",
-            "Structs update ready",
-            &format!("Version {version} is downloaded — restart Structs to finish updating."),
-        );
+        if remind {
+            crate::notifications::notify_on(
+                "update",
+                "Structs update ready",
+                &format!("Version {version} is downloaded — restart Structs to finish updating."),
+            );
+        }
         return Ok(Some(version));
     }
 

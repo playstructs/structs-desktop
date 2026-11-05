@@ -14,7 +14,7 @@
 //! | raids initiated / won | `/api/planet-activity/category/raid_status` | every row, each refresh (a few thousand) |
 //! | ore mined · alpha refined | `/api/ledger/list/player/{id}` | ONE READ PER PLAYER — no bulk route totals the ledger |
 //! | names | `/api/guild/{id}/roster` | one read per guild |
-//! | replicants | `/api/permission/all` | a handful of pages, whole, each crawl |
+//! | replicants | the LCD's `/structs/permission`, not the guild's | ~42 pages, whole, each crawl |
 //!
 //! Raids follow the server's own definitions (`PlayerManager::getPlayerRaidsLaunched`
 //! / `getPlayerRaidsWon`): initiated = `raid_status=initiated` on a fleet the
@@ -37,9 +37,11 @@
 //! one this app launches does, `delegation.rs`); a human almost never hands
 //! another player full control. So `1-X@1-Y` at full control, X ≠ Y, marks
 //! 1-X as a replicant of 1-Y. The store is read whole each crawl from the
-//! guild's `/api/permission/all` (a handful of 10,000-row pages), falling
-//! back to the LCD (1,000-row pages since v0.22.0). Not `updated_since`:
-//! a revoked grant DELETES its row, so an incremental read would keep it.
+//! LCD (~42 pages of 1,000, ~3 s). The guild's `/api/permission/all` is only
+//! the fallback: on 2026-11-05 it answered 9,205 of the chain's 12,579, every
+//! missing grant an old one (index < 4,000, 2,900 of them 1-194's), and each
+//! read as a human. Not `updated_since`: a revoked grant DELETES its row, so
+//! an incremental read would keep it.
 //!
 //! A replicant that never granted is caught by a second marker: a name our
 //! generators mint (`callsign::is_managed_name`), no game action, no ledger
@@ -451,19 +453,20 @@ pub async fn read_replicants() -> Result<HashMap<String, String>, String> {
     Err(format!("permission store longer than {PERM_MAX_PAGES} pages"))
 }
 
-/// Refresh the replicant map, from our guild's API and else the chain. An
-/// empty answer is a failed read: no chain has no permissions. If both fail
-/// the last map stays.
+/// Refresh the replicant map, from the chain and else our guild's API, which
+/// is known to run short (see the module docs). An empty answer is a failed
+/// read: no chain has no permissions. If both fail the last map stays.
 pub async fn refresh_replicants() -> Result<(), String> {
-    let c = crate::mcp::cosmos_client::CosmosClient::new().guild;
-    let guild = walk(&c, "/api/permission/all", None).await.map(|rows| replicants_from_rows(&rows));
-    let (map, source) = match guild {
-        Ok(m) if !m.is_empty() => (m, "guild"),
-        other => match read_replicants().await {
-            Ok(m) if !m.is_empty() => (m, "chain"),
-            Ok(_) => return Err(format!("no permissions from either source (guild: {:?})", other.err())),
-            Err(e) => return Err(format!("chain: {e} (guild: {:?})", other.err())),
-        },
+    let (map, source) = match read_replicants().await {
+        Ok(m) if !m.is_empty() => (m, "chain"),
+        other => {
+            let c = crate::mcp::cosmos_client::CosmosClient::new().guild;
+            match walk(&c, "/api/permission/all", None).await.map(|rows| replicants_from_rows(&rows)) {
+                Ok(m) if !m.is_empty() => (m, "guild"),
+                Ok(_) => return Err(format!("no permissions from either source (chain: {:?})", other.err())),
+                Err(e) => return Err(format!("guild: {e} (chain: {:?})", other.err())),
+            }
+        }
     };
     let mut u = UNIVERSE.lock().unwrap_or_else(|p| p.into_inner());
     u.replicants = map;
