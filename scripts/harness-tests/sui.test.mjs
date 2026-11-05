@@ -198,7 +198,7 @@ const BUDGET = {
   // Sounds card's) and the one-wide container breakpoint; columns are in ch,
   // bars and swatches on the spacing scale.
   'board-terminal-onboarding.js': [0, 0],
-  'onboarding.css': [0, 9],
+  'onboarding.css': [0, 15],
   'board-shim.js':      [0, 0],
   // The debug-tab patch INJECTED INTO THE GAME'S OWN WINDOW, so it renders
   // inches from the real UI — and it was the least audited file in the repo.
@@ -555,7 +555,8 @@ console.log('\n— type sizes are SUI roles');
 // design size. Since 2026-10-09 (Command Deck) that 32 lives in simdeck.css —
 // the deck's d96 verdict/countdown and d64 numbers — and simulator.css has
 // none, so its own entry is struck.
-const TYPE_DEBT = { 'structs-config.js': ['15'], 'board.html': ['32'], 'simdeck.css': ['32'] };
+// onboarding.css: the Telemetry card's headline figures, the 2026-11-05 redesign.
+const TYPE_DEBT = { 'structs-config.js': ['15'], 'board.html': ['32'], 'simdeck.css': ['32'], 'onboarding.css': ['32'] };
 for (const file of windowFiles) {
   const src = readFileSync(root + '/frontend/' + file, 'utf8');
   const sizes = [

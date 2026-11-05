@@ -1205,6 +1205,53 @@ fn is_active(p: Option<&crate::mcp::onboarding_players::PlayerFacts>, cutoff: i6
 
 /// How many of a population reached each milestone, in the order a new player
 /// meets them. Not a strict funnel: a raider need not have refined.
+const DAY_MS: i64 = 86_400_000;
+/// Weeks after joining the Retention grid follows.
+const COHORT_WEEKS: i64 = 8;
+
+/// Where every player stands now, by when they last acted. The five buckets
+/// are exclusive, so they sum to the players; `new_7d` is apart from them.
+pub fn lifecycle(members: &[&crate::mcp::onboarding_players::PlayerFacts], now: i64) -> Value {
+    let (mut today, mut week, mut month, mut gone, mut never) = (0, 0, 0, 0, 0);
+    for p in members {
+        match p.last_active_ms.map(|a| now - a) {
+            None => never += 1,
+            Some(age) if age <= DAY_MS => today += 1,
+            Some(age) if age <= 7 * DAY_MS => week += 1,
+            Some(age) if age <= 30 * DAY_MS => month += 1,
+            Some(_) => gone += 1,
+        }
+    }
+    let new_7d = members.iter().filter(|p| p.created_ms.map_or(false, |c| now - c < 7 * DAY_MS)).count();
+    json!({ "today": today, "week": week, "month": month, "gone": gone, "never": never, "new_7d": new_7d })
+}
+
+/// One row per ISO week joined: how many joined, how many ever acted, and
+/// `alive[n]` = how many last acted at least n+1 weeks after joining. `lastAction`
+/// keeps only the latest action, so this is survival, not week-by-week return.
+/// A week is left off a row until every member has had that long.
+pub fn cohorts(members: &[&crate::mcp::onboarding_players::PlayerFacts], now: i64) -> Vec<Value> {
+    use chrono::Datelike;
+    let mut weeks: std::collections::BTreeMap<(i32, u32), Vec<(i64, Option<i64>)>> = Default::default();
+    for p in members {
+        let Some(created) = p.created_ms else { continue };
+        let Some(at) = chrono::DateTime::from_timestamp_millis(created) else { continue };
+        let w = at.iso_week();
+        weeks.entry((w.year(), w.week())).or_default().push((created, p.last_active_ms));
+    }
+    weeks
+        .into_iter()
+        .map(|((year, week), rows)| {
+            let newest = rows.iter().map(|r| r.0).max().unwrap_or(now);
+            let alive: Vec<usize> = (1..=COHORT_WEEKS)
+                .take_while(|n| newest + n * 7 * DAY_MS <= now)
+                .map(|n| rows.iter().filter(|(c, last)| last.map_or(false, |l| l >= c + n * 7 * DAY_MS)).count())
+                .collect();
+            json!({ "week": format!("W{week:02}"), "year": year, "n": rows.len(), "acted": rows.iter().filter(|r| r.1.is_some()).count(), "alive": alive })
+        })
+        .collect()
+}
+
 pub fn activation(members: &[(&crate::mcp::onboarding_players::PlayerFacts, Option<&crate::mcp::onboarding_players::PlayerStats>)], cutoff: i64) -> Vec<Value> {
     let count = |f: &dyn Fn(&crate::mcp::onboarding_players::PlayerFacts, &crate::mcp::onboarding_players::PlayerStats) -> bool| {
         let none = crate::mcp::onboarding_players::PlayerStats::default();
@@ -1348,6 +1395,7 @@ pub async fn terminal_onboarding(
             let churn_base: Vec<_> = members.iter().filter(|(_, p)| p.last_active_ms.is_some() && p.created_ms.map_or(true, |c| c <= cutoff)).collect();
             let churned = churn_base.iter().filter(|(_, p)| !is_active(Some(p), cutoff)).count();
             let milestones: Vec<_> = members.iter().map(|(pid, p)| (*p, stats.get(*pid))).collect();
+            let facts: Vec<_> = members.iter().map(|(_, p)| *p).collect();
             let st: Vec<&crate::mcp::onboarding_players::PlayerStats> = members.iter().filter_map(|(pid, _)| stats.get(*pid)).collect();
             let gather = |f: &dyn Fn(&crate::mcp::onboarding_players::PlayerStats) -> Option<f64>| st.iter().filter_map(|s| f(s)).collect::<Vec<f64>>();
 
@@ -1405,6 +1453,8 @@ pub async fn terminal_onboarding(
                 "never_acted": never_acted, "never_acted_rate": ratio(never_acted, members.len()),
                 "churn_base": churn_base.len(), "churned": churned, "churn_rate": ratio(churned, churn_base.len()),
                 "activation": activation(&milestones, cutoff),
+                "lifecycle": lifecycle(&facts, now),
+                "cohorts": cohorts(&facts, now),
                 "signup": signup.unwrap_or(Value::Null),
                 "tutorial_players": unique,
                 "take_up": new_only,
@@ -1854,6 +1904,31 @@ mod tests {
         assert_eq!(m.iter().map(|r| r["key"].as_str().unwrap()).collect::<Vec<_>>(), vec!["tutorial.a", "tutorial.b"]);
         assert_eq!((m[0]["reached"].as_f64(), m[0]["retained"].as_f64()), (Some(10.0), Some(1.0)));
         assert_eq!((m[1]["furthest"].as_f64(), m[1]["retained"].as_f64()), (Some(4.0), Some(0.4)));
+    }
+
+    #[test]
+    fn lifecycle_buckets_sum_to_the_players() {
+        use crate::mcp::onboarding_players::PlayerFacts;
+        let now = 100 * DAY_MS;
+        let at = |days: i64| PlayerFacts { last_active_ms: Some(now - days * DAY_MS), created_ms: Some(0), ..Default::default() };
+        let (a, b, c, e) = (at(0), at(3), at(20), at(90));
+        let never = PlayerFacts { created_ms: Some(now - DAY_MS), ..Default::default() };
+        let l = lifecycle(&[&a, &b, &c, &e, &never], now);
+        assert_eq!(l, json!({ "today": 1, "week": 1, "month": 1, "gone": 1, "never": 1, "new_7d": 1 }));
+    }
+
+    #[test]
+    fn a_cohort_counts_only_weeks_its_newest_member_has_lived() {
+        use crate::mcp::onboarding_players::PlayerFacts;
+        // Monday 2026-01-05 and the Friday after: one ISO week.
+        let monday = 1_767_571_200_000;
+        let stayed = PlayerFacts { created_ms: Some(monday), last_active_ms: Some(monday + 15 * DAY_MS), ..Default::default() };
+        let left = PlayerFacts { created_ms: Some(monday + 4 * DAY_MS), last_active_ms: Some(monday + 4 * DAY_MS), ..Default::default() };
+        let never = PlayerFacts { created_ms: Some(monday), ..Default::default() };
+        let unknown = PlayerFacts::default();
+        let rows = cohorts(&[&stayed, &left, &never, &unknown], monday + 19 * DAY_MS);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0], json!({ "week": "W02", "year": 2026, "n": 3, "acted": 2, "alive": [1, 1] }));
     }
 
     #[test]
