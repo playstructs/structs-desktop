@@ -245,6 +245,27 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
       }
       return p;
     };
+
+    // navigator.sendBeacon is not that fetch, and nothing resolves its URL: a
+    // relative '/api/...' resolves against the page, which in the app is
+    // tauri://localhost — and the Beacon API refuses any scheme that is not
+    // http(s) by THROWING a TypeError at the caller. The webapp's onboarding
+    // telemetry flushes with a beacon from inside TutorialMode.launch(),
+    // before the reload that starts Combat Training, so that throw took the
+    // whole Launch Tutorial click with it: no session flag, no reload, a dead
+    // button (webapp d8dcd64e; the browser never saw this, its page is https).
+    // Resolve the URL the way fetch does, and never let a beacon throw: the
+    // false answer leaves the events queued for the next fetch flush.
+    const nativeBeacon = navigator.sendBeacon && navigator.sendBeacon.bind(navigator);
+    if (nativeBeacon) {
+      navigator.sendBeacon = function(url, data) {
+        try {
+          return nativeBeacon(String(url).startsWith('/') ? apiBase + url : url, data);
+        } catch (e) {
+          return false;
+        }
+      };
+    }
   }
   console.info('Guild config loaded:', window.__STRUCTS_CONFIG__);
 
