@@ -2683,6 +2683,22 @@
     if (ev.healthAfter === 0) s.destroyed = true;
   }
 
+  /* The reaction badge lives INSIDE the HUD tile, which is hidden for the
+   * duration of the animation — so it opts back into visibility, exactly as
+   * the game's .map-struct-hud-reaction-badge does. One at a time. */
+  function showReactionBadge(hud, badge) {
+    clearReactionBadge(hud);
+    if (!badge) return;
+    var img = el('img', 'rv-reaction-badge');
+    img.src = 'img/sui/icon/' + badge + '.png';
+    img.alt = '';
+    hud.appendChild(img);
+  }
+  function clearReactionBadge(hud) {
+    var old = hud.querySelector('.rv-reaction-badge');
+    if (old) old.remove();
+  }
+
   function runAnimation(ev, done) {
     var mount = document.getElementById(domId('anim', ev.structId));
     var still = document.getElementById(domId('struct', ev.structId));
@@ -2695,7 +2711,7 @@
       applyEventHealth(ev);
       // The HUD tile comes back once the animation is done (the game's
       // ANIMATION_END handler), already redrawn at the health it reached.
-      if (hud) hud.classList.remove('rv-invisible');
+      if (hud) { clearReactionBadge(hud); hud.classList.remove('rv-invisible'); }
       // Restore the still unless this was a destroy — and never resurrect a
       // struct the sequence just emptied.
       if (still && flags.after && ev.healthAfter !== 0) syncStill(ev.structId);
@@ -2716,7 +2732,10 @@
     // The game hides the HUD tile while any animation plays over it
     // (MapStructHUDLayerComponent on ANIMATION): a health bar over an
     // explosion is noise, and the bar is redrawn on the way back.
-    if (hud) hud.classList.add('rv-invisible');
+    // …and in its place, when this animation IS the reaction, the mark that
+    // says why: the game shows it on the tile and in the bubble both
+    // (MapStructHUDLayerComponent.showAnimationState, webapp e5bc7511).
+    if (hud) { hud.classList.add('rv-invisible'); showReactionBadge(hud, ev.badge); }
 
     // Offer the sequence to the Animation Bubble. It decides whether to show
     // one: only for attack sequences, and only while the acting tile is fully
@@ -2870,6 +2889,16 @@
   // Choreography — turning a polled attack into a played sequence
   // ══════════════════════════════════════════════════════════════════════════
 
+  /* The mark shown under a struct while it answers an attack, named as the game
+   * names them (ANIMATION.BADGES, webapp e5bc7511). The target firing back is
+   * NOT the same mark as a defender — or the planet's cannon — firing back on
+   * its behalf, which is the distinction that release added. */
+  var BADGE = {
+    COUNTER_ATTACK: 'icon-counter-attack',
+    DEFENDER_COUNTER: 'icon-defender-counter',
+    BLOCK: 'icon-defender-block',
+  };
+
   /* One attack row → the ordered animation events, sequenced exactly as the
    * game's StructListener does per shot:
    *   (a) each defender counter: its weapon animation, then the attacker's
@@ -2896,7 +2925,7 @@
     var running = numOf(attack.attacker_health_before);   // attacker HP as counters land
     var attackerDead = false;
 
-    function attackAnim(structId, slug, weaponSystem, counter) {
+    function attackAnim(structId, slug, weaponSystem, counter, badge) {
       events.push({
         structId: structId, typeSlug: slug,
         names: [weaponSystem === SECONDARY ? 'ATTACK_SECONDARY_WEAPON' : 'ATTACK_PRIMARY_WEAPON'],
@@ -2904,6 +2933,8 @@
         // A counter-fire, for the sound layer (the game's passive weaponry
         // cue); the animation itself is the same.
         counter: !!counter,
+        // …and for the eye: the mark that says why this struct is firing.
+        badge: badge || null,
       });
     }
     function destroyName(victim, ambitHint) {
@@ -2927,7 +2958,8 @@
     (attack.shots || []).forEach(function (shot) {
       (shot.eventAttackDefenderCounterDetail || []).forEach(function (c) {
         var cs = structsById[c.counterByStructId];
-        attackAnim(c.counterByStructId, cs && cs.type_slug, c.counterByStructWeaponSystem, true);
+        attackAnim(c.counterByStructId, cs && cs.type_slug, c.counterByStructWeaponSystem, true,
+          BADGE.DEFENDER_COUNTER);
         attackerHit(c.counterByStructType || (cs && cs.type_name),
           c.counterByStructOperatingAmbit || (cs && cs.ambit),
           c.counterByStructWeaponSystem, numOf(c.counterDamage), truthy(c.counterDestroyedAttacker));
@@ -2973,7 +3005,7 @@
         var bAfter = numOf(shot.blockerHealthAfter);
         var rb = resolveShotAnimation(atkType, atkAmbit, bAmbit, weapon, bAfter == null ? 1 : bAfter, false, '');
         events.push({ structId: shot.blockedByStructId, typeSlug: blocker && blocker.type_slug,
-          names: rb ? rb.names : [], healthAfter: bAfter });
+          names: rb ? rb.names : [], healthAfter: bAfter, badge: BADGE.BLOCK });
         if (truthy(shot.blockerDestroyed)) {
           events.push({ structId: shot.blockedByStructId, typeSlug: blocker && blocker.type_slug,
             names: [destroyName(blocker, bAmbit)], healthAfter: 0 });
@@ -2991,7 +3023,8 @@
       }
 
       if (countered) {
-        attackAnim(shot.targetStructId, tgt && tgt.type_slug, shot.targetCounterWeaponSystem, true);
+        attackAnim(shot.targetStructId, tgt && tgt.type_slug, shot.targetCounterWeaponSystem, true,
+          BADGE.COUNTER_ATTACK);
         attackerHit(shot.targetStructType || (tgt && tgt.type_name), tgtAmbit,
           shot.targetCounterWeaponSystem, numOf(shot.targetCounteredDamage),
           truthy(shot.targetCounterDestroyedAttacker));
@@ -3011,7 +3044,7 @@
     if (truthy(attack.pdc_damage_to_attacker)) {
       var pdc = planetaryStructOfType(structsById, 'planetary_defense_cannon');
       if (pdc) {
-        attackAnim(pdc.id, pdc.type_slug, PRIMARY, true);
+        attackAnim(pdc.id, pdc.type_slug, PRIMARY, true, BADGE.DEFENDER_COUNTER);
         attackerHit('Planetary Defense Cannon', pdc.ambit, PRIMARY, numOf(attack.pdc_damage),
           truthy(attack.pdc_destroyed_attacker));
       }
@@ -3945,6 +3978,8 @@
     cancelPending: cancelPending,
     _playBurst: playBurst,
     _burstMountForStruct: burstMountForStruct,
+    _showReactionBadge: showReactionBadge,
+    _clearReactionBadge: clearReactionBadge,
     COL: COL,
     domId: domId,
     _state: state,

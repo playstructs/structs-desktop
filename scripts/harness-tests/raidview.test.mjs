@@ -1083,6 +1083,46 @@ check('pipRequestHide forgets the struct immediately (no stale re-show)', RV._pi
   check('the planet cannon fires back after the volley',
     pn.slice(-2).join(' ') === '5-pd:ATTACK_PRIMARY_WEAPON 5-a:IMPACT_ANGLED_UP_CANNON+SHAKE_ANGLED_UP_DEFAULT_FIRST', pn.join(' '));
 
+  // Reaction badges (ANIMATION.BADGES, webapp e5bc7511). The mark under a
+  // struct says WHY it is firing or taking the hit, and the game draws a
+  // DIFFERENT one for a target firing back than for a defender — or the
+  // planet's cannon — firing back on its behalf. That distinction is what
+  // that release added; before it, both wore the defender's mark.
+  const badgeOf = (evs, id, name) =>
+    (evs.find((e) => e.structId === id && e.names.join('+') === name) || {}).badge;
+  check('a defender\'s counter wears the defender mark',
+    badgeOf(countered, '5-a', 'ATTACK_SECONDARY_WEAPON') === 'icon-defender-counter',
+    String(badgeOf(countered, '5-a', 'ATTACK_SECONDARY_WEAPON')));
+  check('a target firing back wears its own counter-attack mark',
+    badgeOf(tc, '5-c', 'ATTACK_PRIMARY_WEAPON') === 'icon-counter-attack',
+    String(badgeOf(tc, '5-c', 'ATTACK_PRIMARY_WEAPON')));
+  check('the planet\'s cannon counts as a defender',
+    badgeOf(pdc, '5-pd', 'ATTACK_PRIMARY_WEAPON') === 'icon-defender-counter',
+    String(badgeOf(pdc, '5-pd', 'ATTACK_PRIMARY_WEAPON')));
+  check('…and an attacker\'s own volley is marked with nothing',
+    !badgeOf(countered, '5-t', 'ATTACK_PRIMARY_WEAPON'));
+
+  const blocked = RV.planAttack({
+    attacker_id: '5-a', attacker_type: 'Battleship', attacker_ambit: 'space', weapon: 'primaryWeapon',
+    attacker_health_before: 3, attacker_health_after: 3,
+    shots: [{ evaded: false, blocked: true, blockedByStructId: '5-t', blockedByStructOperatingAmbit: 'space',
+      blockerHealthAfter: '2', blockerDestroyed: false,
+      targetStructId: '5-js', targetStructOperatingAmbit: 'space',
+      targetHealthBefore: '3', targetHealthAfter: '3' }],
+  }, S);
+  const blockEv = blocked.find((e) => e.structId === '5-t');
+  check('a block marks the BLOCKER, which is where the shot lands',
+    !!blockEv && blockEv.badge === 'icon-defender-block', JSON.stringify(blockEv && blockEv.badge));
+  check('…and the struct it protected is marked with nothing',
+    !blocked.some((e) => e.structId === '5-js' && e.badge), names(blocked).join(' '));
+
+  // The art every badge names has to be in the synced icon set, or the mark
+  // is a broken image at the moment the player most wants to read it.
+  for (const icon of ['icon-counter-attack', 'icon-defender-counter', 'icon-defender-block']) {
+    check(`${icon}.png ships with the app`,
+      existsSync(resolve(repo, 'frontend', 'img', 'sui', 'icon', `${icon}.png`)));
+  }
+
   // Layer mirroring: the game flips impact_* and destroy_* only.
   check('impact and destroy layers mirror, shakes and evades do not',
     RV.flipsLayer('IMPACT_HORIZONTAL_CANNON') && RV.flipsLayer('DESTROY_WATER')
@@ -1643,6 +1683,27 @@ check('pipRequestHide forgets the struct immediately (no stale re-show)', RV._pi
   // so the query is what gives the art a URL this page has not decoded before.
   check('…under a URL of its own, so the art runs again instead of ending blank',
     shots()[0].getAttribute('src') !== firstSrc, shots()[0].getAttribute('src'));
+
+  // The reaction badge rides in the HUD tile, which is hidden for the whole
+  // animation — so it has to opt back into visibility, or the mark the player
+  // needs is the one thing they cannot see.
+  const hud = w.document.createElement("div");
+  hud.className = 'rv-hud rv-invisible';
+  w.document.body.appendChild(hud);
+  RV._showReactionBadge(hud, 'icon-defender-block');
+  const mark = hud.querySelector('.rv-reaction-badge');
+  check('the reaction badge mounts in the struct\'s HUD tile',
+    !!mark && mark.tagName === 'IMG' && /icon-defender-block\.png$/.test(mark.getAttribute('src')),
+    mark && mark.getAttribute('src'));
+  RV._showReactionBadge(hud, 'icon-counter-attack');
+  check('…one at a time, so a counter-chain never stacks marks',
+    hud.querySelectorAll('.rv-reaction-badge').length === 1);
+  const badgeRule = [...w.document.styleSheets].flatMap((sheet) => [...sheet.cssRules])
+    .find((r) => r.selectorText === '.rv-reaction-badge');
+  check('…and it is visible over a hidden HUD', !!badgeRule && /visible/.test(badgeRule.style.visibility),
+    badgeRule && badgeRule.style.cssText);
+  RV._showReactionBadge(hud, null);
+  check('a plain animation shows no mark at all', !hud.querySelector('.rv-reaction-badge'));
 
   const rule = [...w.document.styleSheets].flatMap((sheet) => [...sheet.cssRules])
     .find((r) => r.selectorText === '.rv-target-selected');

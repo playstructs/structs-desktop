@@ -65,6 +65,21 @@ function boot() {
   assert.ok(!el().classList.contains('rv-vis'));
 }
 
+// 3b. The bubble shows ONE struct, without the attacker that explains why it is
+// firing or taking a hit — so a reaction says which it is, as the game's
+// .map-pip-badge does (webapp e5bc7511).
+{
+  const { pp, addStruct, el } = boot();
+  addStruct('5-1', 'defender', { top: 700, bottom: 828, left: 0, right: 128 });
+  pp.pipOnAnimation({ structId: '5-1', names: ['ATTACK_LASER'], healthAfter: 1, badge: 'icon-counter-attack' }, 'ATTACK_LASER');
+  const mark = el().querySelector('.rv-pip-badge');
+  assert.ok(mark && /icon-counter-attack\.png$/.test(mark.getAttribute('src')), 'the reaction is marked in the bubble');
+  pp.pipOnAnimation({ structId: '5-1', names: ['ATTACK_LASER'], healthAfter: 1, badge: 'icon-defender-block' }, 'ATTACK_LASER');
+  assert.equal(el().querySelectorAll('.rv-pip-badge').length, 1, 'one mark at a time, through a counter-chain');
+  pp.pipOnAnimation({ structId: '5-1', names: ['ATTACK_LASER'], healthAfter: 1 }, 'ATTACK_LASER');
+  assert.equal(el().querySelector('.rv-pip-badge'), null, 'and a plain animation carries no mark');
+}
+
 // 4. Hiding forgets the struct at once (a scroll inside the slide-out must not re-show the last fight) and clears after it.
 {
   const { pp, addStruct, el } = boot();

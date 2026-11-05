@@ -590,6 +590,16 @@
     /* HUD: segmented health (one cell per hit point) in a 48px dark box near
        the top of the tile — .map-struct-hud-status-bars + .struct-health-bar. */
     .rv-hud { position: absolute; inset: 0; z-index: 500; pointer-events: none; }
+    /* Reaction badge — the mark that says WHY a struct is firing or taking a
+       hit, under it while the reaction plays (.map-struct-hud-reaction-badge,
+       webapp e5bc7511: the 16px icon at 2x where the status icons sit). The
+       HUD tile is hidden for the animation, so the badge opts back into
+       visibility. The attacker's side mirrors its HUD; the badge cancels that,
+       because these icons read one way round. */
+    .rv-reaction-badge { position: absolute; bottom: 0; left: 50%;
+      width: var(--icon-lg); height: var(--icon-lg); margin-left: calc(var(--icon-lg) / -2);
+      visibility: visible; image-rendering: pixelated; }
+    .rv-mount.rv-flip .rv-reaction-badge { transform: scaleX(-1); }
     /* `.map-struct-hud-status-bars`, matched exactly. The frame is a 2px
        border in the SAME colour as the fill (a real token, not the rgba I had
        guessed) and there is NO padding — my extra 2px of padding doubled the
@@ -683,6 +693,14 @@
     .rv-pip-struct { position: absolute; top: 0; left: 0; width: 128px; height: 128px; }
     #rv-pip.rv-side-right .rv-pip-struct { transform: scaleX(-1); }
     .rv-pip-struct .rv-marker { z-index: 40; }
+    /* The reaction badge over the bubble's art, as .map-pip-badge sits in the
+       game: under the struct, outside the mask so the mask's clip never eats
+       it, and never mirrored with the attacker-side art. */
+    .rv-pip-badge {
+      position: absolute; bottom: var(--spacing-xl); left: 50%;
+      width: var(--icon-lg); height: var(--icon-lg); margin-left: calc(var(--icon-lg) / -2);
+      z-index: 11; image-rendering: pixelated;
+    }
 
     /* ── End-of-raid banner ───────────────────────────────────────────── */
     #rv-banner {

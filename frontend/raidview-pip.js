@@ -93,6 +93,8 @@
         el.classList.remove('rv-vis', 'rv-side-left', 'rv-side-right');
         var mount = document.getElementById('rv-pip-struct');
         if (mount) mount.innerHTML = '';
+        var badge = el.querySelector('.rv-pip-badge');
+        if (badge) badge.remove();
       }
       pip.structId = null;
       pip.side = null;
@@ -142,12 +144,24 @@
      * paused and hidden, gets this struct's art swapped in, waits for those
      * sprites to decode, and only then shows and plays. Autoplaying while the
      * art swapped underneath was why the bubble sometimes showed nothing. */
-    function pipRender(s, cell, names, healthNow) {
+    function pipRender(s, cell, names, healthNow, badge) {
       var el = pipEl();
       var mount = document.getElementById('rv-pip-struct');
       if (!el || !mount) return false;
       if (typeof names === 'string') names = [names];
       names = (names || []).filter(Boolean);
+
+      /* The bubble shows one struct without the attacker that explains why it
+       * is firing or taking damage, so a reaction is labelled here too — the
+       * game's .map-pip-badge, outside the mask and over the art. */
+      var oldBadge = el.querySelector('.rv-pip-badge');
+      if (oldBadge) oldBadge.remove();
+      if (badge) {
+        var b = el2('img', 'rv-pip-badge');
+        b.src = 'img/sui/icon/' + badge + '.png';
+        b.alt = '';
+        el.appendChild(b);
+      }
 
       var mask = el.querySelector('.rv-pip-mask');
       if (mask && cell) {
@@ -239,7 +253,7 @@
         pip.side = side;
         el.classList.remove('rv-side-left', 'rv-side-right');
         el.classList.add(side === 'right' ? 'rv-side-right' : 'rv-side-left');
-        if (pipRender(s, cell, names, healthNow)) {
+        if (pipRender(s, cell, names, healthNow, ev.badge)) {
           // Force a layout flush so the browser commits the off-screen anchor
           // before rv-vis lands — otherwise the slide-in transition is skipped.
           void el.offsetWidth;
