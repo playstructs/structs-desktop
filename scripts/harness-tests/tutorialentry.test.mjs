@@ -52,7 +52,7 @@ function boot(opts = {}) {
   const vc = new VirtualConsole();                 // swallow jsdom's navigation warnings
   const dom = new JSDOM(HTML, { url: 'http://localhost/index.html', runScripts: 'dangerously', virtualConsole: vc });
   const w = dom.window;
-  const calls = { goto: [], open: 0, preview: 0, dflt: 0, fetched: [], logs: [] };
+  const calls = { goto: [], open: 0, preview: 0, dflt: 0, fetched: [], logs: [], recorded: [], flushed: 0 };
 
   w.gameState = { keyPlayers: { player: {
     id: opts.player === undefined ? '1-194' : opts.player,
@@ -71,6 +71,12 @@ function boot(opts = {}) {
     };
   }
   w.__TAURI__ = { core: { invoke: (cmd, args) => { calls.logs.push(args && args.msg); return Promise.resolve(); } } };
+  if (!opts.noRecorder) {
+    w.__STRUCTS_ONBOARDING__ = {
+      startTutorialRun: (playerId, isReplay) => { calls.recorded.push([playerId, isReplay]); },
+      flushNow: () => { calls.flushed++; },
+    };
+  }
   // Nothing here should ever reach the network; a call is a failure, not a stub.
   w.fetch = (url) => { calls.fetched.push(url); return Promise.reject(new Error('unexpected fetch')); };
 
@@ -133,6 +139,22 @@ function boot(opts = {}) {
     w.sessionStorage.getItem('tutorialPlayerEnergy'));
   check('  the launch is logged for the Tauri console',
     calls.logs.some((m) => m && m.indexOf('launched Combat Training') > -1), calls.logs.join('|'));
+  // Without this the run records NOTHING: the recorder returns early with no
+  // session id, so every step of the tutorial is dropped (webapp d8dcd64e).
+  check('  the run\'s telemetry session is started, as a replay, with the real player',
+    JSON.stringify(calls.recorded) === JSON.stringify([['1-194', true]]), JSON.stringify(calls.recorded));
+  check('  and flushed, so the first step leaves before the reload', calls.flushed === 1);
+}
+{
+  console.log('launch() when the recorder was not exposed');
+  const { w, calls } = boot({ noRecorder: true });
+  // An older bundle, or a patch that stopped applying: losing telemetry must
+  // not cost the player the tutorial.
+  w.StructsTutorial.launch();
+  check('  still starts the tutorial', w.sessionStorage.getItem('tutorialActive') === '1'
+    && w.sessionStorage.getItem('tutorialReplay') === '1');
+  check('  and says so rather than failing silently',
+    calls.logs.some((m) => m && m.indexOf('launched Combat Training') > -1));
 }
 {
   console.log('launch() with no energy figures to pass on');
@@ -208,6 +230,13 @@ function boot(opts = {}) {
     }
     check('  and the game still owns the offer this block stepped back from',
       game.indexOf('static offerIfUndecided()') > -1);
+    const tel = resolve(repo, 'structs-webapp', 'src', 'js', 'telemetry', 'OnboardingTelemetry.js');
+    let rec = '';
+    try { rec = readFileSync(tel, 'utf8'); } catch (e) {}
+    check('  the recorder call the launch forwards still exists',
+      rec.indexOf('startTutorialRun(playerId, isReplay = false)') > -1);
+    check('  and a replay is still recorded under its own content version',
+      rec.indexOf("ONBOARDING_REPLAY_CONTENT_VERSION = 'tutorial-4-replay'") > -1);
   }
 }
 

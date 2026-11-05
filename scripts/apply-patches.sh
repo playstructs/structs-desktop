@@ -886,6 +886,30 @@ sed -i.bak "s|export const ONBOARDING_INTERFACE_NAME = 'structs-webapp';|export 
   "$BUILD_DIR/js/telemetry/OnboardingTelemetry.js"
 verify_patched "$BUILD_DIR/js/telemetry/OnboardingTelemetry.js" "ONBOARDING_INTERFACE_NAME = 'structs-desktop'" "OnboardingTelemetry.js interface name"
 
+# ── Onboarding telemetry: expose the recorder ──
+# TutorialMode.launch() starts the run's telemetry session BEFORE it reloads,
+# because the simulation that comes back does not know the real player (webapp
+# d8dcd64e). A launch that skips that step records NOTHING: with no session id
+# in sessionStorage, record() returns early and every step of the run is
+# dropped on the floor. frontend/structs-config.js has its own direct launch,
+# for a window whose game menu is not wired up yet, and the bundle keeps the
+# recorder module-private — so expose the two calls that launch needs.
+echo "    Patching index.js (expose the onboarding recorder)..."
+cat >> "$BUILD_DIR/js/index.js" <<'ONB_EOF'
+
+// [structs-universe patch] Onboarding recorder, for StructsTutorial.launch().
+try {
+  window.__STRUCTS_ONBOARDING__ = {
+    startTutorialRun: function (playerId, isReplay) {
+      return onboardingTelemetry.startTutorialRun(playerId, isReplay);
+    },
+    flushNow: function () { return onboardingTelemetry.flushNow(); }
+  };
+} catch (e) { console.warn('[structs-universe] onboarding façade failed', e); }
+ONB_EOF
+grep -q "__STRUCTS_ONBOARDING__" "$BUILD_DIR/js/index.js" \
+  || { echo "ERROR: onboarding façade patch did not apply"; exit 1; }
+
 # ── Combat Training contract ──
 # The webapp owns the tutorial offer (TutorialMode.offerIfUndecided, webapp
 # 3255fc77). frontend/structs-config.js no longer decides who gets asked, but it
@@ -920,6 +944,9 @@ verify_contract "$BUILD_DIR/js/controllers/AuthController.js" "orientationEnd()"
 # Step keys read by the Onboarding card (src-tauri/src/mcp/onboarding.rs), which
 # splits each session's funnel on them.
 TEL="$BUILD_DIR/js/telemetry/OnboardingTelemetry.js"
+# The recorder call the façade above forwards. A run that never starts a session
+# records nothing, so losing this signature must fail the build, not the data.
+verify_contract "$TEL" "startTutorialRun(playerId, isReplay = false)" "onboarding tutorial-run recorder"
 verify_contract "$TEL" "'orientation.tutorial_offer'" "tutorial offer step key"
 verify_contract "$BUILD_DIR/js/index.js" "'tutorial.end.ftl_jump'" "tutorial completion step key"
 # Help ▸ Combat Training hands off to the webapp's own replay confirmation.

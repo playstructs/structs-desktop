@@ -4525,6 +4525,20 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
        * for a window whose game menu is not wired up.
        */
       launch: function () {
+        /* The run's telemetry session has to start BEFORE the reload: the
+         * simulation that comes back doesn't know the real player, and with no
+         * session id in sessionStorage the recorder drops every step of the run
+         * (OnboardingTelemetry.record returns early). TutorialMode.launch does
+         * this itself; this path has to, in the same order, through the façade
+         * apply-patches.sh exposes. Replays are recorded under their own
+         * content version, so a run from this menu is not mixed in with signup. */
+        try {
+          var onb = window.__STRUCTS_ONBOARDING__;
+          if (onb) {
+            onb.startTutorialRun(playerId(), true);
+            onb.flushNow();
+          }
+        } catch (e) { log('telemetry for this run could not be started: ' + e); }
         try {
           var p = (window.gameState && window.gameState.keyPlayers
             && window.gameState.keyPlayers.player && window.gameState.keyPlayers.player.player) || null;
