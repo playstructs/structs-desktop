@@ -650,6 +650,7 @@ pub async fn sync_game_state(
         tokio::spawn(async move {
             crate::mcp::rates::tick(&app_rt).await;
         });
+        crate::mcp::onboarding::resume_history_ticker();
         // Combat loops. auto_response deliberately rides the sync tick at its
         // own 20 s cadence — a raid resolves in about four minutes end to end,
         // and every defensive win on record fired back inside the first two.

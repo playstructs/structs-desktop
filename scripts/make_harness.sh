@@ -634,6 +634,7 @@ cat > "$FIX" <<'EOF'
       }
       var COUNT = [1, 10, 100, 1000, 10000, 100000], GRAM = [1, 10, 100, 1e3, 1e4, 1e5, 1e6, 1e7, 1e8], PLAY = [1, 600, 3600, 21600, 86400, 259200, 604800, 2592000];
       function seg(key, label, scale) {
+        var serverless = !!f.activity || f.compare === 'activity' || key === 'inactive' || key === 'active' || key === 'replicant';
         var s = rates(chain(signupKeys, 2140 * scale, function (i) { return [0.99, 0.97, 0.95, 0.98, 0.93, 0.96, 0.9, 0.99, 0.84, 0.97, 0.88][i]; }));
         s.unshift({ key: 'signup.recovery_key_faq', order: 0, previous: null, next: null, reached: Math.round(61 * scale), skipped: 0, dropped: null, retained: 61 / 2140, lost: null, step_drop: null, skip_rate: 0, cum_skip: null });
         var t = rates(chain(tutorialKeys, 1102 * scale, function (i) { return [0.66, 0.97, 0.9, 0.88, 0.93, 0.95, 0.86, 0.94, 0.99, 1][i]; }, { 'orientation.tutorial_offer': Math.round(182 * scale) }));
@@ -644,7 +645,15 @@ cat > "$FIX" <<'EOF'
         var players = Math.round(9600 * scale);
         return {
           key: key, label: label, players: players, active: Math.round(players * 0.42), inactive: Math.round(players * 0.58), active_rate: 0.42,
+          never_acted: Math.round(players * 0.1), never_acted_rate: 0.1,
           churn_base: Math.round(players * 0.9), churned: Math.round(players * 0.55), churn_rate: 0.61,
+          activation: [['signed_up', 1], ['acted', 0.9], ['mined', 0.5], ['refined', 0.4], ['planet', 0.3], ['raided', 0.08], ['active', 0.42]].map(function (m) { return { key: m[0], n: Math.round(players * m[1]), rate: m[1] }; }),
+          tutorial_players: serverless ? null : { players: Math.round(1102 * scale), new_players: Math.round(1000 * scale), existing_players: Math.round(102 * scale), started: Math.round(920 * scale), completed: Math.round(402 * scale),
+            declined: Math.round(182 * scale), left_at_offer: Math.round(50 * scale), left_during_tutorial: Math.round(422 * scale), in_progress: Math.round(46 * scale), revisited: Math.round(30 * scale) },
+          take_up: serverless ? null : { players: Math.round(1000 * scale), started: Math.round(830 * scale) },
+          player_steps: serverless ? [] : tutorialKeys.map(function (k, i) { var r = Math.round(920 * scale * Math.pow(0.9, i)); return { key: k, order: i, reached: r, furthest: Math.round(r * 0.1), retained: Math.pow(0.9, i) }; }),
+          run_comparison: [{ run: '1', runs: Math.round(30 * scale), completed: Math.round(18 * scale), left: Math.round(9 * scale), playing: Math.round(3 * scale), completion_rate: 0.6, steps: { n: 30, p50: 41, p90: 53 }, time: { n: 18, p50: 742, p90: 1500 }, since_previous: null },
+            { run: '2', runs: Math.round(10 * scale), completed: Math.round(6 * scale), left: Math.round(3 * scale), playing: Math.round(1 * scale), completion_rate: 0.6, steps: { n: 10, p50: 48, p90: 53 }, time: { n: 6, p50: 510, p90: 900 }, since_previous: { n: 10, p50: 90000, p90: 400000 } }],
           signup: f.activity || f.compare === 'activity' ? null : { steps: s, started: Math.round(2140 * scale), signed_up: Math.round(1091 * scale), dropoff_rate: 0.49 },
           tutorial: { steps: t, offered: Math.round(1102 * scale), completed: Math.round(402 * scale), declined: Math.round(182 * scale), left: Math.round(472 * scale), playing: Math.round(46 * scale), deciding: 0,
             completion_rate: 0.365, decline_rate: 0.165, quit_rate: 0.428 },
@@ -668,6 +677,7 @@ cat > "$FIX" <<'EOF'
         : f.compare === 'guild' ? [seg('0-1', 'OH', 0.05), seg('0-5', 'SN.C', 0.9)]
         : f.compare === 'interface' ? [seg('structs-webapp', 'structs-webapp', 0.4), seg('none', 'none', 0.6)]
         : f.compare === 'replicant' ? [seg('human', 'Humans', 0.05), Object.assign(seg('replicant', 'Replicants', 0.95), { signup: null, sessions: 0 })]
+        : f.compare === 'version' ? [seg('tutorial-4', 'tutorial-4', 0.8), seg('tutorial-3', 'tutorial-3', 0.2)]
         : [seg('all', 'All', 1)];
       var r = {
         version: 'tutorial-4', versions: ['tutorial-4', 'tutorial-3'], idle_hours: (a && a.idleHours) || 24, active_days: (a && a.activeDays) || 7, generated_ms: now,
@@ -675,9 +685,9 @@ cat > "$FIX" <<'EOF'
         options: { interfaces: ['structs-desktop', 'structs-webapp', 'none'], guilds: [{ id: '0-1', label: 'OH' }, { id: '0-2', label: 'ONE' }, { id: '0-5', label: 'SN.C' }] },
         segments: segs,
         guilds: [
-          { id: '0-1', name: 'Orbital Hydro', tag: 'OH', status: 'ok', error: null, started: 4, signed_up: 1, outcome: { offered: 1, completed: 0, declined: 0, left_during_tutorial: 1, in_progress: 0 }, runs: 3, runs_error: null, sampled: 1, untracked: 0, players: 1240, active: 610 },
-          { id: '0-2', name: 'Imperial One', tag: 'ONE', status: 'no_api', error: 'no guild API published', started: null, signed_up: null, outcome: null, runs: null, runs_error: null, sampled: 0, untracked: 0, players: 72, active: 3 },
-          { id: '0-5', name: 'SN Corp', tag: 'SN.C', status: 'ok', error: null, started: 2136, signed_up: 1101, outcome: { offered: 1101, completed: 402, declined: 182, left_during_tutorial: 471, in_progress: 46 }, runs: 37, runs_error: null, sampled: 812, untracked: 2410, players: 8100, active: 3400 },
+          { id: '0-1', name: 'Orbital Hydro', tag: 'OH', status: 'ok', error: null, started: 4, signed_up: 1, outcome: { offered: 1, completed: 0, declined: 0, left_during_tutorial: 1, in_progress: 0 }, runs: 3, runs_error: null, no_player: 0, tutorial_players: { players: 2, completed: 1 }, sampled: 1, untracked: 0, players: 1240, active: 610 },
+          { id: '0-2', name: 'Imperial One', tag: 'ONE', status: 'no_api', error: 'no guild API published', started: null, signed_up: null, outcome: null, runs: null, runs_error: null, no_player: null, tutorial_players: null, sampled: 0, untracked: 0, players: 72, active: 3 },
+          { id: '0-5', name: 'SN Corp', tag: 'SN.C', status: 'ok', error: null, started: 2136, signed_up: 1101, outcome: { offered: 1101, completed: 402, declined: 182, left_during_tutorial: 471, in_progress: 46 }, runs: 37, runs_error: null, no_player: 2, tutorial_players: { players: 1100, completed: 401 }, sampled: 812, untracked: 2410, players: 8100, active: 3400 },
         ],
         recent: [
           { player_id: '1-9584', name: 'Kestrel', guild_id: '0-5', started_ms: now - 1500000, last_ms: now - 600000, last_step: 'tutorial.first_attack.combat', outcome: 'playing', signup_s: 190, tutorial_s: null },
@@ -689,18 +699,29 @@ cat > "$FIX" <<'EOF'
           { session_id: 'bbbb', player_id: '1-9580', name: 'Kestrel', guild_id: '0-5', interface: 'structs-webapp', replay: true, new_player: true, run_number: 2, started_ms: now - 5000000, last_ms: now - 4900000, seconds: 100, steps: 12, furthest: 'tutorial.first_attack.combat', outcome: 'left' },
           { session_id: 'cccc', player_id: null, name: '', guild_id: '0-1', interface: 'structs-desktop', replay: false, new_player: true, run_number: 1, started_ms: now - 7000000, last_ms: now - 6900000, seconds: 100, steps: 4, furthest: 'tutorial.intro.welcome', outcome: 'playing' },
         ],
+        stopped: { 'tutorial.first_attack.combat': { total: 53, players: [
+          { player_id: '1-9584', name: 'Kestrel', guild_id: '0-5', last_ms: now - 600000, outcome: 'left' },
+          { player_id: '1-9560', name: '', guild_id: '0-1', last_ms: now - 900000, outcome: 'left' },
+        ] } },
+        history: Array.from({ length: 40 }, function (_, i) {
+          var at = now - (39 - i) * day;
+          return { day: new Date(at).toISOString().slice(0, 10), ts_ms: at, humans: 400 + i * 2, replicants: 9000 + i * 50, activated: 150 + i, active_1d: 6 + (i % 3), active_7d: 16 + (i % 5), active_30d: 90 + i, mined: 50 + i, refined: 40, raided: 12,
+            guilds: { '0-5': { humans: 300 + i, active_7d: 10 } }, server: i < 30 ? null : { version: 'tutorial-4', signups_started: 100 + i, signed_up: 80 + i, tutorial_players: 60 + i, tutorial_completed: 30 + i } };
+        }),
         untracked: 2410,
         crawl: { running: true, finished_ms: now - 200000,
-          guilds: { '0-1': { candidates: 3, team_skipped: 1, fetched: 2, errors: 0, last_error: null }, '0-5': { candidates: 9810, team_skipped: 0, replicants_skipped: 6000, fetched: 3810, errors: 0, last_error: null } },
+          guilds: { '0-1': { candidates: 3, team_skipped: 1, todo: 2, fetched: 2, errors: 0, last_error: null }, '0-5': { candidates: 9810, team_skipped: 0, replicants_skipped: 6000, todo: 3810, fetched: 3810, errors: 0, last_error: null } },
           players: { known: 9612, ledgers: 4100, humans: 445, human_ledgers: 445, refreshed_ms: now - 60000, round: { ledger_todo: 3000, ledger_read: 1200, ledger_errors: 0 } },
-          replicants: { known: 9167, primaries: 9, read_ms: now - 60000 } },
+          replicants: { known: 7667, likely: 1500, primaries: 9, source: 'guild', read_ms: now - 60000 } },
       };
       /* A first read before the crawls have found anything: 'reading' while
        * they run, 'done' once they finished empty-handed. */
       var cold = window.__HARNESS_OB_COLD__;
       if (cold) {
-        r.segments = r.segments.map(function (s) { return Object.assign({}, s, { sessions: 0, tutorial: { offered: 0, steps: [] }, daily: [], dwell: {}, durations: {} }); });
+        r.segments = r.segments.map(function (s) { return Object.assign({}, s, { sessions: 0, tutorial: { offered: 0, steps: [] }, tutorial_players: null, take_up: null, player_steps: [], run_comparison: [], daily: [], dwell: {}, durations: {} }); });
         r.recent = [];
+        r.stopped = {};
+        r.history = [];
         r.crawl = { running: cold === 'reading', finished_ms: cold === 'reading' ? null : now - 1000, guilds: {}, players: { known: 0, ledgers: 0, refreshed_ms: null, round: null } };
       }
       return r;

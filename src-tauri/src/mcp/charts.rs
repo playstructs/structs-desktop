@@ -18,6 +18,8 @@
 //!           indexer's per-player daily aggregate (30d)
 //!   traffic   the galaxy's events per hour/day, by category — the
 //!           indexer's activity aggregates (30d)
+//!   telemetry the Telemetry card's daily figures — the app's own
+//!           `onboarding_history` rows
 //!
 //! Every answer is resampled to `points` even slots: null before the first
 //! sample, carried forward after (a reading nobody took is not a zero).
@@ -216,6 +218,7 @@ pub fn terminal_chart_catalog() -> Value {
             { "source": "chain", "label": "the last hour, by block", "subject": null, "metrics": list(CHAIN_METRICS) },
             { "source": "activity", "label": "a player's activity, per day", "subject": "player", "metrics": activity },
             { "source": "traffic", "label": "the galaxy's activity", "subject": null, "metrics": traffic },
+            { "source": "telemetry", "label": "new players, by day", "subject": null, "metrics": list(crate::mcp::onboarding_history::METRICS) },
         ],
         "windows": [21600, 86400, 604800, 2592000],
         "market_samples": lock(&MARKET).samples.len(),
@@ -362,6 +365,12 @@ async fn fetch_one(req: &SeriesReq, start_s: u64, end_s: u64, window_s: u64) -> 
             let samples = zero_fill(&bucket_counts(&rows), start_s as f64 * 1000.0, end_s as f64 * 1000.0, step_ms);
             let label = if all { "all events".to_string() } else { req.metric.replace('_', " ") };
             Ok((samples, "count".to_string(), format!("galaxy {label}")))
+        }
+        "telemetry" => {
+            let Some((unit, label)) = unit_of(crate::mcp::onboarding_history::METRICS, &req.metric) else {
+                return Err(format!("unknown telemetry metric {}", req.metric));
+            };
+            Ok((crate::mcp::onboarding_history::samples(&req.metric), unit.to_string(), label.to_string()))
         }
         other => Err(format!("unknown source {other}")),
     }
@@ -549,7 +558,7 @@ mod tests {
     fn the_catalogue_names_every_source() {
         let c = terminal_chart_catalog();
         let sources: Vec<&str> = c["sources"].as_array().unwrap().iter().map(|s| s["source"].as_str().unwrap()).collect();
-        assert_eq!(sources, vec!["stat", "galaxy", "bank", "market", "provider", "chain", "activity", "traffic"]);
+        assert_eq!(sources, vec!["stat", "galaxy", "bank", "market", "provider", "chain", "activity", "traffic", "telemetry"]);
         assert_eq!(c["sources"][0]["metrics"].as_array().unwrap().len(), STAT_METRICS.len());
         assert!(c["sources"][3]["metrics"].as_array().unwrap().iter().any(|m| m["metric"] == "best"));
     }

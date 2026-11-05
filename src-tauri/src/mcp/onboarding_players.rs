@@ -1,4 +1,4 @@
-//! Every player on chain, with what the Onboarding card's player pages need:
+//! Every player on chain, with what the Telemetry card's player pages need:
 //! guild, when they were created, when they last acted, and five lifetime
 //! counters (ore mined, alpha refined, planets completed, raids initiated,
 //! raids won).
@@ -13,6 +13,8 @@
 //! | fleet owners | `/api/fleet/list/all` | 1 page, then `updated_since` |
 //! | raids initiated / won | `/api/planet-activity/category/raid_status` | every row, each refresh (a few thousand) |
 //! | ore mined · alpha refined | `/api/ledger/list/player/{id}` | ONE READ PER PLAYER — no bulk route totals the ledger |
+//! | names | `/api/guild/{id}/roster` | one read per guild |
+//! | replicants | `/api/permission/all` | a handful of pages, whole, each crawl |
 //!
 //! Raids follow the server's own definitions (`PlayerManager::getPlayerRaidsLaunched`
 //! / `getPlayerRaidsWon`): initiated = `raid_status=initiated` on a fleet the
@@ -34,15 +36,26 @@
 //! A replicant grants its primary `PermAll` on its own player object (every
 //! one this app launches does, `delegation.rs`); a human almost never hands
 //! another player full control. So `1-X@1-Y` at full control, X ≠ Y, marks
-//! 1-X as a replicant of 1-Y. The chain's whole permission store is three
-//! LCD pages (~30k rows, under a second), so it is read whole each crawl
-//! rather than tracked. Not perfect: a human who gives an alt full control
-//! reads as a replicant, and a bot that grants nothing reads as human.
+//! 1-X as a replicant of 1-Y. The store is read whole each crawl from the
+//! guild's `/api/permission/all` (a handful of 10,000-row pages), falling
+//! back to the LCD (1,000-row pages since v0.22.0). Not `updated_since`:
+//! a revoked grant DELETES its row, so an incremental read would keep it.
+//!
+//! A replicant that never granted is caught by a second marker: a name our
+//! generators mint (`callsign::is_managed_name`), no game action, no ledger
+//! and no telemetry (`Universe::likely`). ~1,500 such accounts arrived after
+//! v0.22.0, and every human-only figure counted them. Names come from each
+//! guild's roster, because `/api/player/list/all` has none.
+//!
+//! Neither marker is perfect: a human who gives an alt full control reads as
+//! a replicant, and a bot with a name of its own reads as human.
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::HashMap;
-use std::sync::{LazyLock, Mutex};
+use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, LazyLock, Mutex};
+use std::time::{Duration, Instant};
 
 use crate::mcp::guild_api::GuildApiClient;
 use crate::mcp::onboarding::parse_ts;
@@ -62,16 +75,21 @@ const LEDGER_REFRESH_MS: i64 = 6 * 3_600_000;
 /// a strict `>` on a timestamp the indexer writes, not a cursor.
 const OVERLAP_SECS: i64 = 120;
 const CACHE_NAME: &str = "onboarding_universe";
-/// The permission store at the LCD's maximum page. v0.22.0 clamps every
+/// The fallback read, at the LCD's maximum page. v0.22.0 clamps every
 /// Structs page to 1000 rows (it was ~3 pages of 10,000), so the walk
-/// bound has to cover ~30+ pages now.
+/// bound has to cover ~40+ pages now.
 const PERM_PAGE: usize = 1_000;
 const PERM_MAX_PAGES: usize = 200;
+/// While a crawl is changing the tables, a read rebuilds the snapshot at most
+/// this often.
+const SNAPSHOT_MIN_AGE: Duration = Duration::from_secs(20);
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct PlayerFacts {
     #[serde(default)]
     pub guild: String,
+    #[serde(default)]
+    pub name: String,
     #[serde(default)]
     pub created_ms: Option<i64>,
     /// When `lastAction` last moved; `None` = never acted.
@@ -110,6 +128,12 @@ pub struct Universe {
     pub replicants: HashMap<String, String>,
     #[serde(default)]
     pub replicants_ms: i64,
+    /// Where the map was last read from: `guild` or `chain`.
+    #[serde(default)]
+    pub replicants_source: String,
+    /// Replicants that never granted: see `is_likely_replicant`.
+    #[serde(default)]
+    pub likely: HashSet<String>,
 }
 
 /// The five counters, derived from the tables. `None` = not known yet.
@@ -124,6 +148,58 @@ pub struct PlayerStats {
 
 pub static UNIVERSE: LazyLock<Mutex<Universe>> =
     LazyLock::new(|| Mutex::new(crate::mcp::cache_store::load(CACHE_NAME).unwrap_or_default()));
+
+/// What a read needs, built once and shared: cloning the tables and folding
+/// ~80k planets into counters on every 5-second poll cost more than the read.
+#[derive(Default)]
+pub struct Snapshot {
+    pub players: HashMap<String, PlayerFacts>,
+    pub stats: HashMap<String, PlayerStats>,
+    pub replicants: HashMap<String, String>,
+    pub likely: HashSet<String>,
+    pub refreshed_ms: i64,
+    pub replicants_ms: i64,
+    pub replicants_source: String,
+}
+
+impl Snapshot {
+    /// Granted, or likely: everything the human-only figures leave out.
+    pub fn is_replicant(&self, id: &str) -> bool {
+        self.replicants.contains_key(id) || self.likely.contains(id)
+    }
+}
+
+static GENERATION: AtomicU64 = AtomicU64::new(1);
+static SNAPSHOT: LazyLock<Mutex<Option<(u64, Instant, Arc<Snapshot>)>>> = LazyLock::new(|| Mutex::new(None));
+
+/// The tables changed: the next read may rebuild.
+fn touch() {
+    GENERATION.fetch_add(1, Ordering::SeqCst);
+}
+
+pub fn snapshot() -> Arc<Snapshot> {
+    let generation = GENERATION.load(Ordering::SeqCst);
+    let mut held = SNAPSHOT.lock().unwrap_or_else(|p| p.into_inner());
+    if let Some((built, at, s)) = held.as_ref() {
+        if *built == generation || at.elapsed() < SNAPSHOT_MIN_AGE {
+            return s.clone();
+        }
+    }
+    let s = {
+        let u = UNIVERSE.lock().unwrap_or_else(|p| p.into_inner());
+        Arc::new(Snapshot {
+            players: u.players.clone(),
+            stats: u.stats(),
+            replicants: u.replicants.clone(),
+            likely: u.likely.clone(),
+            refreshed_ms: u.refreshed_ms,
+            replicants_ms: u.replicants_ms,
+            replicants_source: u.replicants_source.clone(),
+        })
+    };
+    *held = Some((generation, Instant::now(), s.clone()));
+    s
+}
 
 fn text(v: Option<&Value>) -> String {
     match v {
@@ -227,6 +303,31 @@ impl Universe {
         self.replicants.contains_key(id)
     }
 
+    /// Names from `/api/guild/{id}/roster` rows.
+    pub fn fold_names(&mut self, rows: &[Value]) {
+        for r in rows {
+            let name = text(r.get("username"));
+            if name.is_empty() {
+                continue;
+            }
+            if let Some(p) = self.players.get_mut(&text(r.get("id"))) {
+                p.name = name;
+            }
+        }
+    }
+
+    /// Recompute the second marker. `telemetry`: players with any recorded
+    /// onboarding step or tutorial run.
+    pub fn classify(&mut self, telemetry: &HashSet<String>) {
+        let likely = self
+            .players
+            .iter()
+            .filter(|(id, p)| !self.replicants.contains_key(*id) && is_likely_replicant(p, telemetry.contains(*id)))
+            .map(|(id, _)| id.clone())
+            .collect();
+        self.likely = likely;
+    }
+
     /// The counters for every player, in one pass over the tables.
     pub fn stats(&self) -> HashMap<String, PlayerStats> {
         let mut out: HashMap<String, PlayerStats> = self
@@ -284,16 +385,45 @@ pub fn ledger_totals(rows: &[Value]) -> (f64, f64) {
     (mined, refined_u / 1_000_000.0)
 }
 
+/// A replicant that never granted: an account nobody has touched, carrying a
+/// name our generators mint. An empty name is no evidence, and any sign of
+/// play rules it out.
+pub fn is_likely_replicant(p: &PlayerFacts, telemetry: bool) -> bool {
+    !telemetry
+        && p.last_active_ms.is_none()
+        && p.mined_g.unwrap_or(0.0) == 0.0
+        && p.refined_g.unwrap_or(0.0) == 0.0
+        && !p.name.trim().is_empty()
+        && crate::mcp::callsign::is_managed_name(&p.name)
+}
+
+/// Is this grant a player object handing ANOTHER player full control?
+fn is_replicant_grant(obj: &str, who: &str, value: u64) -> bool {
+    crate::mcp::delegation::has_full_control(value) && obj != who && obj.starts_with("1-") && who.starts_with("1-")
+}
+
 /// Replicant → primary from LCD permission records (`permissionId` is
-/// `object@grantee`): a player object granting full control to ANOTHER player.
+/// `object@grantee`).
 pub fn replicants_from(records: &[Value]) -> HashMap<String, String> {
     let mut out = HashMap::new();
     for r in records {
         let id = text(r.get("permissionId"));
         let Some((obj, who)) = id.split_once('@') else { continue };
-        let full = text(r.get("value")).parse::<u64>().map_or(false, crate::mcp::delegation::has_full_control);
-        if full && obj != who && obj.starts_with("1-") && who.starts_with("1-") {
+        let value = text(r.get("value")).parse::<u64>().unwrap_or(0);
+        if is_replicant_grant(obj, who, value) {
             out.insert(obj.to_string(), who.to_string());
+        }
+    }
+    out
+}
+
+/// The same from `/api/permission/all` rows (`object_id`, `player_id`, `val`).
+pub fn replicants_from_rows(rows: &[Value]) -> HashMap<String, String> {
+    let mut out = HashMap::new();
+    for r in rows {
+        let (obj, who) = (text(r.get("object_id")), text(r.get("player_id")));
+        if is_replicant_grant(&obj, &who, num(r.get("val")).unwrap_or(0.0) as u64) {
+            out.insert(obj, who);
         }
     }
     out
@@ -321,19 +451,32 @@ pub async fn read_replicants() -> Result<HashMap<String, String>, String> {
     Err(format!("permission store longer than {PERM_MAX_PAGES} pages"))
 }
 
-/// Refresh the replicant map. A failed read keeps the last one.
+/// Refresh the replicant map, from our guild's API and else the chain. An
+/// empty answer is a failed read: no chain has no permissions. If both fail
+/// the last map stays.
 pub async fn refresh_replicants() -> Result<(), String> {
-    let map = read_replicants().await?;
+    let c = crate::mcp::cosmos_client::CosmosClient::new().guild;
+    let guild = walk(&c, "/api/permission/all", None).await.map(|rows| replicants_from_rows(&rows));
+    let (map, source) = match guild {
+        Ok(m) if !m.is_empty() => (m, "guild"),
+        other => match read_replicants().await {
+            Ok(m) if !m.is_empty() => (m, "chain"),
+            Ok(_) => return Err(format!("no permissions from either source (guild: {:?})", other.err())),
+            Err(e) => return Err(format!("chain: {e} (guild: {:?})", other.err())),
+        },
+    };
     let mut u = UNIVERSE.lock().unwrap_or_else(|p| p.into_inner());
     u.replicants = map;
     u.replicants_ms = now_ms();
+    u.replicants_source = source.to_string();
+    touch();
     Ok(())
 }
 
 /// Which players' ledgers to read now: never read first, then those who have
 /// acted since and were read long enough ago; newest player first, and every
 /// human before any replicant.
-pub fn ledger_plan(players: &HashMap<String, PlayerFacts>, replicants: &HashMap<String, String>, now: i64) -> Vec<String> {
+pub fn ledger_plan(players: &HashMap<String, PlayerFacts>, is_replicant: impl Fn(&str) -> bool, now: i64) -> Vec<String> {
     let index = |id: &str| id.split_once('-').and_then(|(_, i)| i.parse::<u64>().ok()).unwrap_or(0);
     // [human never, human stale, replicant never, replicant stale]
     let mut tiers: [Vec<&String>; 4] = Default::default();
@@ -341,7 +484,7 @@ pub fn ledger_plan(players: &HashMap<String, PlayerFacts>, replicants: &HashMap<
         if !id.starts_with("1-") {
             continue;
         }
-        let r = if replicants.contains_key(id) { 2 } else { 0 };
+        let r = if is_replicant(id) { 2 } else { 0 };
         if p.ledger_ms == 0 {
             tiers[r].push(id);
         } else if p.last_active_ms.map(|a| a > p.ledger_ms).unwrap_or(false) && now - p.ledger_ms > LEDGER_REFRESH_MS {
@@ -398,7 +541,19 @@ async fn refresh_tables(c: &GuildApiClient) -> Result<(), String> {
         Err(e) => err = Some(format!("raids: {e}")),
     }
     u.refreshed_ms = now_ms();
+    touch();
     err.map_or(Ok(()), Err)
+}
+
+/// Every guild's names, from our own API: guilds without one still have rosters.
+async fn refresh_names(c: &GuildApiClient, guilds: &[String]) {
+    let rosters = futures_util::future::join_all(guilds.iter().map(|g| c.guild_roster(g))).await;
+    let mut u = UNIVERSE.lock().unwrap_or_else(|p| p.into_inner());
+    for r in rosters {
+        if let Ok(Value::Array(rows)) = r {
+            u.fold_names(&rows);
+        }
+    }
 }
 
 async fn read_ledger(c: &GuildApiClient, pid: &str) -> Result<(f64, f64, bool), String> {
@@ -420,15 +575,19 @@ async fn read_ledger(c: &GuildApiClient, pid: &str) -> Result<(f64, f64, bool), 
     Ok((m, r, truncated))
 }
 
-/// One round: the tables, then up to `LEDGER_BUDGET` ledgers, humans first.
-/// The replicant map is read before this (`refresh_replicants`). Persists.
-pub async fn crawl(replicants_error: Option<String>) {
+/// One round: the tables and names, then up to `LEDGER_BUDGET` ledgers,
+/// humans first. The replicant map is read before this
+/// (`refresh_replicants`); `finish_round` persists.
+pub async fn crawl(replicants_error: Option<String>, guilds: Vec<String>, telemetry: HashSet<String>) {
     use futures_util::StreamExt;
     let c = crate::mcp::cosmos_client::CosmosClient::new().guild;
     let tables = refresh_tables(&c).await;
+    refresh_names(&c, &guilds).await;
     let todo = {
-        let u = UNIVERSE.lock().unwrap_or_else(|p| p.into_inner());
-        ledger_plan(&u.players, &u.replicants, now_ms())
+        let mut u = UNIVERSE.lock().unwrap_or_else(|p| p.into_inner());
+        u.classify(&telemetry);
+        touch();
+        ledger_plan(&u.players, |id| u.is_replicant(id) || u.likely.contains(id), now_ms())
     };
     {
         let mut st = UNIVERSE_CRAWL.lock().unwrap_or_else(|p| p.into_inner());
@@ -452,6 +611,7 @@ pub async fn crawl(replicants_error: Option<String>) {
                     p.ledger_ms = now_ms();
                     p.ledger_truncated = truncated;
                 }
+                touch();
                 UNIVERSE_CRAWL.lock().unwrap_or_else(|p| p.into_inner()).ledger_read += 1;
             }
             Err(e) => {
@@ -465,8 +625,14 @@ pub async fn crawl(replicants_error: Option<String>) {
             }
         }
     }
-    let snapshot = UNIVERSE.lock().unwrap_or_else(|p| p.into_inner()).clone();
-    crate::mcp::cache_store::save_in_background(CACHE_NAME, snapshot);
+}
+
+/// The round is over: settle the second marker on what the crawls found, and persist.
+pub fn finish_round(telemetry: &HashSet<String>) {
+    let mut u = UNIVERSE.lock().unwrap_or_else(|p| p.into_inner());
+    u.classify(telemetry);
+    touch();
+    crate::mcp::cache_store::save_in_background(CACHE_NAME, u.clone());
 }
 
 #[cfg(test)]
@@ -526,9 +692,8 @@ mod tests {
         p.insert("1-7".into(), PlayerFacts { ledger_ms: 10 * 3_600_000, last_active_ms: Some(20 * 3_600_000), ..Default::default() });
         p.insert("1-8".into(), PlayerFacts { ledger_ms: 10 * 3_600_000, last_active_ms: Some(5 * 3_600_000), ..Default::default() });
         p.insert("1-9".into(), PlayerFacts { ledger_ms: now - 3_600_000, last_active_ms: Some(now), ..Default::default() });
-        assert_eq!(ledger_plan(&p, &HashMap::new(), now), vec!["1-50", "1-5", "1-7"]);
-        let reps: HashMap<String, String> = [("1-50".to_string(), "1-1".to_string())].into();
-        assert_eq!(ledger_plan(&p, &reps, now), vec!["1-5", "1-7", "1-50"], "every human before any replicant");
+        assert_eq!(ledger_plan(&p, |_| false, now), vec!["1-50", "1-5", "1-7"]);
+        assert_eq!(ledger_plan(&p, |id| id == "1-50", now), vec!["1-5", "1-7", "1-50"], "every human before any replicant");
     }
 
     #[test]
@@ -545,6 +710,46 @@ mod tests {
         let r = replicants_from(&rows);
         assert_eq!(r.len(), 1, "{r:?}");
         assert_eq!(r.get("1-300").map(String::as_str), Some("1-194"));
+    }
+
+    #[test]
+    fn guild_rows_mark_the_same_replicants_as_lcd_records() {
+        let rows = vec![
+            json!({"id": "1-300@1-194", "object_id": "1-300", "player_id": "1-194", "val": "33554431"}),
+            json!({"id": "1-301@1-194", "object_id": "1-301", "player_id": "1-194", "val": 33554431}),
+            json!({"id": "1-301@1-301", "object_id": "1-301", "player_id": "1-301", "val": 33554431}),
+            json!({"id": "1-302@1-194", "object_id": "1-302", "player_id": "1-194", "val": 15728640}),
+            json!({"id": "2-9@1-194", "object_id": "2-9", "player_id": "1-194", "val": 33554431}),
+        ];
+        let r = replicants_from_rows(&rows);
+        assert_eq!(r.len(), 2, "{r:?}");
+        assert_eq!(r.get("1-301").map(String::as_str), Some("1-194"));
+    }
+
+    #[test]
+    fn an_untouched_account_with_a_minted_name_is_a_likely_replicant() {
+        let ghost = |name: &str| PlayerFacts { name: name.into(), ..Default::default() };
+        // Names read off the live roster, 2026-11-05.
+        for n in ["MAGMA-1606", "FLINT-8462", "PEREGRINE-6067", "TRITON-6132", "PENUMBRA-9948", "CASTOR-1969", "CANOPUS-1364", "GRANITE-4185", "KESTREL-4465", "ABYSSAL-5628", "MERLIN-3040", "PLASMA-4689"] {
+            assert!(is_likely_replicant(&ghost(n), false), "{n}");
+        }
+        assert!(!is_likely_replicant(&ghost("Wixby"), false), "a name of their own");
+        assert!(!is_likely_replicant(&ghost(""), false), "no name is no evidence");
+        assert!(!is_likely_replicant(&ghost("MAGMA-1606"), true), "telemetry means someone was there");
+        assert!(!is_likely_replicant(&PlayerFacts { name: "MAGMA-1606".into(), last_active_ms: Some(1), ..Default::default() }, false), "played");
+        assert!(!is_likely_replicant(&PlayerFacts { name: "MAGMA-1606".into(), mined_g: Some(5.0), ..Default::default() }, false), "mined");
+    }
+
+    #[test]
+    fn classify_leaves_granted_replicants_to_the_first_marker() {
+        let mut u = Universe::default();
+        u.fold_players(&[json!({"id": "1-1", "guild_id": "0-1"}), json!({"id": "1-2", "guild_id": "0-1"}), json!({"id": "1-3", "guild_id": "0-1"})]);
+        u.fold_names(&[json!({"id": "1-1", "username": "MAGMA-1606"}), json!({"id": "1-2", "username": "FLINT-8462"}), json!({"id": "1-3", "username": "Wixby"}), json!({"id": "1-9", "username": "TRITON-6132"})]);
+        u.replicants.insert("1-2".into(), "1-194".into());
+        u.classify(&HashSet::new());
+        assert_eq!(u.likely, HashSet::from(["1-1".to_string()]));
+        u.classify(&HashSet::from(["1-1".to_string()]));
+        assert!(u.likely.is_empty(), "telemetry clears it next round");
     }
 
     /// `cargo test --bin structs-app live_replicants -- --ignored --nocapture`

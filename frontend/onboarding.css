@@ -29,6 +29,17 @@
 .ob-guilds .ob-row { grid-template-columns: minmax(18ch, 1.6fr) repeat(9, minmax(6ch, .5fr)) minmax(12ch, .8fr); }
 .ob-recent .ob-row { grid-template-columns: minmax(15ch, 1.2fr) minmax(5ch, .4fr) minmax(6ch, .5fr) minmax(7ch, .5fr) minmax(15ch, 1.4fr) repeat(2, minmax(6ch, .4fr)); }
 .ob-runs .ob-row { grid-template-columns: minmax(15ch, 1.2fr) minmax(5ch, .4fr) minmax(14ch, .8fr) minmax(6ch, .5fr) minmax(3ch, .25fr) minmax(8ch, .5fr) minmax(7ch, .5fr) minmax(15ch, 1.3fr) minmax(6ch, .4fr); }
+.ob-steps .ob-row { grid-template-columns: minmax(18ch, 1.6fr) minmax(8ch, 1fr) repeat(3, minmax(6ch, .5fr)); }
+.ob-trends .ob-row { grid-template-columns: minmax(16ch, 1.2fr) minmax(10ch, 1fr) repeat(3, minmax(6ch, .5fr)); }
+.ob-sources .ob-row { grid-template-columns: minmax(13ch, 1fr) minmax(16ch, 1.4fr) minmax(9ch, .7fr) minmax(12ch, 1fr) minmax(6ch, .4fr); }
+.ob-health-guilds .ob-row { grid-template-columns: minmax(16ch, 1.4fr) repeat(6, minmax(6ch, .5fr)) minmax(8ch, .6fr); }
+.ob-sources .ob-row, .ob-health-guilds .ob-row { column-gap: var(--spacing-xl); }
+.ob-who { display: flex; flex-direction: column; gap: var(--spacing-xs); padding: var(--spacing-xs) var(--spacing-xs) var(--spacing-sm) var(--spacing-xl); border-bottom: 1px solid var(--border-subtle); text-align: left; }
+.ob-who-row { display: grid; grid-template-columns: minmax(15ch, 1.2fr) minmax(5ch, .4fr) minmax(6ch, .5fr) minmax(7ch, .5fr); align-items: center; gap: var(--spacing-md); }
+.ob-spark { color: var(--accent-primary); }
+.ob-spark svg { display: block; width: 100%; height: var(--spacing-xl); }
+.ob-funnel.is-small .ob-row:not(.ob-head) > .ob-n { color: var(--text-hint); }
+.ob-row.is-open { background: var(--surface-default); }
 .ob-c { min-width: 0; color: var(--text-body); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ob-n { text-align: right; font-variant-numeric: tabular-nums; }
 .ob-head .ob-c { color: var(--text-hint); white-space: normal; }
@@ -58,8 +69,8 @@
 .ob-swatch { display: inline-block; width: var(--spacing-md); height: var(--spacing-md); }
 .ob-seg-completed { background: var(--accent-primary); }
 .ob-seg-declined { background: var(--accent-secondary); }
-.ob-seg-left_during_tutorial { background: var(--accent-destructive); }
-.ob-seg-in_progress { background: var(--text-warning); }
+.ob-seg-left { background: var(--accent-destructive); }
+.ob-seg-playing { background: var(--text-warning); }
 .ob-foot { color: var(--text-hint); display: flex; align-items: center; gap: var(--spacing-xs); }
 .ob-foot [class^="icon-"] { font-size: var(--icon-sm); }
 
@@ -80,5 +91,26 @@
   .ob-runs .ob-row > :nth-child(2), .ob-runs .ob-row > :nth-child(3), .ob-runs .ob-row > :nth-child(5),
   .ob-runs .ob-row > :nth-child(8), .ob-runs .ob-row > :nth-child(9) { display: none; }
   .ob-slow .ob-row > :nth-child(2) { display: none; }
+  .ob-steps .ob-row, .ob-trends .ob-row { grid-template-columns: minmax(0, 1fr) repeat(3, auto); column-gap: var(--spacing-lg); }
+  .ob-steps .ob-row > :nth-child(2), .ob-trends .ob-row > :nth-child(2) { display: none; }
+  /* Source · Read · State. */
+  .ob-sources .ob-row { grid-template-columns: minmax(0, 1fr) repeat(2, auto); column-gap: var(--spacing-lg); }
+  .ob-sources .ob-row > :nth-child(2), .ob-sources .ob-row > :nth-child(4) { display: none; }
+  /* Guild · Players · Coverage · State. */
+  .ob-health-guilds .ob-row { grid-template-columns: minmax(0, 1fr) repeat(3, auto); column-gap: var(--spacing-lg); }
+  .ob-health-guilds .ob-row > :nth-child(3), .ob-health-guilds .ob-row > :nth-child(4),
+  .ob-health-guilds .ob-row > :nth-child(6), .ob-health-guilds .ob-row > :nth-child(7) { display: none; }
+  /* Run · Runs · Finished · Time to finish. */
+  .ob-run-compare .ob-row { grid-template-columns: minmax(0, 1fr) repeat(3, auto); column-gap: var(--spacing-lg); }
+  .ob-run-compare .ob-row > :nth-child(4), .ob-run-compare .ob-row > :nth-child(6), .ob-run-compare .ob-row > :nth-child(7) { display: none; }
+  /* Who · Players · Median · Max. */
+  .ob-dist .ob-row { grid-template-columns: minmax(0, 1fr) repeat(3, auto); column-gap: var(--spacing-lg); }
+  .ob-dist .ob-row > :nth-child(3), .ob-dist .ob-row > :nth-child(4), .ob-dist .ob-row > :nth-child(6), .ob-dist .ob-row > :nth-child(7) { display: none; }
+  /* Guild · Players · Active · Runs. */
+  .ob-guilds .ob-row { grid-template-columns: minmax(0, 1fr) repeat(3, auto); column-gap: var(--spacing-lg); }
+  .ob-guilds .ob-row > :nth-child(4), .ob-guilds .ob-row > :nth-child(5), .ob-guilds .ob-row > :nth-child(6), .ob-guilds .ob-row > :nth-child(7),
+  .ob-guilds .ob-row > :nth-child(9), .ob-guilds .ob-row > :nth-child(10), .ob-guilds .ob-row > :nth-child(11) { display: none; }
+  .ob-who-row { grid-template-columns: minmax(0, 1fr) repeat(2, auto); }
+  .ob-who-row > :nth-child(2) { display: none; }
   .ob-hud { gap: var(--spacing-md) var(--spacing-xl); }
 }

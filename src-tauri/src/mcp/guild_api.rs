@@ -1351,6 +1351,26 @@ impl GuildApiClient {
         ))
         .await
     }
+    /// Unique players by outcome, a design's first runs and replays together.
+    /// One row; `player_type` is `new` or `existing`.
+    pub async fn onboarding_tutorial_players(&self, content_version: &str, idle_hours: u32, interface: Option<&str>, player_type: Option<&str>) -> Result<Value, String> {
+        self.get(&format!(
+            "/api/onboarding/tutorial/players/{}?idle_hours={idle_hours}{}{}",
+            query_esc(content_version),
+            interface.map(|i| format!("&interface_name={}", query_esc(i))).unwrap_or_default(),
+            player_type.map(|t| format!("&player_type={}", query_esc(t))).unwrap_or_default()
+        ))
+        .await
+    }
+    /// How far unique players got, per tutorial step.
+    pub async fn onboarding_tutorial_player_steps(&self, content_version: &str, interface: Option<&str>) -> Result<Value, String> {
+        self.get(&format!(
+            "/api/onboarding/tutorial/players/{}/steps{}",
+            query_esc(content_version),
+            interface.map(|i| format!("?interface_name={}", query_esc(i))).unwrap_or_default()
+        ))
+        .await
+    }
     /// One page of a design's tutorial runs, its replays included, newest first.
     pub async fn onboarding_tutorial_runs(&self, content_version: &str, idle_hours: u32, page: u32) -> Result<Value, String> {
         self.get(&format!("/api/onboarding/tutorial/runs/{}?idle_hours={idle_hours}&page={page}", query_esc(content_version))).await
