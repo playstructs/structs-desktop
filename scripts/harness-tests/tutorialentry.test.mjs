@@ -167,6 +167,18 @@ function boot(opts = {}) {
   check('  and still starts', w.sessionStorage.getItem('tutorialActive') === '1');
 }
 {
+  console.log('before sign-in the menu plays the simulation, it does not open a page');
+  // Since webapp faa99d98 a menu page opened before login has NO close button
+  // (there is no game behind it), so opening the Account page here would strand
+  // the player with no way back to the sign-in screen.
+  const { w, calls } = boot({ player: null });
+  check('  replay() refuses, and opens nothing', w.StructsTutorial.replay() === false
+    && calls.goto.length === 0 && calls.open === 0, calls.goto.join());
+  w.StructsTutorial.launch();
+  check('  so the menu\'s `replay() || launch()` reaches Combat Training anyway',
+    w.sessionStorage.getItem('tutorialActive') === '1');
+}
+{
   console.log('replay() falls back when the game menu is not wired up');
   const { w } = boot({ noMenu: true });
   check('  replay() refuses rather than throwing', w.StructsTutorial.replay() === false);

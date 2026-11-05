@@ -4550,7 +4550,20 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
        * TutorialMode.launch(true) — which carries the player's energy into the
        * simulation and marks the run as a replay. This is what the menu calls.
        */
-      replay: function () { return show('Account', 'startTutorial'); },
+      replay: function () {
+        /* Not before a player is signed in. The Help menu is there from the
+         * first frame, but since webapp faa99d98 a menu page opened before
+         * login has NO close button — there is no game behind it to close to —
+         * so this would strand the player on the Account page with no way back
+         * to the sign-in screen. There is also nothing to replay yet. The
+         * menu's `replay() || launch()` (main.rs) then plays the simulation
+         * instead, which wants no account. */
+        if (!playerId()) {
+          log('Combat Training is for a signed-in player');
+          return false;
+        }
+        return show('Account', 'startTutorial');
+      },
       /**
        * Starts the tutorial directly, mirroring TutorialMode.launch(true),
        * energy hand-off included, so the simulation shows the player's own
