@@ -76,6 +76,30 @@ function boot(opts = {}) {
   check('  fetch resolves the same way', calls.fetched[0] === 'https://guild.example/api/player/1-194', calls.fetched[0]);
 }
 
+// ── only guild paths are sent to the guild ──────────────────────────────────
+//
+// Everything else absolute is one of the app's own bundled files. The game
+// fetches '/img/focus/target-selected-*.gif' for its bytes, to replay the
+// burst that confirms a picked target from an object URL; sent to the guild it
+// comes back through proxy_fetch, which decodes every body as UTF-8 text, so
+// the blob is mangled and the burst never plays.
+
+{
+  console.log("the app's own files stay on the app's own origin");
+  const { w, calls } = boot();
+  w.fetch('/img/focus/target-selected-enemy.gif');
+  check('  a bundled asset is not sent to the guild', calls.fetched[0] === '/img/focus/target-selected-enemy.gif',
+    calls.fetched[0]);
+
+  w.navigator.sendBeacon('/img/focus/target-selected-enemy.gif', 'payload');
+  check('  and neither is a beacon to one', calls.beaconed[0]?.[0] === '/img/focus/target-selected-enemy.gif',
+    calls.beaconed[0]?.[0]);
+
+  w.fetch('/api/onboarding/events', { method: 'POST' });
+  check('  while a guild path still goes to the guild',
+    calls.fetched[1] === 'https://guild.example/api/onboarding/events', calls.fetched[1]);
+}
+
 {
   console.log('an absolute beacon is left alone');
   const { w, calls } = boot();

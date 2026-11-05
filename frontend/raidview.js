@@ -1574,6 +1574,7 @@
   var BURST_MS = 800;
   var burstBlobs = {};
   var burstPlays = {};
+  var burstPlayed = 0;
   function burstPath(variant) { return 'img/focus/target-selected-' + variant + '.gif'; }
   function preloadBursts() {
     // Guarded as the game guards it: a context without fetch (the jsdom
@@ -1601,7 +1602,12 @@
     var img = document.createElement('img');
     img.className = 'rv-target-selected';
     img.alt = '';
-    img.src = url || burstPath(variant);
+    // Without a blob, the plain path still runs the first time, and a query
+    // after that gives the art a URL this page has not decoded before — which
+    // is the whole trick. The first play keeps the plain path, so a runtime
+    // that will not serve the query is no worse off than it is today.
+    burstPlayed += 1;
+    img.src = url || (burstPlayed > 1 ? burstPath(variant) + '?' + burstPlayed : burstPath(variant));
     mount.appendChild(img);
     burstPlays[variant] = { el: img, url: url, timer: setTimeout(function () {
       if (img.parentNode) img.remove();

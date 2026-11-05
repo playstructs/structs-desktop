@@ -1633,11 +1633,16 @@ check('pipRequestHide forgets the struct immediately (no stale re-show)', RV._pi
   const shots = () => mount.querySelectorAll('img.rv-target-selected');
   check('a play adds one burst over the struct', shots().length === 1);
   check('…pointing at the picked variant\'s art',
-    /target-selected-enemy\.gif$/.test(shots()[0].getAttribute('src') || ''), shots()[0] && shots()[0].getAttribute('src'));
+    /target-selected-enemy\.gif(\?\d+)?$/.test(shots()[0].getAttribute('src') || ''), shots()[0] && shots()[0].getAttribute('src'));
 
   const first = shots()[0];
+  const firstSrc = first.getAttribute('src');
   RV._playBurst(mount, 'enemy');
   check('a second play replaces the first rather than stacking', shots().length === 1 && shots()[0] !== first);
+  // Here there is no blob to make an object URL from (no fetch in the harness),
+  // so the query is what gives the art a URL this page has not decoded before.
+  check('…under a URL of its own, so the art runs again instead of ending blank',
+    shots()[0].getAttribute('src') !== firstSrc, shots()[0].getAttribute('src'));
 
   const rule = [...w.document.styleSheets].flatMap((sheet) => [...sheet.cssRules])
     .find((r) => r.selectorText === '.rv-target-selected');

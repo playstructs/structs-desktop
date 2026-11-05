@@ -198,6 +198,11 @@
    position:relative box: 16 corners (1:1 at 2x), .is-sm 8.                */
 .d-brackets { position: absolute; inset: -2px; z-index: 2; pointer-events: none; border-style: solid; border-color: transparent; border-width: var(--spacing-xl); image-rendering: pixelated; }
 .d-brackets.is-sm { border-width: var(--spacing-md); }
+/* The burst a landed pick plays over its tile (SimDeck.burst). Above the
+   brackets, which stay lit underneath it, and never in the way of a click.
+   Sized by hand: an img is a replaced element, so `inset` alone would leave it
+   at the art's own 128px and overflow the tile. */
+.d-burst { position: absolute; top: -2px; left: -2px; z-index: 3; width: calc(100% + 4px); height: calc(100% + 4px); object-fit: contain; pointer-events: none; image-rendering: pixelated; }
 .d-bracket-friendly { border-image: url('img/focus/focus-friendly.png') 32 stretch; }
 .d-bracket-enemy { border-image: url('img/focus/focus-enemy.png') 32 stretch; }
 .d-move-target { border-image: url('img/focus/focus-move.gif') 32 stretch; }

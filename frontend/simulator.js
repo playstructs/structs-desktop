@@ -298,7 +298,13 @@
     if (selection && selection.id === u.id) selection.ambit = ambit;
     picking = null;
     renderSetup();
+    // The render above rebuilt the board, so the burst goes on the tile the
+    // unit now holds: the one the pick landed on. Yellow for a move, as the
+    // game and the Raid View play it.
+    Deck.burst(tileOfUnit(u.id), 'neutral');
   }
+  /** The board tile a unit holds, read after the render that follows a pick. */
+  function tileOfUnit(id) { return id ? document.querySelector('#arena [data-unit="' + id + '"]') : null; }
 
   function wardOf(u) { return u && u.protects ? draft.find(function (v) { return v.id === u.protects; }) : null; }
   function guarded(u) { return draft.some(function (v) { return v.protects === u.id; }); }
@@ -711,7 +717,8 @@
     changing = false;
     renderSetup();
   }
-  function setWard(u, wardId) { u.protects = wardId; picking = null; renderSetup(); }
+  /* Teal for a guard, on the struct that is now being guarded. */
+  function setWard(u, wardId) { u.protects = wardId; picking = null; renderSetup(); Deck.burst(tileOfUnit(wardId), 'friendly'); }
 
   /* ── Battle ────────────────────────────────────────────────────────────── */
 
@@ -1671,6 +1678,7 @@
     layout: layout, validate: validate, readiness: readiness, start: start, toSetup: toSetup, showDebrief: showDebrief, openLink: openLink,
     takeContext: function () { return social.take(); }, social: social, runResult: runResult, comms: commsInvoke,
   };
+  Deck.burstPreload();
   setScreen('setup');
   loadLayout();
   var linked = /[?&]sim=([A-Za-z0-9_-]{4,2000})/.exec(location.search || '');

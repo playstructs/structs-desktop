@@ -61,6 +61,9 @@
  *         slotOn, static, size:56, hp:[n,max], defending, defended, reticle, skull, plus,
  *         label, disabled, button=true, onClick, into, id, cls})
  *                                           → button.d-tile (span when static or button:false)
+ *   burstPreload()                          downloads the target-burst art, once
+ *   burst(tile, 'enemy'|'friendly'|'neutral') → img.d-burst, the burst a landed
+ *                                           pick plays over its tile, removed when it ends
  *   reach(ambits {space,air,land,water} | ['space',…], {bare, label}) → span.d-reach role=img
  *   fleet({foe, name, count, reach, into, id, cls}) → div.d-fleet
  *
@@ -621,6 +624,59 @@
     if (opts.skull || (opts.dead && opts.skull !== false)) t.appendChild(sprite('destroyed', 16, 'd-tile-badge'));
     t.appendChild(hide(el('span', 'd-brackets')));
     return t;
+  }
+
+  /* The burst that confirms a picked target, as the game plays it over the map
+   * (TargetSelectedIndicator, webapp 67f3ce51) and the Raid View plays it over
+   * a struct: teal for a guard, yellow for a move, red for an attack.
+   *
+   * The gifs do not loop and end blank, and a gif only runs from its first
+   * frame the first time its URL is decoded — so each play gets its own object
+   * URL of the already downloaded file. Without that, the second pick onwards
+   * shows a blank last frame. The board is rebuilt by the pick that triggers
+   * the burst, so a play is mounted after that render, and its timer still
+   * revokes the URL when a later render has already taken the image away. */
+  var BURST_MS = 800;
+  var burstBlobs = {};
+  var burstLoading = false;
+  var burstPlayed = 0;
+  function burstPath(variant) { return 'img/focus/target-selected-' + variant + '.gif'; }
+  function burstPreload() {
+    // Guarded the way the game guards it: a context without fetch (the jsdom
+    // harness) must not take the window down on boot.
+    if (burstLoading || typeof fetch !== 'function') return;
+    burstLoading = true;
+    ['enemy', 'friendly', 'neutral'].forEach(function (variant) {
+      fetch(burstPath(variant))
+        .then(function (r) { return r.ok ? r.blob() : null; })
+        .then(function (blob) { if (blob) burstBlobs[variant] = blob; })
+        // A play falls back to the path, which still runs the first time.
+        .catch(function () {});
+    });
+  }
+  /**
+   * @param {Element|null} tile the tile the pick landed on
+   * @param {string} variant enemy | friendly | neutral
+   * @return {Element|null} the image playing, for a caller that wants to stop it
+   */
+  function burst(tile, variant) {
+    if (!tile) return null;
+    var blob = burstBlobs[variant];
+    var url = blob ? URL.createObjectURL(blob) : null;
+    var img = el('img', 'd-burst');
+    img.alt = '';
+    // Without a blob, the plain path still runs the first time, and a query
+    // after that gives the art a URL this page has not decoded before — which
+    // is the whole trick. The first play keeps the plain path, so a runtime
+    // that will not serve the query is no worse off than it is today.
+    burstPlayed += 1;
+    img.src = url || (burstPlayed > 1 ? burstPath(variant) + '?' + burstPlayed : burstPath(variant));
+    tile.appendChild(img);
+    setTimeout(function () {
+      if (img.parentNode) img.remove();
+      if (url) URL.revokeObjectURL(url);
+    }, BURST_MS);
+    return img;
   }
 
   function reach(ambits, opts) {
@@ -1234,7 +1290,7 @@
     el: el, sr: sr, glyph: glyph, sprite: sprite, ship: ship, pf: pf, led: led, hp: hp, chevs: chevs, brackets: brackets, vs: vs,
     panel: panel, sec: sec, rule: rule, screen: screen,
     cards: cards, structCard: structCard, seg: seg, rank: rank, battery: battery, mini: mini,
-    tile: tile, reach: reach, fleet: fleet,
+    tile: tile, burst: burst, burstPreload: burstPreload, reach: reach, fleet: fleet,
     hero: hero, facts: facts, key: key, weapon: weapon, guard: guard,
     btn: btn, iconBtn: iconBtn, tool: tool, launch: launch, menu: menu, bindMenu: bindMenu,
     ready: ready, mode: mode, pill: pill,

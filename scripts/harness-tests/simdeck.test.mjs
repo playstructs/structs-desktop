@@ -290,6 +290,39 @@ function radioGroupChecks(label, api, buttons, attr, picks, firstValue) {
   check('weapon: smart glyph, cost cells, reach "Hits land and water"', !!wpn.querySelector('.icon-smart-weapon') && wpn.querySelector('.d-mini').getAttribute('aria-label') === 'Costs 5 charge' && wpn.querySelector('.d-reach.is-bare').getAttribute('aria-label') === 'Hits land and water');
 }
 
+/* The burst a landed pick plays over its tile. The art does not loop and ends
+ * blank, so a play has to be removed when it has run, and each play needs its
+ * OWN url or the second pick onwards shows that blank last frame. */
+{
+  console.log('\n— the target burst');
+  const tile = D.tile({ side: 'friend', slug: 'tank', label: 'Tank' });
+  d.body.appendChild(tile);
+  const img = D.burst(tile, 'friendly');
+  check('burst: an img.d-burst in the tile, with nothing to say', img.matches('img.d-burst') && img.parentNode === tile && img.alt === '');
+  check('…drawn from the picked variant', img.getAttribute('src') === 'img/focus/target-selected-friendly.gif', img.getAttribute('src'));
+  check('…and a pick with no tile on the board is not a crash', D.burst(null, 'enemy') === null);
+  await new Promise((r) => setTimeout(r, 900));
+  check('…and it is taken away once it has run', !tile.querySelector('.d-burst'));
+}
+
+{
+  console.log('\n— every play gets its own url');
+  // jsdom has Blob but no object URLs; a browser has both.
+  let made = 0; const revoked = [];
+  w.URL.createObjectURL = () => 'blob:simdeck/' + (made += 1);
+  w.URL.revokeObjectURL = (u) => revoked.push(u);
+  w.fetch = () => Promise.resolve({ ok: true, blob: () => Promise.resolve(new w.Blob(['GIF89a'], { type: 'image/gif' })) });
+  D.burstPreload();
+  await new Promise((r) => setTimeout(r, 50));
+  const first = D.burst(D.tile({}), 'enemy'), second = D.burst(D.tile({}), 'enemy');
+  check('a preloaded play is an object url', /^blob:/.test(first.getAttribute('src')), first.getAttribute('src'));
+  check('…and the next pick gets a different one, so it runs from frame one',
+    first.getAttribute('src') !== second.getAttribute('src'));
+  await new Promise((r) => setTimeout(r, 900));
+  check('…and both are let go when they have run, however the board has changed',
+    revoked.length === 2 && revoked.join() === [first, second].map((i) => i.getAttribute('src')).join(), revoked.join());
+}
+
 {
   console.log('\n— debrief');
   const tl = D.timeline({ n: 76, events: [

@@ -216,13 +216,21 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
   if (guildApi) {
     // Strip trailing /api so we get the base origin for relative URL resolution
     const apiBase = guildApi.replace(/\/api\/?$/, '');
+    // The webapp is written for a page the guild serves, so it asks for the
+    // guild with a bare path: GuildAPI is '/api', and so is the onboarding
+    // telemetry. Those — and ONLY those — get the guild origin. Every other
+    // absolute path is one of the app's own bundled files and has to stay on
+    // tauri://localhost: '/img/focus/target-selected-*.gif', the burst that
+    // confirms a picked target (webapp 67f3ce51), is fetched for its BYTES,
+    // and sending that to the guild sent it back through proxy_fetch, which
+    // decodes every body as UTF-8 text — so the blob was mangled and the
+    // burst never played anywhere in the app, while the same art worked in
+    // the Raid View, which asks for it without the leading slash.
+    const toGuildUrl = (url) => (typeof url === 'string' && url.startsWith('/api')) ? apiBase + url : url;
     const proxiedFetch = window.fetch;
     window.fetch = function(input, init) {
       let url = (typeof input === 'string') ? input : input.url;
-      // Convert relative URLs to absolute using the guild API origin
-      if (url.startsWith('/')) {
-        url = apiBase + url;
-      }
+      url = toGuildUrl(url);
       var p = (typeof input === 'string')
         ? proxiedFetch.call(this, url, init)
         : proxiedFetch.call(this, new Request(url, input), init);
@@ -260,7 +268,7 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
     if (nativeBeacon) {
       navigator.sendBeacon = function(url, data) {
         try {
-          return nativeBeacon(String(url).startsWith('/') ? apiBase + url : url, data);
+          return nativeBeacon(toGuildUrl(url), data);
         } catch (e) {
           return false;
         }
