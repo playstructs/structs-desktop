@@ -1351,7 +1351,12 @@ impl GuildApiClient {
         ))
         .await
     }
-    /// Every event of the session in which this player's signup finished.
+    /// One page of a design's tutorial runs, its replays included, newest first.
+    pub async fn onboarding_tutorial_runs(&self, content_version: &str, idle_hours: u32, page: u32) -> Result<Value, String> {
+        self.get(&format!("/api/onboarding/tutorial/runs/{}?idle_hours={idle_hours}&page={page}", query_esc(content_version))).await
+    }
+    /// Every event of each session that carries this player's id: the signup
+    /// and any later tutorial run, so read it by `session_id`.
     pub async fn onboarding_player(&self, player_id: &str) -> Result<Value, String> {
         self.get(&format!("/api/onboarding/player/{}", query_esc(player_id))).await
     }

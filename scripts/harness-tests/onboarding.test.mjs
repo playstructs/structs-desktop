@@ -81,6 +81,18 @@ if (host) {
   const offer = host.querySelector('.ob-funnel-skips .ob-row[data-step="orientation.tutorial_offer"]');
   check('TUTORIAL: skips per step and so far', offer && text(offer.children[7]) === '182' && text(offer.children[8]) === '17%' && text(offer.children[9]) === '17%', offer && text(offer));
 
+  go('Runs');
+  const runTiles = [...host.querySelectorAll('.ob-hud .ob-tile')].map((t) => [...t.children].map(text).join(' ').toUpperCase());
+  check('RUNS leads on players, then runs and repeats', /^31 PLAYERS$/.test(runTiles[0]) && /^40 RUNS 9 REPEAT$/.test(runTiles[1]), JSON.stringify(runTiles));
+  check('RUNS: finished as a share of runs, and the runs with no player', runTiles.some((t) => /^24 FINISHED 60%$/.test(t)) && runTiles.some((t) => /^2 NO PLAYER$/.test(t)), JSON.stringify(runTiles));
+  const logged = host.querySelector('.ob-runs .ob-row[data-session="aaaa"]');
+  check('a long-standing player\'s run is listed by interface, kind, outcome and time', logged && /1-194/.test(text(logged.children[0])) && text(logged.children[2]) === 'structs-desktop' && text(logged.children[5]) === 'Existing' && text(logged.children[6]) === 'Finished' && /10m/.test(text(logged.children[8])), logged && text(logged));
+  check('a player with no name shows the id once', logged && text(logged.children[0]) === '1-194', logged && text(logged.children[0]));
+  const replay = host.querySelector('.ob-runs .ob-row[data-session="bbbb"]');
+  check('a replay reads as one, with its run number', replay && text(replay.children[5]) === 'Replay' && text(replay.children[4]) === '2', replay && text(replay));
+  const nameless = host.querySelector('.ob-runs .ob-row[data-session="cccc"]');
+  check('a run nobody is attached to says so and offers no player link', nameless && text(nameless.children[0]) === 'No player' && !nameless.querySelector('a') && text(nameless.children[5]) === '—', nameless && text(nameless));
+
   go('Players');
   const blocks = [...host.querySelectorAll('.ob-view .ob-block')];
   check('PLAYERS: five distributions', blocks.length === 5 && /Ore mined/.test(text(blocks[0])) && /Raids won/.test(text(blocks[4])), blocks.map((b) => text(b.firstChild)).join(' | '));
@@ -96,6 +108,7 @@ if (host) {
   const sn = g.find((r) => r.dataset.guild === '0-5');
   check('GUILDS: replicants are not counted as sessions left to read', sn && text(sn.lastChild) === '3,810 / 3,810', sn && text(sn.lastChild));
   check('GUILDS lists every guild with its players, the one without an API quiet', g.length === 3 && g.find((r) => r.dataset.guild === '0-2').classList.contains('is-quiet') && /^72$/.test(text(g.find((r) => r.dataset.guild === '0-2').children[1])));
+  check('GUILDS: runs per guild, a dash for a guild that cannot say', text(sn.children[7]) === '37' && text(g.find((r) => r.dataset.guild === '0-2').children[7]) === '—', sn && text(sn));
   go('Recent');
   const p = host.querySelector('.ob-recent .ob-row[data-player="1-9580"]');
   check('RECENT shows outcome and time in the tutorial', p && /Finished/.test(text(p)) && /13m/.test(text(p)), text(p));
@@ -121,6 +134,10 @@ if (host) {
   go('Tutorial');
   const th = text(host.querySelectorAll('.ob-compare')[1].querySelector('.ob-head'));
   check('TUTORIAL compares kept, drop and skip per guild', /OH · Kept/.test(th) && /SN\.C · Kept/.test(th) && /Skip/.test(th), th);
+
+  go('Runs');
+  const rc = [...host.querySelectorAll('.ob-compare .ob-row[data-metric]')].map((r) => r.dataset.metric);
+  check('RUNS compares a column per segment, on the same figures', rc.join(',') === 'runs,players,completed,left,playing,repeat,replays,existing,no_player' && /OH/.test(text(host.querySelector('.ob-compare .ob-head'))), rc.join(','));
 
   sel()[0].value = 'structs-webapp'; sel()[0].dispatchEvent(new w.Event('change'));
   const filtered = await until(() => calls().find((c) => c.args.filters.interface === 'structs-webapp'));
@@ -159,6 +176,8 @@ const coldView = () => coldHost && coldHost.querySelector('.ob-view, .ob > .sui-
 check('with nothing read and the crawl running, the page is a loading block, not zero tiles',
   coldHost && !coldHost.querySelector('.ob-hud') && coldHost.querySelector('.ob > .sui-message-inline-alert .icon-in-progress') && /Reading every guild/.test(text(coldView())), coldHost && text(coldHost));
 const cgo = (label) => { [...coldHost.querySelectorAll('.ob .sui-screen-nav-item')].find((a) => text(a) === label).click(); };
+cgo('Runs');
+check('Runs still draws: it comes from the servers, not the crawl', coldHost && coldHost.querySelector('.ob-runs .ob-row[data-session]'));
 cgo('Signup');
 check('Signup still draws: it comes from the servers, not the crawl', coldHost && coldHost.querySelector('.ob-funnel .ob-row[data-step]'));
 w.__HARNESS_OB_COLD__ = 'done';

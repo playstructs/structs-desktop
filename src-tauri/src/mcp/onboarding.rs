@@ -16,7 +16,11 @@
 //! | tier | route | covers | gives |
 //! |---|---|---|---|
 //! | aggregate | `/api/onboarding/funnel/{v}/{phase}`, `/tutorial/outcome/{v}` | EVERY session, incl. ones that quit before signup finished | reached / skipped / dropped per step, outcome counts |
-//! | sample | `/api/onboarding/player/{id}` | sessions whose signup FINISHED (only `signup.employee_record` carries a player id) | timestamps: durations, dwell per step, daily cohorts |
+//! | sample | `/api/onboarding/player/{id}` | sessions whose signup FINISHED, the signup session only | timestamps: durations, dwell per step, daily cohorts |
+//! | runs | `/api/onboarding/tutorial/runs/{v}` | EVERY started run, replays and players who signed up long ago included | who, when, which interface, how far, outcome |
+//!
+//! The sample is new players' signups. A run taken after signup is a session
+//! of its own and belongs to the runs tier, which needs no crawl.
 //!
 //! No route serves timings in bulk, so the sample is a crawl over each
 //! guild's roster, newest first, of players created after the telemetry
@@ -70,6 +74,13 @@ const DIRECTORY_TTL: Duration = Duration::from_secs(30 * 60);
 const AGGREGATE_TTL: Duration = Duration::from_secs(120);
 const CRAWL_GAP: Duration = Duration::from_secs(180);
 const CACHE_NAME: &str = "onboarding_players";
+/// `/tutorial/runs` answers `PaginationLimits::DEFAULT` rows a page.
+const RUNS_PAGE: usize = 100;
+/// Per guild per read, newest first.
+const RUNS_MAX_PAGES: u32 = 20;
+/// The card's list; its counts cover every run read.
+const RUNS_SHOWN: usize = 100;
+const REPLAY_SUFFIX: &str = "-replay";
 
 // ── The per-player sample ───────────────────────────────────────────────────
 
@@ -176,10 +187,17 @@ fn num(v: Option<&Value>) -> Option<f64> {
     }
 }
 
-/// Fold `/api/onboarding/player/{id}` rows into one session.
+/// Fold `/api/onboarding/player/{id}` rows into the player's SIGNUP session.
+/// The route also answers every later run of theirs; folding those in would
+/// time a tutorial taken days later as one long signup. A player with no
+/// signup session comes back empty: their runs are in the runs tier.
 pub fn session_from_rows(guild: &str, rows: &Value) -> PlayerSession {
     let mut s = PlayerSession { guild: guild.to_string(), ..Default::default() };
-    for r in rows.as_array().map(|a| a.as_slice()).unwrap_or(&[]) {
+    let rows = rows.as_array().map(|a| a.as_slice()).unwrap_or(&[]);
+    let Some(signup) = rows.iter().find(|r| text(r.get("step_key")) == PLAYER_STEP).map(|r| text(r.get("session_id"))) else {
+        return s;
+    };
+    for r in rows.iter().filter(|r| text(r.get("session_id")) == signup) {
         let Some(t) = parse_ts(&text(r.get("recorded_at"))) else { continue };
         let k = text(r.get("step_key"));
         if k.is_empty() {
@@ -290,6 +308,132 @@ static AGGREGATES: LazyLock<Mutex<HashMap<AggregateKey, (Instant, GuildAggregate
 
 fn missing_route(e: &str) -> bool {
     e.starts_with("Guild API 404 ")
+}
+
+// ── The runs ────────────────────────────────────────────────────────────────
+
+/// One started tutorial run, as `/tutorial/runs/{v}` reports it.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Run {
+    pub guild: String,
+    pub session: String,
+    /// `None`: the session never recorded who was playing.
+    pub player: Option<String>,
+    pub interface: String,
+    pub replay: bool,
+    /// The player's nth run.
+    pub number: Option<u32>,
+    pub new_player: bool,
+    pub started_ms: Option<i64>,
+    pub last_ms: Option<i64>,
+    pub steps: Option<f64>,
+    pub furthest: Option<String>,
+    pub outcome: String,
+}
+
+fn flag(v: Option<&Value>) -> bool {
+    match v {
+        Some(Value::Bool(b)) => *b,
+        Some(Value::String(s)) => matches!(s.as_str(), "t" | "true" | "1"),
+        _ => false,
+    }
+}
+
+/// The server's outcome in the words the rest of this card uses.
+fn run_outcome(server: &str) -> String {
+    match server {
+        "left_during_tutorial" => "left",
+        "in_progress" => "playing",
+        o => o,
+    }
+    .to_string()
+}
+
+pub fn run_from_row(guild: &str, r: &Value) -> Option<Run> {
+    let session = text(r.get("session_id"));
+    if session.is_empty() {
+        return None;
+    }
+    let some = |s: String| if s.is_empty() { None } else { Some(s) };
+    Some(Run {
+        guild: guild.to_string(),
+        session,
+        player: some(text(r.get("player_id"))),
+        interface: text(r.get("interface_name")),
+        replay: text(r.get("content_version")).ends_with(REPLAY_SUFFIX),
+        number: num(r.get("run_number")).map(|n| n as u32),
+        new_player: flag(r.get("new_player")),
+        started_ms: parse_ts(&text(r.get("started_at"))),
+        last_ms: parse_ts(&text(r.get("last_event_at"))),
+        steps: num(r.get("steps_reached")),
+        furthest: some(text(r.get("furthest_step_key"))),
+        outcome: run_outcome(&text(r.get("outcome"))),
+    })
+}
+
+/// Counts for one population of runs. `players` is unique players, the figure
+/// to lead with: one player can have several runs.
+pub fn run_summary(runs: &[&Run]) -> Value {
+    let count = |f: &dyn Fn(&Run) -> bool| runs.iter().filter(|r| f(r)).count();
+    let outcome = |o: &str| runs.iter().filter(|r| r.outcome == o).count();
+    json!({
+        "runs": runs.len(),
+        "players": runs.iter().filter_map(|r| r.player.as_ref()).collect::<HashSet<_>>().len(),
+        "repeat": count(&|r| r.number.map_or(false, |n| n > 1)),
+        "replays": count(&|r| r.replay),
+        "existing": count(&|r| r.player.is_some() && !r.new_player),
+        "no_player": count(&|r| r.player.is_none()),
+        "completed": outcome("completed"),
+        "left": outcome("left"),
+        "playing": outcome("playing"),
+    })
+}
+
+/// What one guild answered. `read` is false for a server without the route,
+/// which is not the same as a guild with no runs.
+#[derive(Clone, Debug, Default)]
+struct GuildRuns {
+    runs: Vec<Run>,
+    read: bool,
+    error: Option<String>,
+}
+
+type RunsKey = (String, String, u32);
+static RUNS: LazyLock<Mutex<HashMap<RunsKey, (Instant, GuildRuns)>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+
+async fn guild_runs(guild: &str, api: &str, version: &str, idle_hours: u32, fresh: bool) -> GuildRuns {
+    let key = (guild.to_string(), version.to_string(), idle_hours);
+    if !fresh {
+        if let Some((at, r)) = RUNS.lock().unwrap_or_else(|p| p.into_inner()).get(&key) {
+            if at.elapsed() < AGGREGATE_TTL {
+                return r.clone();
+            }
+        }
+    }
+    let c = client_for(api);
+    let mut out = GuildRuns::default();
+    for page in 1..=RUNS_MAX_PAGES {
+        match c.onboarding_tutorial_runs(version, idle_hours, page).await {
+            Ok(Value::Array(rows)) => {
+                out.read = true;
+                out.runs.extend(rows.iter().filter_map(|r| run_from_row(guild, r)));
+                if rows.len() < RUNS_PAGE {
+                    break;
+                }
+            }
+            Ok(_) => break,
+            Err(e) => {
+                if !missing_route(&e) {
+                    out.error = Some(e);
+                }
+                break;
+            }
+        }
+    }
+    if out.error.is_none() {
+        RUNS.lock().unwrap_or_else(|p| p.into_inner()).insert(key, (Instant::now(), out.clone()));
+    }
+    out
 }
 
 async fn guild_aggregate(guild: &str, api: &str, version: &str, idle_hours: u32, interface: Option<&str>, fresh: bool) -> GuildAggregate {
@@ -885,12 +1029,25 @@ pub async fn terminal_onboarding(
         (u.players.clone(), u.stats(), u.refreshed_ms, u.replicants.clone(), u.replicants_ms)
     };
     let is_rep = |pid: &str| replicants.contains_key(pid);
+    let guild_reads = futures_util::future::join_all(entries.iter().filter_map(|e| {
+        let api = e.guild_api.as_deref()?;
+        let (id, version) = (e.id.as_str(), version.as_str());
+        Some(async move { (id.to_string(), guild_runs(id, api, version, idle_hours, fresh).await) })
+    }))
+    .await;
+    let runs_of: HashMap<String, GuildRuns> = guild_reads.into_iter().collect();
     let interface_of: HashMap<&str, &str> = sessions_all
         .iter()
         .filter(|(_, s)| !s.events.is_empty() && !s.interface.is_empty())
         .map(|(pid, s)| (pid.as_str(), s.interface.as_str()))
         .collect();
-    let mut interfaces: Vec<String> = interface_of.values().map(|s| s.to_string()).collect::<HashSet<_>>().into_iter().collect();
+    let mut interfaces: Vec<String> = interface_of
+        .values()
+        .map(|s| s.to_string())
+        .chain(runs_of.values().flat_map(|g| g.runs.iter().map(|r| r.interface.clone())).filter(|i| !i.is_empty()))
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect();
     interfaces.sort();
     interfaces.push(NO_INTERFACE.into());
     let guild_labels: Vec<(String, String)> = entries
@@ -928,6 +1085,11 @@ pub async fn terminal_onboarding(
     let tutorial_chain = phase_chain(&catalog, PHASES[1]);
     let session_in = |seg: &Seg, pid: &str, s: &PlayerSession| -> bool {
         s.version == version && !s.events.is_empty() && seg.wants(&s.guild, if s.interface.is_empty() { NO_INTERFACE } else { &s.interface }, is_active(players.get(pid), cutoff), is_rep(pid))
+    };
+
+    let run_in = |seg: &Seg, r: &Run| -> bool {
+        let p = r.player.as_deref();
+        seg.wants(&r.guild, &r.interface, p.map_or(false, |p| is_active(players.get(p), cutoff)), p.map_or(false, |p| is_rep(p)))
     };
 
     let out_segs: Vec<Value> = segs
@@ -991,6 +1153,7 @@ pub async fn terminal_onboarding(
                     "completion_rate": ratio(completed, offered.len()), "decline_rate": ratio(declined, offered.len()), "quit_rate": ratio(left, offered.len()),
                 },
                 "sessions": sess.len(),
+                "runs": run_summary(&runs_of.values().flat_map(|g| g.runs.iter()).filter(|r| run_in(seg, r)).collect::<Vec<_>>()),
                 "durations": folded["durations"], "daily": folded["daily"], "dwell": dwell,
                 "stats": {
                     "mined": dist(gather(&|s| s.mined_g), &GRAM_EDGES),
@@ -1006,6 +1169,31 @@ pub async fn terminal_onboarding(
 
     let recent_sessions: Vec<(&String, &PlayerSession)> = sessions_all.iter().filter(|(pid, s)| session_in(&base, pid, s)).collect();
     let recent = fold_sample(&recent_sessions, &HashMap::new(), now, idle_hours, 30)["recent"].clone();
+
+    let mut run_list: Vec<&Run> = runs_of.values().flat_map(|g| g.runs.iter()).filter(|r| run_in(&base, r)).collect();
+    run_list.sort_by_key(|r| std::cmp::Reverse(r.started_ms));
+    let runs: Vec<Value> = run_list
+        .iter()
+        .take(RUNS_SHOWN)
+        .map(|r| {
+            json!({
+                "session_id": r.session,
+                "player_id": r.player,
+                "name": r.player.as_ref().and_then(|p| sessions_all.get(p)).map(|s| s.name.clone()).unwrap_or_default(),
+                "guild_id": r.guild,
+                "interface": r.interface,
+                "replay": r.replay,
+                "new_player": r.new_player,
+                "run_number": r.number,
+                "started_ms": r.started_ms,
+                "last_ms": r.last_ms,
+                "seconds": gap(r.started_ms, r.last_ms),
+                "steps": r.steps,
+                "furthest": r.furthest,
+                "outcome": r.outcome,
+            })
+        })
+        .collect();
 
     let crawl = {
         let st = CRAWL.lock().unwrap_or_else(|p| p.into_inner());
@@ -1034,12 +1222,16 @@ pub async fn terminal_onboarding(
             let mine: Vec<&PlayerSession> = sessions_all.iter().filter(|(pid, s)| s.guild == e.id && !is_rep(pid)).map(|(_, s)| s).collect();
             let all: Vec<(&String, &crate::mcp::onboarding_players::PlayerFacts)> = players.iter().filter(|(_, p)| p.guild == e.id).collect();
             let members: Vec<_> = all.iter().filter(|(pid, _)| base.replicant.map_or(true, |r| r == is_rep(pid))).map(|(_, p)| *p).collect();
+            let read = runs_of.get(&e.id).filter(|g| g.read);
+            let human_runs = read.map(|g| g.runs.iter().filter(|r| base.replicant.map_or(true, |x| x == r.player.as_deref().map_or(false, |p| is_rep(p)))).count());
             json!({
                 "id": e.id, "name": e.name, "tag": e.tag,
                 "status": if e.guild_api.is_none() { "no_api" } else if a.and_then(|a| a.error.as_ref()).is_some() { "error" } else { "ok" },
                 "error": e.error.clone().or_else(|| a.and_then(|a| a.error.clone())),
                 "started": first, "signed_up": signed,
                 "outcome": a.map(|a| a.outcome.clone()).unwrap_or(Value::Null),
+                "runs": human_runs,
+                "runs_error": runs_of.get(&e.id).and_then(|g| g.error.clone()),
                 "sampled": mine.iter().filter(|s| !s.events.is_empty()).count(),
                 "untracked": mine.iter().filter(|s| s.events.is_empty()).count(),
                 "players": members.len(),
@@ -1061,6 +1253,7 @@ pub async fn terminal_onboarding(
         "segments": out_segs,
         "guilds": guilds,
         "recent": recent,
+        "runs": runs,
         "untracked": sessions_all.iter().filter(|(pid, s)| s.events.is_empty() && !is_rep(pid)).count(),
         "crawl": crawl,
     }))
@@ -1104,6 +1297,58 @@ mod tests {
         assert_eq!(gap(s.first_t(), s.reached(PLAYER_STEP)).map(|v| v.round()), Some(81.0));
         assert_eq!(gap(s.reached(SUBMIT_STEP), s.reached(PLAYER_STEP)).map(|v| v.round()), Some(35.0));
         assert_eq!(s.last_step().map(|e| e.k.as_str()), Some("tutorial.intro.welcome"));
+    }
+
+    #[test]
+    fn a_later_run_stays_out_of_the_signup_session() {
+        let mut rows = mirror_rows().as_array().unwrap().clone();
+        for (step, at) in [("orientation.tutorial_offer", "2026-10-23 19:00:00+00"), ("tutorial.end.ftl_jump", "2026-10-23 19:10:00+00")] {
+            let mut r = row(step, "reached", at);
+            r["session_id"] = json!("later");
+            r["interface_name"] = json!("structs-desktop");
+            rows.insert(0, r);
+        }
+        let s = session_from_rows("0-5", &Value::Array(rows));
+        assert_eq!(s.events.len(), 6);
+        assert_eq!(s.interface, "structs-webapp");
+        assert!(!s.completed());
+        assert_eq!(gap(s.first_t(), s.last_t()).map(|v| v.round()), Some(139.0));
+    }
+
+    #[test]
+    fn a_player_with_only_later_runs_has_no_signup_session() {
+        let rows = json!([row("orientation.tutorial_offer", "reached", "2026-10-23 19:00:00+00")]);
+        assert!(session_from_rows("0-1", &rows).events.is_empty());
+    }
+
+    fn run_row(session: &str, player: Value, version: &str, number: Value, new_player: bool, outcome: &str) -> Value {
+        json!({"session_id": session, "content_version": version, "interface_name": "structs-desktop", "player_id": player,
+               "new_player": new_player, "run_number": number, "started_at": "2026-11-05 03:27:00.5+00",
+               "last_event_at": "2026-11-05 03:32:00.5+00", "minutes": "5.0", "steps_reached": 51,
+               "furthest_step_key": "tutorial.end.ftl_jump", "outcome": outcome})
+    }
+
+    #[test]
+    fn a_run_row_reads_in_the_cards_words() {
+        let r = run_from_row("0-1", &run_row("a", json!("1-194"), "tutorial-4-replay", json!("2"), false, "left_during_tutorial")).unwrap();
+        assert!(r.replay && !r.new_player);
+        assert_eq!((r.player.as_deref(), r.number, r.outcome.as_str()), (Some("1-194"), Some(2), "left"));
+        assert_eq!(gap(r.started_ms, r.last_ms), Some(300.0));
+        assert_eq!(run_from_row("0-1", &run_row("b", json!(null), "tutorial-4", json!(1), true, "in_progress")).unwrap().outcome, "playing");
+        assert!(run_from_row("0-1", &json!({"outcome": "completed"})).is_none());
+    }
+
+    #[test]
+    fn run_counts_lead_on_players_and_keep_the_nameless_apart() {
+        let rows = [
+            run_row("a", json!("1-194"), "tutorial-4", json!(1), false, "completed"),
+            run_row("b", json!("1-194"), "tutorial-4-replay", json!(2), false, "completed"),
+            run_row("c", json!("1-13710"), "tutorial-4", json!(1), true, "left_during_tutorial"),
+            run_row("d", json!(null), "tutorial-4", json!(1), true, "in_progress"),
+        ];
+        let runs: Vec<Run> = rows.iter().filter_map(|r| run_from_row("0-1", r)).collect();
+        let s = run_summary(&runs.iter().collect::<Vec<_>>());
+        assert_eq!(s, json!({"runs": 4, "players": 2, "repeat": 1, "replays": 1, "existing": 2, "no_player": 1, "completed": 2, "left": 1, "playing": 1}));
     }
 
     #[test]

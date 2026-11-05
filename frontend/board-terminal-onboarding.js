@@ -11,9 +11,10 @@
 // the box is ticked. The payload is a list of SEGMENTS —
 // one when nothing is compared — and each page draws one column (or one row)
 // per segment. Signup steps come from the guild servers' own funnels (every
-// session, even ones that quit before a player existed); everything else is
-// folded in Rust from per-player sessions and the chain's player tables, which
-// background crawls grow between reads.
+// session, even ones that quit before a player existed), and so do Runs (every
+// started run, replays and long-standing players included); everything else is
+// folded in Rust from new players' signup sessions and the chain's player
+// tables, which background crawls grow between reads.
 //
 // Loaded after board-terminal.js; registers into Board.Terminal.
 (function () {
@@ -21,7 +22,7 @@
   var Board = window.Board, T = Board.Terminal, H = Board.helpers;
   var invoke = function (cmd, args) { return Board.T.core.invoke(cmd, args || {}); };
 
-  var VIEWS = [['overview', 'Overview'], ['signup', 'Signup'], ['tutorial', 'Tutorial'], ['players', 'Players'],
+  var VIEWS = [['overview', 'Overview'], ['signup', 'Signup'], ['tutorial', 'Tutorial'], ['runs', 'Runs'], ['players', 'Players'],
     ['retention', 'Retention'], ['timing', 'Timing'], ['daily', 'Daily'], ['guilds', 'Guilds'], ['recent', 'Recent']];
   var IDLE = [{ value: '6', label: '6h' }, { value: '24', label: '24h' }, { value: '72', label: '3d' }, { value: '168', label: '7d' }];
   var ACTIVE = [{ value: '1', label: '1d' }, { value: '7', label: '7d' }, { value: '30', label: '30d' }];
@@ -300,6 +301,65 @@
     return box;
   }
 
+  // ── Runs (every started run, from the servers) ──
+  var RUN_ROWS = [['Runs', 'runs'], ['Players', 'players'], ['Finished', 'completed'], ['Quit', 'left'], ['Playing', 'playing'],
+    ['Repeat', 'repeat'], ['Replays', 'replays'], ['Existing players', 'existing'], ['No player', 'no_player']];
+  function runKind(x) { return x.replay ? 'Replay' : !x.player_id ? '—' : x.new_player ? 'New' : 'Existing'; }
+  function viewRuns(d) {
+    var box = H.el('div', 'ob-view');
+    var segs = d.segments || [], rows = d.runs || [];
+    if (!rows.length) { box.appendChild(H.stateBlock('empty', 'No tutorial runs yet')); return box; }
+    if (segs.length === 1) {
+      var r = segs[0].runs || {}, hud = H.el('div', 'ob-hud');
+      hud.appendChild(tile('Players', int(r.players)));
+      hud.appendChild(tile('Runs', int(r.runs), int(r.repeat) + ' repeat'));
+      hud.appendChild(tile('Finished', int(r.completed), pct(ratio(r.completed, r.runs)), 'ok'));
+      hud.appendChild(tile('Quit', int(r.left), pct(ratio(r.left, r.runs))));
+      hud.appendChild(tile('Replays', int(r.replays)));
+      hud.appendChild(tile('Existing players', int(r.existing)));
+      hud.appendChild(tile('No player', int(r.no_player), null, r.no_player > 0 ? 'bad' : null));
+      box.appendChild(hud);
+    } else {
+      var c = table('ob-compare', 'minmax(16ch, 1.4fr)', segs.length);
+      c.appendChild(headRow([''].concat(segs.map(function (x) { return x.label; }))));
+      RUN_ROWS.forEach(function (m) {
+        var row = H.el('div', 'ob-row');
+        row.setAttribute('data-metric', m[1]);
+        row.appendChild(cell(m[0], 'ob-step'));
+        segs.forEach(function (x) { row.appendChild(cell(int((x.runs || {})[m[1]]), 'ob-n')); });
+        c.appendChild(row);
+      });
+      box.appendChild(c);
+    }
+    var tags = {};
+    (d.guilds || []).forEach(function (g) { tags[g.id] = g.tag || g.id; });
+    var t = H.el('div', 'ob-table ob-runs');
+    t.appendChild(headRow(['Player', 'Guild', 'Interface', 'Started', 'Run', 'Kind', 'Outcome', 'Got to', 'Time'], [2, 5, 6, 7]));
+    rows.forEach(function (x) {
+      var row = H.el('div', 'ob-row');
+      row.setAttribute('data-session', x.session_id);
+      if (x.player_id) {
+        var who = H.el('a', 'ob-c ob-step ob-link');
+        who.href = 'javascript:void(0)';
+        who.appendChild(H.el('span', null, x.name || x.player_id));
+        if (x.name) who.appendChild(H.el('span', 'ob-sub', x.player_id));
+        who.addEventListener('click', function () { T.execute('PLAYER ' + x.player_id); });
+        row.appendChild(who);
+      } else row.appendChild(cell('No player', 'ob-step is-bad', x.session_id));
+      row.appendChild(cell(tags[x.guild_id] || x.guild_id, 'ob-n'));
+      row.appendChild(cell(x.interface || '—', 'ob-sub'));
+      row.appendChild(cell(x.started_ms ? H.ago(x.started_ms) : '—', 'ob-n'));
+      row.appendChild(cell(int(x.run_number), 'ob-n'));
+      row.appendChild(cell(runKind(x), 'ob-sub'));
+      row.appendChild(cell(OUTCOME_LABEL[x.outcome] || x.outcome, 'ob-out-' + x.outcome));
+      row.appendChild(cell(x.furthest ? stepLabel(x.furthest) : '—', 'ob-step ob-sub', x.furthest));
+      row.appendChild(cell(dur(x.seconds), 'ob-n'));
+      t.appendChild(row);
+    });
+    box.appendChild(t);
+    return box;
+  }
+
   // ── Distributions (Players, Retention) ──
   function distBlock(title, segs, pick, kind) {
     var b = block(title);
@@ -459,7 +519,7 @@
     var box = H.el('div', 'ob-view');
     var crawl = (d.crawl && d.crawl.guilds) || {};
     var t = H.el('div', 'ob-table ob-guilds');
-    t.appendChild(headRow(['Guild', 'Players', 'Active', 'Started', 'Signed up', 'Offered', 'Finished', 'Timed', 'No telemetry', 'Read']));
+    t.appendChild(headRow(['Guild', 'Players', 'Active', 'Started', 'Signed up', 'Offered', 'Finished', 'Runs', 'Timed', 'No telemetry', 'Read']));
     (d.guilds || []).forEach(function (g) {
       var row = H.el('div', 'ob-row' + (g.status === 'ok' ? '' : ' is-quiet'));
       row.setAttribute('data-guild', g.id);
@@ -475,6 +535,7 @@
       row.appendChild(cell(live ? int(g.signed_up) : '—', 'ob-n'));
       row.appendChild(cell(live ? int(o.offered) : '—', 'ob-n'));
       row.appendChild(cell(live ? int(o.completed) : '—', 'ob-n'));
+      row.appendChild(cell(live ? int(g.runs) : '—', 'ob-n' + (g.runs_error ? ' is-bad' : ''), g.runs_error || null));
       row.appendChild(cell(live ? int(g.sampled) : '—', 'ob-n'));
       row.appendChild(cell(live ? int(g.untracked) : '—', 'ob-n'));
       var c = crawl[g.id];
@@ -533,7 +594,7 @@
     return parts.join(' · ');
   }
   function emptyOr(d, text) { return reading(d) ? H.stateBlock('loading', progress(d)) : H.stateBlock('empty', text); }
-  // Pages folded from the crawls; Signup and Guilds come from the servers' own reads.
+  // Pages folded from the crawls; Signup, Runs and Guilds come from the servers' own reads.
   var CRAWLED = { overview: 1, tutorial: 1, players: 1, retention: 1, timing: 1, daily: 1, recent: 1 };
 
   function footLine(d) {
@@ -581,7 +642,7 @@
   }
 
   // ── The card ──
-  var DRAW = { overview: viewOverview, signup: viewSignup, tutorial: viewTutorial, players: viewPlayers, retention: viewRetention,
+  var DRAW = { overview: viewOverview, signup: viewSignup, tutorial: viewTutorial, runs: viewRuns, players: viewPlayers, retention: viewRetention,
     timing: viewTiming, daily: viewDaily, guilds: viewGuilds, recent: viewRecent };
   T.register('onboarding', {
     label: 'Telemetry', describe: function (p) { return 'Telemetry' + (p && p.version ? ' · ' + p.version : ''); },
@@ -623,5 +684,5 @@
     },
   });
 
-  T.onboarding = { stepLabel: stepLabel, pct: pct, topKeys: topKeys, headline: headline, bucketLabel: bucketLabel, fmtKind: fmtKind, argsOf: argsOf };
+  T.onboarding = { runKind: runKind, stepLabel: stepLabel, pct: pct, topKeys: topKeys, headline: headline, bucketLabel: bucketLabel, fmtKind: fmtKind, argsOf: argsOf };
 })();
