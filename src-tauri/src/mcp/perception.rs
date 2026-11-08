@@ -2125,6 +2125,8 @@ pub fn install_snapshot(snap: Snapshot, source: &'static str) {
     if let Ok(mut g) = CURRENT.write() {
         *g = Some(snap);
     }
+    // A fresh world: what the need-gated loops last forecast may be stale.
+    crate::mcp::schedule::mark_dirty();
     *FED_BY.lock().unwrap_or_else(|e| e.into_inner()) = source;
 }
 

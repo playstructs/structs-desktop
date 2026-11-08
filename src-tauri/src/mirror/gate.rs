@@ -542,7 +542,7 @@ mod tests {
         );
         w.structs.insert("5-1".into(), StructState { id: "5-1".into(), owner: "1-1".into(), type_id: "14".into(), status: BUILT_ONLINE, planet: Some("2-1".into()), ..Default::default() });
         w.structs.insert("5-9".into(), StructState { id: "5-9".into(), owner: "1-1".into(), type_id: "1".into(), status: status::MATERIALIZED, build_start: 900, ..Default::default() });
-        w.fleets.insert("9-1".into(), FleetState { id: "9-1".into(), owner: "1-1".into(), planet: Some("2-1".into()) });
+        w.fleets.insert("9-1".into(), FleetState { id: "9-1".into(), owner: "1-1".into(), planet: Some("2-1".into()), ..Default::default() });
         w
     }
 

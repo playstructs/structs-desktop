@@ -223,7 +223,7 @@ mod live {
         let forecasts = forecast::forecast(&w, tip, &forecast::Options { target, within: None, project: false, verify: false });
         println!("forecast: {} in {:?}", forecasts.len(), t_fc.elapsed());
         let p = crate::mcp::auto_harvest::plan(&forecasts, |_| true);
-        println!("harvest plan: {} rigs to start, {} owners mined out, skipped {:?}", p.picks.values().map(Vec::len).sum::<usize>(), p.mined_out.len(), p.skipped);
+        println!("harvest plan: {} rigs to start, {} owners mined out ({} explore-ready), next due {:?} (tip {tip}), skipped {:?}", p.picks.values().map(Vec::len).sum::<usize>(), p.mined_out.len(), p.explore_ready, p.next_due, p.skipped);
         let b = crate::mcp::auto_build::build_plan(&forecasts);
         println!("build plan: {} builds to complete across {} owners", b.values().map(Vec::len).sum::<usize>(), b.len());
         println!("crew tasks: {} ready mine/refine tasks", crate::mcp::crew_work::crew_tasks_from(&forecasts).len());

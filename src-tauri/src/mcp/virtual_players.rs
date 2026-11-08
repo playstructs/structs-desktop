@@ -310,6 +310,24 @@ pub fn profile_of(player_id: &str) -> Option<String> {
         .filter(|p| !p.is_empty())
 }
 
+/// Every player with an explicit profile assignment: player id → profile id.
+pub fn profile_assignments() -> std::collections::BTreeMap<String, String> {
+    REGISTRY
+        .read()
+        .map(|r| {
+            r.players
+                .iter()
+                .filter_map(|v| Some((v.player_id.clone()?, v.profile.clone().filter(|p| !p.is_empty())?)))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Whether `player_id` is one of the account's virtual players.
+pub fn is_virtual(player_id: &str) -> bool {
+    REGISTRY.read().map(|r| r.players.iter().any(|v| v.player_id.as_deref() == Some(player_id))).unwrap_or(false)
+}
+
 /// Point a player at a profile (or clear it with `None`), updating the
 /// in-memory registry AND persisting.
 ///

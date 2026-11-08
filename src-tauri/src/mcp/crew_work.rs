@@ -545,6 +545,7 @@ async fn run(app_handle: &tauri::AppHandle, cfg: &CrewWorkConfig) -> Result<(), 
     let mut paid = 0usize;
     let mut looked_at = 0usize;
     let mut crew_size = 0usize;
+    let mut next_due: Option<u64> = None;
 
     for c in crews {
         if submitting + reporting >= free {
@@ -560,7 +561,10 @@ async fn run(app_handle: &tauri::AppHandle, cfg: &CrewWorkConfig) -> Result<(), 
         if members.len() < 2 {
             continue; // a crew of one is just a colony
         }
-        let tasks = ripe_tasks(&members, &me, cfg.difficulty_threshold).await;
+        let (tasks, due) = ripe_tasks(&members, &me, cfg.difficulty_threshold).await;
+        if let Some(h) = due {
+            next_due = Some(next_due.map_or(h, |d: u64| d.min(h)));
+        }
         let rates = if cfg.prefer_paying { crate::mcp::crew_pay::rates_by_player() } else { Default::default() };
         looked_at += tasks.len();
         if tasks.is_empty() {
@@ -607,6 +611,12 @@ async fn run(app_handle: &tauri::AppHandle, cfg: &CrewWorkConfig) -> Result<(), 
      * arithmetic, not the logs, to find that out.
      */
     note_pass(epoch, submitting, reporting, declined, looked_at, free, crew_size, paid);
+    crate::mcp::schedule::report(
+        "crew_work",
+        next_due,
+        0,
+        format!("{looked_at} ripe, {submitting} submitting, {reporting} reporting, {declined} declined"),
+    );
     tlog(
         "crew",
         Sev::Debug,
@@ -794,17 +804,27 @@ fn guild_members(guild_id: &str) -> Vec<String> {
 /// beside them (rig and owner online, buried ore, stored ore, under raid,
 /// mining/refining active). A helper only grinds what the chain would accept;
 /// the old guard (`worth_doing`) caught only empty planets and empty piles.
-async fn ripe_tasks(members: &[String], me: &str, threshold: u64) -> Vec<CrewTask> {
+async fn ripe_tasks(members: &[String], me: &str, threshold: u64) -> (Vec<CrewTask>, Option<u64>) {
     // Our own work is the harvest loop's job, not the crew's.
     let others: Vec<String> = members.iter().filter(|p| p.as_str() != me).cloned().collect();
     if others.is_empty() {
-        return Vec::new();
+        return (Vec::new(), None);
     }
     let opts = crate::mirror::forecast::Options { target: threshold, within: None, project: false, verify: false };
     let Some(now) = crate::mirror::forecast_now(None, Some(&others), &opts).await else {
-        return Vec::new();
+        return (Vec::new(), None);
     };
-    one_per_cycle(crew_tasks_from(&now.forecasts))
+    (one_per_cycle(crew_tasks_from(&now.forecasts)), crew_next_due(&now.forecasts))
+}
+
+/// The first height a member's WAITING ore work ripens at. Pure.
+pub(crate) fn crew_next_due(forecasts: &[crate::mirror::forecast::Forecast]) -> Option<u64> {
+    use crate::mirror::forecast::{Kind, Status};
+    forecasts
+        .iter()
+        .filter(|f| f.status == Status::Waiting && matches!(f.kind, Kind::Mine | Kind::Refine))
+        .filter_map(|f| f.ready_height)
+        .min()
 }
 
 /// Ready mine/refine forecasts → crew tasks. Pure. BUILD stays out: a helper
@@ -878,7 +898,7 @@ pub async fn crew_work_preview(room_id: String) -> Result<Value, String> {
     }
     let epoch = epoch_of(current_block);
     let members = members_of(&c, &me).await;
-    let tasks = ripe_tasks(&members, &me, cfg.difficulty_threshold).await;
+    let (tasks, _) = ripe_tasks(&members, &me, cfg.difficulty_threshold).await;
     let rates = if cfg.prefer_paying { crate::mcp::crew_pay::rates_by_player() } else { Default::default() };
     let mine = assign_paid(&tasks, &members, &me, epoch, cfg.max_slots, &rates);
     Ok(json!({
@@ -1226,5 +1246,28 @@ mod tests {
         ]);
         assert_eq!(tasks.len(), 1);
         assert_eq!((tasks[0].object_id.as_str(), tasks[0].difficulty_target, tasks[0].planet_id.as_deref()), ("5-1", 14_000, Some("2-2")));
+    }
+
+    #[test]
+    fn crew_is_next_due_at_the_earliest_waiting_member_work() {
+        use crate::mirror::forecast::{Forecast, Kind, Status};
+        let f = |kind, status, h| Forecast {
+            kind,
+            subject: "5-1".into(),
+            owner: "1-2".into(),
+            label: "rig".into(),
+            planet: Some("2-2".into()),
+            anchor: 100,
+            range: 14_000,
+            target: 8,
+            ready_height: Some(h),
+            blocks_away: Some(0),
+            difficulty_now: Some(8),
+            status,
+            exact: true,
+            checks: vec![],
+        };
+        assert_eq!(crew_next_due(&[f(Kind::Mine, Status::Waiting, 900), f(Kind::Refine, Status::Waiting, 700), f(Kind::Build, Status::Waiting, 10), f(Kind::Mine, Status::Ready, 5)]), Some(700));
+        assert_eq!(crew_next_due(&[]), None);
     }
 }

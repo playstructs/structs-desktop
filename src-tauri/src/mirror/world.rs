@@ -74,13 +74,21 @@ pub struct ChargeCosts {
     pub secondary_weapon: Option<u64>,
 }
 
-/// A fleet of an owner in scope: where it is.
+/// A fleet of an owner in scope: where it is, and its place in the
+/// destination planet's visitor list.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct FleetState {
     pub id: String,
     pub owner: String,
     /// The planet the fleet is at, when it is at one.
     pub planet: Option<String>,
+    /// `FleetStatus_onStation` (home) vs `away`; `None` when the row lacks it.
+    pub on_station: Option<bool>,
+    pub command_struct: String,
+    /// `locationListForward` / `locationListBackward`: the neighbours in the
+    /// planet's visitor list ("" at the ends).
+    pub forward: String,
+    pub backward: String,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -96,6 +104,8 @@ pub struct PlayerState {
     pub capacity_secondary: Option<u64>,
     /// The player's substation id, `""` when none.
     pub substation: String,
+    /// The player's home planet (`Player.planetId`), `""` when none.
+    pub home_planet: String,
     /// `CheckSubstation`: the substation exists on-chain. `None` = not read.
     pub substation_exists: Option<bool>,
     /// The chain's usable primary capacity (power.rs); `None` = not read, in
@@ -120,6 +130,13 @@ pub struct PlanetState {
     /// `Planet.locationListStart`: the first visiting fleet, `""` when none;
     /// `None` when the row does not carry the field.
     pub location_list_start: Option<String>,
+    /// `Planet.locationListLast` (rows call it `locationListEnd`).
+    pub location_list_end: Option<String>,
+    /// `blockRaiderArrived`: when the current raid's first visitor arrived.
+    pub raider_arrived: u64,
+    /// Visitor count and extra queue capacity; the feeds do not carry them.
+    pub location_list_count: Option<u64>,
+    pub location_list_extra: Option<u64>,
     /// Fleets at the planet by the chain's own list rule (fleet_cache.go
     /// `SetLocationToPlanet`): a fleet joins a planet's list when it arrives
     /// somewhere that is not its owner's home planet.
@@ -285,7 +302,23 @@ impl World {
                 continue;
             }
             let planet = (s(f, "locationType") == "planet").then(|| s(f, "locationId")).filter(|p| !p.is_empty());
-            w.fleets.insert(id.clone(), FleetState { id: id.clone(), owner, planet });
+            let on_station = match s(f, "status").as_str() {
+                "onStation" => Some(true),
+                "away" => Some(false),
+                _ => None,
+            };
+            w.fleets.insert(
+                id.clone(),
+                FleetState {
+                    id: id.clone(),
+                    owner,
+                    planet,
+                    on_station,
+                    command_struct: s(f, "commandStruct"),
+                    forward: s(f, "locationListForward"),
+                    backward: s(f, "locationListBackward"),
+                },
+            );
         }
 
         let mut player_ids: Vec<String> = w.structs.values().map(|s| s.owner.clone()).collect();
@@ -307,6 +340,7 @@ impl World {
                     structs_load: snap.grid_attr(&pid, "structsLoad"),
                     capacity: snap.grid_attr(&pid, "capacity"),
                     substation: substation.clone(),
+                    home_planet: s(row, "planetId"),
                     substation_exists: None,
                     usable_primary: None,
                     // No substation = no secondary capacity. A substation with
@@ -362,6 +396,14 @@ impl World {
                     buried_ore: snap.grid_attr(&pid, "ore"),
                     complete: planet_complete(row),
                     location_list_start: row.get("locationListStart").and_then(|v| v.as_str()).map(String::from),
+                    location_list_end: row
+                        .get("locationListEnd")
+                        .or_else(|| row.get("locationListLast"))
+                        .and_then(|v| v.as_str())
+                        .map(String::from),
+                    raider_arrived: attr("blockRaiderArrived"),
+                    location_list_count: crate::mcp::types::numeric_u64(row.get("locationListCount")),
+                    location_list_extra: crate::mcp::types::numeric_u64(row.get("locationListExtra")),
                     visitors,
                     defender,
                 },

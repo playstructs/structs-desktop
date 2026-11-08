@@ -589,81 +589,14 @@ pub async fn sync_game_state(
         }
     }
 
-    // ── Native auto-harvest + auto-build ── (throttled internally; off unless
-    // configured) Spawned so a periodic scan never blocks the sync cycle.
-    {
-        let app_h = app_handle.clone();
-        tokio::spawn(async move {
-            crate::mcp::auto_harvest::tick(&app_h, false).await;
-        });
-        let app_b = app_handle.clone();
-        tokio::spawn(async move {
-            crate::mcp::auto_build::tick(&app_b, false).await;
-        });
-        let app_i = app_handle.clone();
-        tokio::spawn(async move {
-            crate::mcp::auto_infuse::tick(&app_i, false).await;
-        });
-        let app_k = app_handle.clone();
-        tokio::spawn(async move {
-            crate::mcp::energy_card::tick(&app_k).await;
-        });
-        let app_d = app_handle.clone();
-        tokio::spawn(async move {
-            crate::mcp::auto_defend::tick(&app_d, false).await;
-        });
-        let app_s = app_handle.clone();
-        tokio::spawn(async move {
-            crate::mcp::auto_sweep::tick(&app_s, false).await;
-        });
-        // Crew work rides the same tick: it only ever fills hashing slots the
-        // local colony left free, so it has to be scheduled AFTER the loops
-        // that claim them — auto_harvest and auto_build above.
-        let app_c = app_handle.clone();
-        tokio::spawn(async move {
-            crate::mcp::crew_work::tick(&app_c, false).await;
-        });
-        let app_p = app_handle.clone();
-        tokio::spawn(async move {
-            crate::mcp::crew_pay::tick(&app_p, false).await;
-        });
-        // The companion draws from what those loops just did, so it is told
-        // after them rather than polling for it.
-        crate::mcp::companion::push(&app_handle);
-        // Backfill of primary control over the vplayers. Rides the sync tick
-        // rather than the roster sweep on purpose: the roster sweep only runs
-        // while the Team Ops window is open, and this grant needs to converge
-        // whether or not anyone is looking at the board.
-        let app_dg = app_handle.clone();
-        tokio::spawn(async move {
-            crate::mcp::delegation::tick(&app_dg, false).await;
-        });
-        // Replication rides the same tick, AFTER delegation so a fresh
-        // replicant is grantable before any other loop touches it. The rates
-        // sampler behind the Replication card runs whether or not the loop is
-        // on — the card's figures are not a reward for switching it on.
-        let app_rp = app_handle.clone();
-        tokio::spawn(async move {
-            crate::mcp::auto_replicate::tick(&app_rp, false).await;
-        });
-        let app_rt = app_handle.clone();
-        tokio::spawn(async move {
-            crate::mcp::rates::tick(&app_rt).await;
-        });
-        crate::mcp::onboarding::resume_history_ticker();
-        // Combat loops. auto_response deliberately rides the sync tick at its
-        // own 20 s cadence — a raid resolves in about four minutes end to end,
-        // and every defensive win on record fired back inside the first two.
-        let app_r = app_handle.clone();
-        tokio::spawn(async move {
-            crate::mcp::auto_response::tick(&app_r, false).await;
-        });
-        let app_rd = app_handle.clone();
-        tokio::spawn(async move {
-            crate::mcp::auto_raid::tick(&app_rd, false).await;
-        });
-    }
-
+    // ── The automation loops ── one scheduler decides which run on this tick,
+    // in priority order (combat first), skipping need-gated loops that have
+    // nothing due. See mcp::schedule.
+    crate::mcp::schedule::on_sync(&app_handle);
+    // The companion draws from what those loops just did, so it is told
+    // after them rather than polling for it.
+    crate::mcp::companion::push(&app_handle);
+    crate::mcp::onboarding::resume_history_ticker();
     Ok(())
 }
 

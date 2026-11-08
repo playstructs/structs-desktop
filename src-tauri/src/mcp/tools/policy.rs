@@ -76,6 +76,39 @@ pub async fn execute(params: PolicyParams) -> Vec<Content> {
             ))]
         }
 
+        // The economy/upkeep automation as one versioned document (mcp::orders).
+        "orders" => {
+            let cfg = params.config.clone().unwrap_or(serde_json::Value::Null);
+            let action = cfg.get("action").and_then(|a| a.as_str()).unwrap_or("show");
+            let pretty = |v: serde_json::Value| vec![Content::text(serde_json::to_string_pretty(&v).unwrap_or_default())];
+            let proposed = || -> Result<crate::mcp::orders::Orders, String> {
+                let d = cfg.get("document").ok_or("this action needs config.document (start from action 'show')")?;
+                serde_json::from_value(d.clone()).map_err(|e| format!("document does not parse: {e}"))
+            };
+            match action {
+                "show" => pretty(json!(crate::mcp::orders::current())),
+                "history" => pretty(json!(crate::mcp::orders::history())),
+                "check" | "diff" => match proposed() {
+                    Ok(d) => pretty(json!({
+                        "problems": crate::mcp::orders::check(&d, crate::mcp::virtual_players::is_virtual),
+                        "changes": crate::mcp::orders::diff(&crate::mcp::orders::current(), &d),
+                    })),
+                    Err(e) => vec![Content::text(format!("Error: {e}"))],
+                },
+                "apply" => match proposed() {
+                    Ok(d) => {
+                        let author = cfg.get("author").and_then(|a| a.as_str()).unwrap_or("agent");
+                        match crate::mcp::orders::apply(d, author) {
+                            Ok((now, changes)) => pretty(json!({ "applied": true, "version": now.version, "changes": changes })),
+                            Err(problems) => pretty(json!({ "applied": false, "problems": problems })),
+                        }
+                    }
+                    Err(e) => vec![Content::text(format!("Error: {e}"))],
+                },
+                other => vec![Content::text(format!("Error: unknown orders action '{other}'. Use show, check, diff, apply, history."))],
+            }
+        }
+
         "remove" => {
             let Some(name) = &params.policy else {
                 return vec![Content::text("Error: policy name required.")];

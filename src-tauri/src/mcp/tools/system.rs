@@ -352,6 +352,9 @@ pub async fn execute(params: SystemParams) -> Vec<Content> {
             }))
         }
 
+        // Which loops run when, and why (mcp::schedule).
+        "schedule" => text(crate::mcp::schedule::status()),
+
         // The light client's trust anchor (mirror::verify).
         "trust" => {
             let set = params.set.as_ref();
@@ -376,7 +379,7 @@ pub async fn execute(params: SystemParams) -> Vec<Content> {
         }
 
         other => err(format!(
-            "unknown command '{other}'. Use: status, logs, loops, tx, pow, watchdog, feed, config, perception, trust"
+            "unknown command '{other}'. Use: status, logs, loops, tx, pow, watchdog, feed, config, perception, trust, schedule"
         )),
     }
 }

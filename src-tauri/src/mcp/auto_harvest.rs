@@ -128,6 +128,11 @@ pub struct Plan {
     pub mined_out: std::collections::HashSet<String>,
     /// Ripe-or-blocked work NOT started, by the reason the chain would give.
     pub skipped: std::collections::BTreeMap<&'static str, u64>,
+    /// The first height any WAITING work ripens at — when this loop next has
+    /// something to start (the scheduler wakes it then).
+    pub next_due: Option<u64>,
+    /// Mined-out owners with no ore left to refine: they can explore now.
+    pub explore_ready: usize,
 }
 
 /// Turn forecasts into a scan plan. Pure. Work is started only when the
@@ -140,6 +145,8 @@ pub fn plan(forecasts: &[crate::mirror::forecast::Forecast], may_refine: impl Fn
     use crate::mirror::forecast::{CheckState, Kind, Status};
     use crate::mcp::types::TaskType;
     let mut out = Plan::default();
+    // Owners whose refinery still has ore to work through: not explore-ready.
+    let mut still_refining: std::collections::HashSet<&str> = std::collections::HashSet::new();
     for f in forecasts {
         let kind = match f.kind {
             Kind::Mine => TaskType::Mine,
@@ -151,8 +158,15 @@ pub fn plan(forecasts: &[crate::mirror::forecast::Forecast], may_refine: impl Fn
         {
             out.mined_out.insert(f.owner.clone());
         }
+        if kind == TaskType::Refine && !f.checks.iter().any(|c| c.rule == "ore" && c.state == CheckState::Blocked) {
+            still_refining.insert(f.owner.as_str());
+        }
         match f.status {
-            Status::Waiting => {}
+            Status::Waiting => {
+                if let Some(h) = f.ready_height {
+                    out.next_due = Some(out.next_due.map_or(h, |d: u64| d.min(h)));
+                }
+            }
             Status::Blocked => {
                 for c in f.checks.iter().filter(|c| c.state == CheckState::Blocked) {
                     *out.skipped.entry(c.rule).or_insert(0) += 1;
@@ -175,6 +189,7 @@ pub fn plan(forecasts: &[crate::mirror::forecast::Forecast], may_refine: impl Fn
             }
         }
     }
+    out.explore_ready = out.mined_out.iter().filter(|o| !still_refining.contains(o.as_str())).count();
     out
 }
 
@@ -305,6 +320,19 @@ async fn scan(
         .map(|(p, _, _)| p.as_str().to_string())
         .collect();
     let plan = plan(&now.forecasts, |owner| refiners.contains(owner));
+    // Tell the scheduler when this loop next has work: the first waiting
+    // rig's ripening height, and how many players can explore now.
+    crate::mcp::schedule::report(
+        "auto_harvest",
+        plan.next_due,
+        if cfg.auto_explore { plan.explore_ready } else { 0 },
+        format!(
+            "{} rigs ripe, {} explore-ready, skipped {:?}",
+            plan.picks.values().map(Vec::len).sum::<usize>(),
+            plan.explore_ready,
+            plan.skipped
+        ),
+    );
     if !plan.skipped.is_empty() {
         let parts: Vec<String> = plan.skipped.iter().map(|(r, n)| format!("{r} {n}")).collect();
         crate::mcp::telemetry::tlog(
@@ -673,5 +701,28 @@ mod tests {
         let p = plan(&[f], |_| true);
         assert!(p.picks.is_empty());
         assert_eq!(p.skipped.get("no_clock"), Some(&1));
+    }
+
+    #[test]
+    fn the_plan_reports_when_work_is_next_due_and_who_can_explore() {
+        use crate::mirror::forecast::{Kind, Status};
+        let mut waiting = fc(Kind::Mine, "5-1", "1-1", Status::Waiting, vec![]);
+        waiting.ready_height = Some(900);
+        let mut later = fc(Kind::Mine, "5-2", "1-2", Status::Waiting, vec![]);
+        later.ready_height = Some(1_200);
+        let f = vec![
+            waiting,
+            later,
+            // 1-3: mined out, pile empty → can explore.
+            fc(Kind::Mine, "5-3", "1-3", Status::Blocked, vec![blocked("empty")]),
+            fc(Kind::Refine, "5-4", "1-3", Status::Blocked, vec![blocked("ore")]),
+            // 1-4: mined out, still refining → not yet.
+            fc(Kind::Mine, "5-5", "1-4", Status::Blocked, vec![blocked("empty")]),
+            fc(Kind::Refine, "5-6", "1-4", Status::Waiting, vec![]),
+        ];
+        let p = plan(&f, |_| true);
+        assert_eq!(p.next_due, Some(200), "the earliest waiting work (5-6's default 200)");
+        assert_eq!(p.mined_out.len(), 2);
+        assert_eq!(p.explore_ready, 1);
     }
 }

@@ -451,6 +451,9 @@ pub async fn sign_with_retry_guarded(
                             crate::mcp::loop_util::note_charged_action(pid);
                         }
                     }
+                    // Our own action landed: clocks restarted, ore moved, a
+                    // planet changed. The need-gated loops re-forecast.
+                    crate::mcp::schedule::mark_dirty();
                     return Ok(value);
                 }
                 unreachable!("success outcome without value");
