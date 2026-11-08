@@ -638,9 +638,59 @@ pub fn charge_reservations(player_id: &PlayerId) -> usize {
     PENDING_CHARGE.lock().map(|m| m.get(player_id.as_str()).copied().unwrap_or(0)).unwrap_or(0)
 }
 
-/// A charged action of this player's LANDED within the last block window.
+// ── Accepted but not yet in a block (async signing) ─────────────────────────
+//
+// In `native_async` a success means the node ACCEPTED the tx, not that it
+// landed. The ledger above was stamped at acceptance, its 6 s window ran out
+// before the tx's block, and the next loop's charged action for the same
+// player went out into a certain code 2022 "zero charge this block": 124 in
+// the first hour of async on 2026-11-08, every one paired with a sibling
+// accepted ~6 s earlier. So an async charged tx holds its player until the
+// settler reports it in a block (or gives up on it), and the block window
+// then starts from THAT moment.
+
+/// Longest an accepted tx can hold its player — the settler's own give-up.
+pub const AWAITING_BLOCK_MAX_MS: f64 = 90_000.0;
+
+/// Upper-case tx hash → (player id, accepted at ms).
+static AWAITING_BLOCK: LazyLock<Mutex<HashMap<String, (String, f64)>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// A charged tx for `player_id` was accepted but has not landed yet.
+pub fn note_charged_unlanded(player_id: &PlayerId, tx_hash: &str) {
+    if let Ok(mut m) = AWAITING_BLOCK.lock() {
+        let now = crate::hasher::types::now_millis();
+        m.retain(|_, (_, at)| now - *at < AWAITING_BLOCK_MAX_MS);
+        m.insert(tx_hash.to_ascii_uppercase(), (player_id.as_str().to_string(), now));
+    }
+}
+
+/// The settler has seen `tx_hash` in a block (or given up on it). If it was a
+/// charged tx, its player's block window starts now.
+pub fn charged_tx_settled(tx_hash: &str) {
+    let player = AWAITING_BLOCK.lock().ok().and_then(|mut m| m.remove(&tx_hash.to_ascii_uppercase())).map(|(p, _)| p);
+    if let Some(p) = player {
+        if let Ok(mut m) = CHARGE_LEDGER.lock() {
+            m.insert(p, crate::hasher::types::now_millis());
+        }
+    }
+}
+
+fn awaiting_block(player_id: &str) -> bool {
+    let now = crate::hasher::types::now_millis();
+    AWAITING_BLOCK
+        .lock()
+        .map(|m| m.values().any(|(p, at)| p == player_id && now - *at < AWAITING_BLOCK_MAX_MS))
+        .unwrap_or(false)
+}
+
+/// A charged action of this player's LANDED within the last block window, or
+/// was accepted and has not landed yet.
 pub fn charged_this_block(player_id: &PlayerId) -> bool {
     let player_id = player_id.as_str();
+    if awaiting_block(player_id) {
+        return true;
+    }
     CHARGE_LEDGER
         .lock()
         .map(|m| {
@@ -653,17 +703,10 @@ pub fn charged_this_block(player_id: &PlayerId) -> bool {
 /// Has this player already taken — or queued — its one charged action this
 /// block?
 pub fn acted_this_block(player_id: &PlayerId) -> bool {
-    let player_id = player_id.as_str();
-    if PENDING_CHARGE.lock().map(|m| m.contains_key(player_id)).unwrap_or(false) {
+    if PENDING_CHARGE.lock().map(|m| m.contains_key(player_id.as_str())).unwrap_or(false) {
         return true;
     }
-    CHARGE_LEDGER
-        .lock()
-        .map(|m| {
-            m.get(player_id)
-                .is_some_and(|at| crate::hasher::types::now_millis() - *at < BLOCK_WINDOW_MS)
-        })
-        .unwrap_or(false)
+    charged_this_block(player_id)
 }
 
 /// Wait (up to `max_ms`) for a player's charged-action window to be free —
@@ -696,7 +739,7 @@ mod tests {
         assert!(is_charged_type("/structs.structs.MsgStructBuildInitiate"));
         assert!(is_charged_type("/structs.structs.MsgStructActivate"));
         assert!(!is_charged_type("/structs.structs.MsgFleetMove"));
-        let pid = crate::mcp::loop_util::test_pid("1-777001");
+        let pid = crate::mcp::loop_util::test_pid("1-778103");
         assert_eq!(charge_reservations(&pid), 0);
         let a = reserve_charge(&pid).unwrap();
         let b = reserve_charge(&pid).unwrap();
@@ -708,6 +751,26 @@ mod tests {
         assert!(!charged_this_block(&pid));
         note_charged_action(&pid);
         assert!(charged_this_block(&pid));
+    }
+
+    /// An async charged tx holds its player from acceptance until the
+    /// settler sees it, however long that takes; then the block window runs.
+    #[test]
+    fn an_accepted_tx_holds_its_player_until_it_lands() {
+        use super::*;
+        let pid = crate::mcp::loop_util::test_pid("1-778101");
+        let other = crate::mcp::loop_util::test_pid("1-778102");
+        assert!(!acted_this_block(&pid));
+        note_charged_unlanded(&pid, "abcd01");
+        assert!(acted_this_block(&pid), "accepted, not landed: still busy");
+        assert!(charged_this_block(&pid), "the gate-exit recheck sees it too");
+        assert!(!acted_this_block(&other), "per player");
+        charged_tx_settled("ABCD01");
+        assert!(charged_this_block(&pid), "landed just now: the block window starts from the landing");
+        // A block later the player is free.
+        CHARGE_LEDGER.lock().unwrap().insert(pid.as_str().to_string(), crate::hasher::types::now_millis() - BLOCK_WINDOW_MS - 1.0);
+        assert!(!acted_this_block(&pid), "settled and a block has passed");
+        charged_tx_settled("ffff99"); // unknown hash: no-op
     }
 
     #[test]

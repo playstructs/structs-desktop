@@ -514,6 +514,22 @@ async fn scan(
                         // players only at refresh until the fleet_arrive arm landed,
                         // and 59 explores a day were signed against the planet the
                         // player had already left.
+                        //
+                        // But only once the SNAPSHOT says the explore is due.
+                        // On 2026-11-08 this pair of live reads ran ~960 times a
+                        // minute — every mined-out worker, every scan, most of
+                        // them still refining their stored pile — and agreed
+                        // with the snapshot 9,098 times out of 9,098, for 41
+                        // explores. The snapshot decides whether to ask; the
+                        // live read still confirms right before the sign.
+                        {
+                            let Ok(seen) = crate::mcp::verify::player_view(&client, &pid).await else { return };
+                            let Some(seen_planet) = seen.planet_id.clone() else { return };
+                            let seen_ore = crate::mcp::verify::planet_ore(&client, &seen_planet).await.unwrap_or(1.0);
+                            if !explore_due(seen_ore, seen.stored_ore, caps.explore_when_drained_only) {
+                                return;
+                            }
+                        }
                         let Ok(live_player) = crate::mcp::verify::player_view_live(&client, &pid).await else { return };
                         let Some(planet_id) = live_player.planet_id.clone() else {
                             return;
@@ -529,13 +545,7 @@ async fn scan(
                         // ore because its cycle looked "stale", and the leftover ore then
                         // blocked the explore. With refines completing, the ore drains to 0
                         // and the worker moves on.)
-                        let role_ready = if caps.explore_when_drained_only {
-                            // Same chain read as above — the stored pile is on the player grid.
-                            live_player.stored_ore <= 0.0
-                        } else {
-                            true // no stored pile to protect — re-planet at once
-                        };
-                        if planet_ore <= 0.0 && role_ready {
+                        if explore_due(planet_ore, live_player.stored_ore, caps.explore_when_drained_only) {
                             let res = crate::mcp::tx_retry::sign_with_retry(
                                 &app,
                                 idx,
@@ -599,8 +609,25 @@ async fn scan(
     }
 }
 
+/// May this player explore now? The planet must be out of ore; a worker
+/// (`drained_only`) must also have refined its stored pile to nothing. Pure —
+/// asked of the snapshot first, then of the chain right before the sign.
+fn explore_due(planet_ore: f64, stored_ore: f64, drained_only: bool) -> bool {
+    planet_ore <= 0.0 && (!drained_only || stored_ore <= 0.0)
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn explore_is_due_only_on_a_drained_planet_and_pile() {
+        use super::explore_due;
+        assert!(explore_due(0.0, 0.0, true));
+        assert!(!explore_due(0.0, 3.0, true), "a worker refines its pile first");
+        assert!(explore_due(0.0, 3.0, false), "bait has no pile to protect");
+        assert!(!explore_due(1.0, 0.0, false), "ore left on the planet");
+        assert!(!explore_due(1.0, 0.0, true));
+    }
+
     use super::*;
 
     #[test]

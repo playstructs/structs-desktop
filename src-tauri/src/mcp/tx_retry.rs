@@ -476,6 +476,13 @@ pub async fn sign_with_retry_guarded(
                     if crate::mcp::loop_util::is_charged_type(type_url) {
                         if let Some(pid) = context.player() {
                             crate::mcp::loop_util::note_charged_action(pid);
+                            // Async: accepted, not landed — hold the player
+                            // until the settler sees its block.
+                            if value.get("async").and_then(|a| a.as_bool()) == Some(true) {
+                                if let Some(h) = value.get("transactionHash").and_then(|h| h.as_str()) {
+                                    crate::mcp::loop_util::note_charged_unlanded(pid, h);
+                                }
+                            }
                         }
                     }
                     // Our own action landed: a mine completion folds its

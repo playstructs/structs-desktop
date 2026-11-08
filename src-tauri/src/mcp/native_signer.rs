@@ -599,6 +599,7 @@ fn spawn_settlement_watch(app: tauri::AppHandle, base: String, hash: String, typ
                 done = Some(h);
                 for (hash, code, raw_log) in txs {
                     let Some(u) = UNSETTLED.lock().unwrap().remove(&hash) else { continue };
+                    crate::mcp::loop_util::charged_tx_settled(&hash);
                     let ok = code == 0;
                     let err = (!ok).then(|| if raw_log.is_empty() { format!("code {code}") } else { raw_log.clone() });
                     push_settled(&app, &hash, &u, if ok { "succeeded" } else { "dropped" }, Some(code), Some(h), Some(raw_log), err).await;
@@ -614,6 +615,7 @@ fn spawn_settlement_watch(app: tauri::AppHandle, base: String, hash: String, typ
                     keys.into_iter().filter_map(|k| m.remove(&k).map(|u| (k, u))).collect()
                 };
                 for (hash, u) in expired {
+                    crate::mcp::loop_util::charged_tx_settled(&hash);
                     push_settled(&app, &hash, &u, "dropped", None, None, None, Some("not in a block after 90s".to_string())).await;
                 }
             }
