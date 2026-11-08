@@ -10,6 +10,7 @@ mod identity_backup;
 mod macos_keepalive;
 mod matrix;
 mod mcp;
+mod mirror;
 mod menu;
 mod notifications;
 mod remote_image;
