@@ -2131,7 +2131,7 @@ pub fn install_snapshot(snap: Snapshot, source: &'static str) {
 }
 
 /// The node's latest committed height, from `/cosmos/base/tendermint/v1beta1/blocks/latest`.
-pub(crate) fn latest_block_height(v: &Value) -> Option<u64> {
+pub fn latest_block_height(v: &Value) -> Option<u64> {
     crate::mcp::types::numeric_u64(v.get("block")?.get("header")?.get("height"))
 }
 

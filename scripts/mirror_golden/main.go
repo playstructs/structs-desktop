@@ -38,6 +38,10 @@ type golden struct {
 	Difficulty [][3]uint64 `json:"difficulty"` // [age, range, difficulty]
 	Inverse    []inverse   `json:"inverse"`
 	Proofs     []proofCase `json:"proofs"`
+	// shiftOreClockForRaid(clock, raiderArrived, raidEnd) -> shifted.
+	RaidShift [][4]uint64 `json:"raid_shift"`
+	// Attribute enum names by index, as the chain numbers the store keys.
+	Enums map[string][]string `json:"enums"`
 }
 
 func main() {
@@ -116,7 +120,20 @@ func main() {
 		}
 	}
 
-	out := golden{Source: os.Getenv("GOLDEN_SOURCE"), SourceSHA: os.Getenv("GOLDEN_SHA"), Difficulty: cases, Inverse: inv, Proofs: proofs}
+	var shifts [][4]uint64
+	for _, clock := range []uint64{0, 100, 999, 1000, 1001, 1299, 1300, 1301, 5000} {
+		for _, arrived := range []uint64{0, 500, 1000, 1200} {
+			for _, end := range []uint64{0, 1000, 1300, 4000} {
+				shifts = append(shifts, [4]uint64{clock, arrived, end, shiftOreClockForRaid(clock, arrived, end)})
+			}
+		}
+	}
+	enums := map[string][]string{}
+	if b, err := os.ReadFile("enums.json"); err == nil {
+		_ = json.Unmarshal(b, &enums)
+	}
+
+	out := golden{Source: os.Getenv("GOLDEN_SOURCE"), SourceSHA: os.Getenv("GOLDEN_SHA"), Difficulty: cases, Inverse: inv, Proofs: proofs, RaidShift: shifts, Enums: enums}
 	enc := json.NewEncoder(os.Stdout)
 	if err := enc.Encode(out); err != nil {
 		panic(err)

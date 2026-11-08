@@ -220,6 +220,11 @@ pub fn reason_to_run(st: Option<&LoopState>, tip: u64, now_ms: f64) -> Option<&'
 }
 
 fn decide(name: &'static str) -> bool {
+    // On rules the mirror was not built from, forecast due heights may be
+    // wrong: run on the loop's own interval instead of sleeping on them.
+    if crate::mirror::epoch::trusted().is_err() {
+        return true;
+    }
     let tip = crate::game_state::GAME_STATE.read().map(|g| g.current_block_height).unwrap_or(0);
     let Ok(mut m) = STATE.lock() else { return true };
     let reason = reason_to_run(m.get(name), tip, now_millis());
@@ -246,6 +251,9 @@ macro_rules! spawn {
 
 /// One sync tick: every loop, in lane order, need-gated where it can be.
 pub fn on_sync(app: &AppHandle) {
+    tokio::spawn(async {
+        crate::mirror::epoch::refresh(&crate::mcp::cosmos_client::CosmosClient::new()).await;
+    });
     // ── Combat ── a raid resolves in about four minutes end to end, and every
     // defensive win on record fired back inside the first two.
     spawn!(app, |a| crate::mcp::auto_response::tick(a, false));
@@ -318,6 +326,8 @@ pub fn status() -> serde_json::Value {
     serde_json::json!({
         "tip": tip,
         "standing_orders": { "version": orders_version, "author": orders_author },
+        "mandates": { "caps": crate::mcp::mandate::live(), "landed_last_hour": crate::mcp::mandate::usage(now_millis()) },
+        "rules_epoch": { "epoch": crate::mirror::epoch::current(), "trusted": crate::mirror::epoch::trusted().err().unwrap_or_else(|| "yes".into()) },
         "backstop_s": BACKSTOP_MS / 1000.0,
         "loops": loops,
         "gate": crate::mirror::gate::stats(),

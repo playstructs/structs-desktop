@@ -48,6 +48,9 @@ pub struct Orders {
     /// role's built-in.
     #[serde(default)]
     pub assignments: BTreeMap<String, String>,
+    /// Per-loop limits (mcp::mandate), keyed by loop name.
+    #[serde(default)]
+    pub mandates: BTreeMap<String, crate::mcp::mandate::Mandate>,
 }
 
 /// One applied revision.
@@ -67,6 +70,12 @@ struct Meta {
     note: String,
     #[serde(default)]
     history: Vec<Revision>,
+    /// The orders in force when `halt` ran; `resume` re-applies them.
+    #[serde(default)]
+    halted_from: Option<Orders>,
+    /// Mandates live here: they have no other home.
+    #[serde(default)]
+    mandates: BTreeMap<String, crate::mcp::mandate::Mandate>,
 }
 
 fn meta() -> Meta {
@@ -91,6 +100,7 @@ pub fn current() -> Orders {
         crew: crate::mcp::crew_work::get(),
         profiles,
         assignments: crate::mcp::virtual_players::profile_assignments(),
+        mandates: m.mandates.clone(),
     }
 }
 
@@ -223,6 +233,7 @@ pub fn apply(proposed: Orders, author: &str) -> Result<(Orders, Vec<String>), Ve
         }
     }
     let mut m = meta();
+    m.mandates = proposed.mandates.clone();
     m.version += 1;
     m.author = author.to_string();
     m.note = proposed.note.clone();
@@ -246,10 +257,98 @@ pub fn apply(proposed: Orders, author: &str) -> Result<(Orders, Vec<String>), Ve
     }
 }
 
+/// The orders with every economy and upkeep loop switched off. Pure.
+pub fn halted(o: &Orders) -> Orders {
+    let mut h = o.clone();
+    h.harvest.enabled = false;
+    h.build.enabled = false;
+    h.infuse.enabled = false;
+    h.sweep.enabled = false;
+    h.replicate.enabled = false;
+    h.crew.enabled = false;
+    h
+}
+
+/// What a halt cannot recall: completions solved and waiting to be signed,
+/// and signs already holding a slot.
+fn unresolved() -> Value {
+    serde_json::json!({
+        "completions_waiting_to_sign": crate::hasher::completions_in_flight().len(),
+        "signing_gate": crate::mcp::tx_gate::snapshot(),
+        "note": "transactions already broadcast cannot be recalled; they settle or fail on the chain",
+    })
+}
+
+/// The kill switch: stop every economy and upkeep loop at once, remembering
+/// what was in force. Combat loops are untouched (rules of engagement).
+pub fn halt(author: &str, reason: &str) -> Result<Value, Vec<String>> {
+    let live = current();
+    if !(live.harvest.enabled || live.build.enabled || live.infuse.enabled || live.sweep.enabled || live.replicate.enabled || live.crew.enabled) {
+        return Ok(serde_json::json!({ "halted": false, "why": "every economy loop is already off", "unresolved": unresolved() }));
+    }
+    let mut stop = halted(&live);
+    stop.note = format!("HALT: {reason}");
+    let (_, changes) = apply(stop, author)?;
+    let mut m = meta();
+    m.halted_from = Some(live);
+    crate::mcp::config_store::save_config(META_FILE, &m);
+    Ok(serde_json::json!({ "halted": true, "switched_off": changes, "unresolved": unresolved() }))
+}
+
+/// Re-apply the orders that were in force before the last halt.
+pub fn resume(author: &str) -> Result<Value, Vec<String>> {
+    let Some(mut before) = meta().halted_from else {
+        return Err(vec!["nothing to resume: no halt is recorded".into()]);
+    };
+    before.note = "RESUME".into();
+    let (now, changes) = apply(before, author)?;
+    let mut m = meta();
+    m.halted_from = None;
+    crate::mcp::config_store::save_config(META_FILE, &m);
+    Ok(serde_json::json!({ "resumed": true, "version": now.version, "switched_on": changes }))
+}
+
 /// The live document's version and author, for status views.
 pub fn version() -> (u64, String) {
     let m = meta();
     (m.version, m.author)
+}
+
+const LIBRARY_FILE: &str = "standing_orders_library.json";
+
+/// A saved document in the library.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Saved {
+    pub name: String,
+    pub saved_by: String,
+    pub saved_ms: f64,
+    pub orders: Orders,
+}
+
+fn library() -> BTreeMap<String, Saved> {
+    crate::mcp::config_store::load_config::<BTreeMap<String, Saved>>(LIBRARY_FILE)
+}
+
+/// Save `o` under `name` (replacing a document of that name).
+pub fn save_named(name: &str, by: &str, o: Orders) -> Result<(), String> {
+    let name = name.trim();
+    if name.is_empty() || name.len() > 64 {
+        return Err("a library name is 1–64 characters".into());
+    }
+    let mut lib = library();
+    lib.insert(name.to_string(), Saved { name: name.to_string(), saved_by: by.to_string(), saved_ms: crate::hasher::types::now_millis(), orders: o });
+    crate::mcp::config_store::save_config(LIBRARY_FILE, &lib);
+    Ok(())
+}
+
+/// Library entries: name, who saved it, when.
+pub fn library_list() -> Vec<(String, String, f64)> {
+    library().into_values().map(|s| (s.name, s.saved_by, s.saved_ms)).collect()
+}
+
+/// A saved document, for check/diff/apply.
+pub fn load_named(name: &str) -> Option<Orders> {
+    library().remove(name).map(|s| s.orders)
 }
 
 /// Applied revisions, newest last.
@@ -275,6 +374,7 @@ mod tests {
             crew: crate::mcp::crew_work::CrewWorkConfig::default(),
             profiles: vec![],
             assignments: BTreeMap::new(),
+            mandates: BTreeMap::new(),
         }
     }
 
@@ -333,5 +433,29 @@ mod tests {
         let mut b = doc();
         b.assignments.insert("1-5".into(), "bait".into());
         assert_eq!(diff(&a, &b), vec!["assignments.1-5: (unset) → \"bait\"".to_string()]);
+    }
+
+    #[test]
+    fn a_halt_switches_off_every_economy_loop_and_nothing_else() {
+        let mut d = doc();
+        d.harvest.enabled = true;
+        d.crew.enabled = true;
+        d.harvest.difficulty_threshold = 9;
+        let h = halted(&d);
+        assert!(!h.harvest.enabled && !h.build.enabled && !h.infuse.enabled && !h.sweep.enabled && !h.replicate.enabled && !h.crew.enabled);
+        assert_eq!(h.harvest.difficulty_threshold, 9, "settings are kept for resume");
+        let changes = diff(&d, &h);
+        assert!(changes.iter().all(|c| c.contains(".enabled:")), "{changes:?}");
+    }
+
+    #[test]
+    fn the_library_keeps_named_documents() {
+        let mut d = doc();
+        d.harvest.difficulty_threshold = 12;
+        save_named("patient", "test", d).unwrap();
+        assert!(library_list().iter().any(|(n, by, _)| n == "patient" && by == "test"));
+        assert_eq!(load_named("patient").unwrap().harvest.difficulty_threshold, 12);
+        assert!(load_named("missing").is_none());
+        assert!(save_named("", "test", doc()).is_err());
     }
 }

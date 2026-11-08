@@ -50,8 +50,40 @@
   }
 
   // ── Registry ────────────────────────────────────────────────────────────
+  /* The card contract, versioned (docs/card-sdk.md). A spec that breaks it
+   * is reported, not refused: a card that renders today keeps rendering, and
+   * the harness fails on the warning instead. */
+  var SDK_VERSION = 1;
+  var PARAM_KINDS = { id: 1, choice: 1, text: 1 };
+  function validate(type, spec) {
+    var errs = [];
+    if (!/^[a-z][a-z0-9_]{0,31}$/.test(String(type || ''))) errs.push('type must be lowercase letters, digits or _ (max 32)');
+    if (!spec || typeof spec !== 'object') return ['spec must be an object'];
+    if (typeof spec.render !== 'function') errs.push('render(host, params, ctx) is required');
+    if (!spec.hidden && !spec.label) errs.push('label is required for a card the palette lists');
+    if (spec.describe && typeof spec.describe !== 'function') errs.push('describe must be a function');
+    if (spec.unmount && typeof spec.unmount !== 'function') errs.push('unmount must be a function');
+    if (spec.cadenceMs != null && !(Number(spec.cadenceMs) >= 0)) errs.push('cadenceMs must be a number >= 0');
+    if (spec.sdk != null && Number(spec.sdk) > SDK_VERSION) errs.push('written for card SDK ' + spec.sdk + '; this Terminal speaks ' + SDK_VERSION);
+    (spec.params || []).forEach(function (p, i) {
+      if (!p || !p.key) errs.push('params[' + i + '] needs a key');
+      else if (!PARAM_KINDS[p.kind]) errs.push('params.' + p.key + ': kind must be id, choice or text');
+      else if (p.kind === 'id' && !('kinds' in p)) errs.push('params.' + p.key + ': an id param must declare kinds');
+      else if (p.kind === 'choice' && !Array.isArray(p.options)) errs.push('params.' + p.key + ': a choice param needs options');
+    });
+    return errs;
+  }
   var Terminal = {
-    register: function (type, spec) { spec.type = type; TYPES[type] = spec; return spec; },
+    SDK_VERSION: SDK_VERSION,
+    validate: validate,
+    register: function (type, spec) {
+      var errs = validate(type, spec);
+      if (errs.length && window.console) console.warn('[terminal] card "' + type + '" breaks the card SDK: ' + errs.join('; '));
+      spec.type = type;
+      spec.sdkErrors = errs;
+      TYPES[type] = spec;
+      return spec;
+    },
     types: function () { return Object.keys(TYPES).map(function (k) { return TYPES[k]; }).filter(function (t) { return !t.hidden; }); },
     known: function (type) { return !!TYPES[type]; },
     groups: function () { return cardGroups(); },
@@ -75,7 +107,7 @@
     ['Armada', ['replication', 'armada', 'ops', 'build', 'fleet', 'pow', 'tasks', 'solve', 'queue', 'results', 'crew', 'crewpay']],
     ['Industry', ['energy', 'grid', 'brownout', 'halt', 'allocations', 'fuel', 'market', 'book', 'ore', 'banks', 'gt', 'bank', 'rank', 'found', 'providers', 'provider', 'wallet', 'deliver']],
     ['War', ['scout', 'tally', 'posture', 'targets', 'raids', 'log', 'grudges', 'vetoes', 'incidents']],
-    ['System', ['health', 'sounds']],
+    ['System', ['health', 'sounds', 'external']],
   ];
   function cardGroups() {
     var seen = {}, out = [];
@@ -1554,6 +1586,8 @@
   var WORDS = {
     // The sound designer (board-terminal-sound.js): every mount point, its file and settings, and the tape.
     SOUNDS: ['sounds'], SFX: ['sounds'], AUDIO: ['sounds'],
+    // Installed third-party cards (board-terminal-external.js), sandboxed.
+    CARDS: ['external'], INSTALLED: ['external'],
     MKT: ['market'], MARKET: ['market'], PEOPLE: ['people'], TAPE: ['feed'], FLOW: ['feed'],
     DELIVER: ['deliver'], PAY: ['deliver'], SEND: ['deliver'], GT: ['gt', 'id'], GUILD: ['guild', 'id'],
     BANKS: ['banks'], BANK: ['bank'], MINT: ['bank'], REDEEM: ['bank'], RANK: ['rank', 'optid'], FOUND: ['found'], ADMIN: ['guildadmin', 'optid'], RECRUIT: ['guildmember', 'optid'], INVITE: ['guildmember', 'optid'], GSET: ['guildset', 'optid'], PROVIDERS: ['providers'], SELLING: ['providers'], TERMS: ['provider', 'optid'], SHEET: ['sheet', 'id'], TS: ['sheet', 'id'], TEARSHEET: ['sheet', 'id'],

@@ -282,6 +282,28 @@ fn gate_refusal(context: &Context, action: &str, attempt: u32, since: f64, d: &c
     format!("skipped by the mirror ({}): {}", d.rule, d.detail)
 }
 
+/// A mandate in the standing orders caps this loop and the cap is reached.
+fn mandate_refusal(context: &Context, action: &str, why: &str) -> String {
+    telemetry::record_tx_attempt(TxAttemptRow {
+        ts_ms: now_millis(),
+        context: context.to_string(),
+        action: action.to_string(),
+        player_id: context.subject().map(String::from),
+        attempt: 1,
+        outcome: "skipped",
+        tx_hash: None,
+        code: None,
+        raw_error: Some(format!("mandate: {why}")),
+        translated: None,
+        duration_ms: 0.0,
+    });
+    format!("skipped by a mandate: {why}")
+}
+
+fn mandate_check(context: &Context) -> Option<String> {
+    crate::mcp::mandate::exceeds(&crate::mcp::mandate::live(), context.as_str(), now_millis())
+}
+
 /// Sign & broadcast as a vplayer (HD `index`), with classification, ledger
 /// rows, and bounded retries. Returns the chain response Value on success or
 /// the translated error after the final attempt.
@@ -362,6 +384,9 @@ pub async fn sign_with_retry_guarded(
         if d.refused() {
             return Err(gate_refusal(context, type_url, 1, t_gate, &d));
         }
+    }
+    if let Some(why) = mandate_check(context) {
+        return Err(mandate_refusal(context, type_url, &why));
     }
     // What the mirror expects this message to do, checked once it lands.
     let prediction = crate::mirror::preview::predict(type_url, &payload);
@@ -457,6 +482,7 @@ pub async fn sign_with_retry_guarded(
                     // known next ripening into the harvest plan; anything else
                     // that moved an economy input makes the loops re-forecast.
                     crate::mcp::schedule::landed_with(type_url, &payload);
+                    crate::mcp::mandate::note_landed(context.as_str(), now_millis());
                     if let Some(p) = prediction {
                         crate::mirror::preview::landed(p);
                     }
@@ -506,6 +532,9 @@ pub async fn submit_with_retry(
                 return Err(gate_refusal(context, action, attempt, started, &d));
             }
         }
+        if let Some(why) = mandate_check(context) {
+            return Err(mandate_refusal(context, action, &why));
+        }
         log_build(context, action, attempt, Some(&args));
         let res = tx_queue::submit_tx(app, action.to_string(), args.clone()).await;
         let outcome = match res {
@@ -513,6 +542,7 @@ pub async fn submit_with_retry(
                 let r = AttemptResult::Success { tx_hash: resp.tx_hash.clone(), value: Value::Null };
                 record(context, action, attempt, started, &r);
                 crate::mcp::schedule::landed(action);
+                crate::mcp::mandate::note_landed(context.as_str(), now_millis());
                 return Ok(resp);
             }
             Ok(resp) => AttemptResult::Failure {
@@ -572,6 +602,9 @@ pub async fn sign_once(
             return Err(gate_refusal(context, type_url, 1, started, &d));
         }
     }
+    if let Some(why) = mandate_check(context) {
+        return Err(mandate_refusal(context, type_url, &why));
+    }
     let payload_seen = payload.clone();
     let prediction = crate::mirror::preview::predict(type_url, &payload);
     let res = vplayer_bridge::sign_action(app, index, type_url, payload, 60).await;
@@ -603,6 +636,7 @@ pub async fn sign_once(
     match outcome {
         AttemptResult::Success { value, .. } => {
             crate::mcp::schedule::landed_with(type_url, &payload_seen);
+            crate::mcp::mandate::note_landed(context.as_str(), now_millis());
             if let Some(p) = prediction {
                 crate::mirror::preview::landed(p);
             }
@@ -634,6 +668,9 @@ pub async fn submit_once(
             });
         }
     }
+    if let Some(why) = mandate_check(context) {
+        return Ok(tx_queue::TxResponse { request_id: String::new(), success: false, tx_hash: None, error: Some(mandate_refusal(context, action, &why)) });
+    }
     let prediction = crate::mirror::preview::predict(action, &args);
     let res = tx_queue::submit_tx(app, action.to_string(), args).await;
     let outcome = match &res {
@@ -647,6 +684,7 @@ pub async fn submit_once(
     record(context, action, 1, started, &outcome);
     if matches!(&res, Ok(r) if r.success) {
         crate::mcp::schedule::landed(action);
+        crate::mcp::mandate::note_landed(context.as_str(), now_millis());
         if let Some(p) = prediction {
             crate::mirror::preview::landed(p);
         }

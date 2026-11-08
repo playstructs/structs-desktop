@@ -16,8 +16,12 @@
 //!
 //! Pure: no clock, no network, no locks held. Callers pin the inputs.
 
+pub mod backtest;
+pub mod chronicle;
+pub mod epoch;
 pub mod forecast;
 pub mod gate;
+pub mod lab;
 pub mod power;
 pub mod preview;
 pub mod project;
@@ -251,6 +255,12 @@ mod live {
             for (k, e) in b.failed.iter().take(3) {
                 println!("  failed: {k}: {e}");
             }
+        }
+        if std::env::var("MIRROR_LAB").is_ok() {
+            let scen = lab::default_scenarios(&w, target);
+            let t_l = std::time::Instant::now();
+            let out = lab::run(&w, tip, players.as_deref().unwrap_or(&[]), &scen);
+            println!("{}lab ran {} scenarios in {:?}", report::render_lab(&out), scen.len(), t_l.elapsed());
         }
         if let Ok(spec) = std::env::var("MIRROR_PREVIEW") {
             // MIRROR_PREVIEW='fleet_move {"fleet_id":"9-194","destination_id":"2-1"}'

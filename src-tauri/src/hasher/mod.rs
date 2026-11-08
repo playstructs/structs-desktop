@@ -462,6 +462,11 @@ pub fn maybe_complete_for_crew(app_handle: &AppHandle, snap: &TaskStateSnapshot)
 static PENDING_COMPLETIONS: std::sync::LazyLock<dashmap::DashMap<String, u64>> =
     std::sync::LazyLock::new(dashmap::DashMap::new);
 
+/// Completions solved and waiting to be signed (object id → anchor).
+pub fn completions_in_flight() -> Vec<(String, u64)> {
+    PENDING_COMPLETIONS.iter().map(|e| (e.key().clone(), *e.value())).collect()
+}
+
 /// The anchor this object already has a completion in flight for, if any.
 pub fn completion_in_flight(object_id: &str) -> Option<u64> {
     PENDING_COMPLETIONS.get(object_id).map(|v| *v)

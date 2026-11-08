@@ -951,4 +951,17 @@ mod tests {
         w.types.get_mut("3").unwrap().movable = Some(false);
         assert_eq!(struct_move(&mut w, 100, "5-30", true, "space", 0).unwrap_err().rule, "immovable");
     }
+
+    #[test]
+    fn the_raid_clock_shift_matches_the_chains_own_function() {
+        #[derive(serde::Deserialize)]
+        struct G {
+            raid_shift: Vec<[u64; 4]>,
+        }
+        let g: G = serde_json::from_str(include_str!("golden/difficulty.json")).unwrap();
+        assert!(g.raid_shift.len() > 100);
+        for [clock, arrived, end, want] in g.raid_shift {
+            assert_eq!(shift_ore_clock_for_raid(clock, arrived, end), want, "shift({clock}, {arrived}, {end})");
+        }
+    }
 }

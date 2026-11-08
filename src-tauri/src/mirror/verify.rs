@@ -717,6 +717,83 @@ pub async fn prove_many(facts: &[Fact]) -> Result<Batch, String> {
     Ok(batch)
 }
 
+// ── Relay: proofs a teammate can check for themselves ────────────────────────
+
+/// A proven read packaged for another machine. It carries everything the
+/// receiver needs EXCEPT trust: the receiver checks it against a header its
+/// own light client verified, so a relayer cannot make it believe anything.
+#[derive(Clone, Debug, Serialize, serde::Deserialize, PartialEq)]
+pub struct Bundle {
+    pub chain_id: String,
+    pub height: u64,
+    pub key_b64: String,
+    /// `None` = proven absent.
+    pub value_b64: Option<String>,
+    /// (type, key_b64, data_b64) for each proof op.
+    pub ops: Vec<(String, String, String)>,
+}
+
+fn b64e(b: &[u8]) -> String {
+    use base64::Engine as _;
+    base64::engine::general_purpose::STANDARD.encode(b)
+}
+
+fn b64d(s: &str) -> Result<Vec<u8>, String> {
+    use base64::Engine as _;
+    base64::engine::general_purpose::STANDARD.decode(s).map_err(|e| format!("base64: {e}"))
+}
+
+/// Package one attribute, proven, for a teammate.
+pub async fn relay_bundle(store: Store, attribute: &str, object: &str) -> Result<Bundle, String> {
+    let key = attribute_key(store, attribute, object).ok_or_else(|| format!("{attribute} is not a {store:?} attribute"))?;
+    let mut slot = CLIENT.lock().await;
+    ensure_client(&mut slot).await?;
+    let lc = slot.as_mut().expect("ensured");
+    let tip = lc.rpc.latest_height().await?;
+    let at = tip.saturating_sub(PROOF_LAG);
+    let read = lc.rpc.query(&key, Some(at)).await?;
+    // Relay only what this machine itself verified.
+    let header = if lc.trusted.height() == read.height + 1 { lc.trusted.clone() } else { lc.verify_to(read.height + 1).await? };
+    verify_read(&read, &header.app_hash())?;
+    Ok(Bundle {
+        chain_id: header.signed_header.header.chain_id.to_string(),
+        height: read.height,
+        key_b64: b64e(&read.key),
+        value_b64: read.value.as_deref().map(b64e),
+        ops: read.ops.iter().map(|o| (o.kind.clone(), b64e(&o.key), b64e(&o.data))).collect(),
+    })
+}
+
+/// Check a bundle against `app_hash` — the app hash of header
+/// `bundle.height + 1` as the RECEIVER's light client verified it. Pure.
+pub fn check_bundle(b: &Bundle, app_hash: &[u8]) -> Result<Option<u64>, String> {
+    let read = ProvenRead {
+        key: b64d(&b.key_b64)?,
+        value: b.value_b64.as_deref().map(b64d).transpose()?,
+        height: b.height,
+        ops: b
+            .ops
+            .iter()
+            .map(|(k, key, data)| Ok(ProofOp { kind: k.clone(), key: b64d(key)?, data: b64d(data)? }))
+            .collect::<Result<Vec<_>, String>>()?,
+    };
+    verify_read(&read, app_hash)?;
+    read_u64(&read).map(|v| read.value.as_ref().map(|_| v))
+}
+
+/// Verify a bundle someone sent, with THIS machine's light client.
+pub async fn verify_bundle(b: &Bundle) -> Result<(Option<u64>, Anchor), String> {
+    let mut slot = CLIENT.lock().await;
+    ensure_client(&mut slot).await?;
+    let lc = slot.as_mut().expect("ensured");
+    let chain = lc.trusted.signed_header.header.chain_id.to_string();
+    if b.chain_id != chain {
+        return Err(format!("the bundle is for {}, this client follows {chain}", b.chain_id));
+    }
+    let header = if lc.trusted.height() == b.height + 1 { lc.trusted.clone() } else { lc.verify_to(b.height + 1).await? };
+    Ok((check_bundle(b, &header.app_hash())?, header.anchor))
+}
+
 /// [`prove_many`] for a loop: `None` (logged) when the light client cannot
 /// verify right now, so the caller falls back to its ordinary read.
 pub async fn prove_for(component: &'static str, facts: &[Fact]) -> Option<Batch> {
@@ -795,6 +872,28 @@ mod tests {
         assert!(!within_trust(now - TRUSTING_PERIOD_SECS as i64 - 1));
     }
 
+    /// Relay end to end: one machine packages a proven read; the bundle is
+    /// checked against an independently verified header; a tampered value
+    /// in transit is refused. Read-only.
+    /// `cargo test mirror::verify::tests::live_relay -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn live_relay() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let b = relay_bundle(Store::Grid, "lastAction", "1-194").await.unwrap();
+            println!("bundle at {} for {}: {} ops", b.height, b.chain_id, b.ops.len());
+            let (v, anchor) = verify_bundle(&b).await.unwrap();
+            println!("verified by this machine's light client ({anchor:?}): {v:?}");
+            assert_eq!(v, Some(2_449_239));
+            let mut bad = b.clone();
+            bad.value_b64 = Some(b64e(&7u64.to_be_bytes()));
+            assert!(verify_bundle(&bad).await.is_err(), "a value changed in transit is refused");
+            println!("tampered bundle refused");
+            remove_cache(SAVED);
+        });
+    }
+
     /// Pin against the live testnet: a wrong hash is refused, the real hash
     /// is accepted only after the chain from it to the tip verifies, proofs
     /// then carry the `pinned` label, and clearing drops it. Uses test-only
@@ -828,5 +927,30 @@ mod tests {
             clear_pin().await;
             remove_cache(SAVED);
         });
+    }
+
+    /// The store keys are numbered by the chain's attribute enums; the
+    /// mirror's attribute lists must be in exactly that order, or every
+    /// proven read would prove the wrong attribute.
+    #[test]
+    fn attribute_order_is_the_chains_enum_order() {
+        #[derive(serde::Deserialize)]
+        struct G {
+            enums: std::collections::BTreeMap<String, Vec<String>>,
+        }
+        let g: G = serde_json::from_str(include_str!("golden/difficulty.json")).unwrap();
+        // The chain prefixes two planet clocks with "planet"; the feeds do not.
+        let norm = |n: &str| n.strip_prefix("planet").filter(|r| r.starts_with(|c: char| c.is_ascii_uppercase())).map(|r| {
+            let mut c = r.chars();
+            c.next().map(|f| f.to_ascii_lowercase().to_string() + c.as_str()).unwrap_or_default()
+        }).unwrap_or_else(|| n.to_string());
+        for (enum_name, ours) in [
+            ("GridAttributeType", &crate::mcp::perception::GRID_ATTRS[..]),
+            ("PlanetAttributeType", &crate::mcp::perception::PLANET_ATTRS[..]),
+            ("StructAttributeType", &crate::mcp::perception::STRUCT_ATTRS[..]),
+        ] {
+            let chain: Vec<String> = g.enums[enum_name].iter().map(|n| norm(n)).collect();
+            assert_eq!(chain, ours.iter().map(|s| s.to_string()).collect::<Vec<_>>(), "{enum_name}");
+        }
     }
 }

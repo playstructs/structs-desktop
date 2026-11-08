@@ -87,6 +87,51 @@ pub async fn execute(params: PolicyParams) -> Vec<Content> {
             };
             match action {
                 "show" => pretty(json!(crate::mcp::orders::current())),
+                "save" => {
+                    let name = cfg.get("name").and_then(|a| a.as_str()).unwrap_or("");
+                    let by = cfg.get("author").and_then(|a| a.as_str()).unwrap_or("agent");
+                    let doc = match cfg.get("document") {
+                        Some(_) => match proposed() {
+                            Ok(d) => d,
+                            Err(e) => return vec![Content::text(format!("Error: {e}"))],
+                        },
+                        None => crate::mcp::orders::current(),
+                    };
+                    match crate::mcp::orders::save_named(name, by, doc) {
+                        Ok(()) => pretty(json!({ "saved": name })),
+                        Err(e) => vec![Content::text(format!("Error: {e}"))],
+                    }
+                }
+                "library" => pretty(json!(crate::mcp::orders::library_list()
+                    .into_iter()
+                    .map(|(n, by, at)| json!({ "name": n, "saved_by": by, "saved_ms": at }))
+                    .collect::<Vec<_>>())),
+                "load" => {
+                    let name = cfg.get("name").and_then(|a| a.as_str()).unwrap_or("");
+                    match crate::mcp::orders::load_named(name) {
+                        Some(d) => pretty(json!({
+                            "document": d,
+                            "problems": crate::mcp::orders::check(&d, crate::mcp::virtual_players::is_virtual),
+                            "changes_if_applied": crate::mcp::orders::diff(&crate::mcp::orders::current(), &d),
+                        })),
+                        None => vec![Content::text(format!("Error: no saved orders named '{name}'"))],
+                    }
+                }
+                "halt" => {
+                    let author = cfg.get("author").and_then(|a| a.as_str()).unwrap_or("agent");
+                    let reason = cfg.get("reason").and_then(|a| a.as_str()).unwrap_or("halted");
+                    match crate::mcp::orders::halt(author, reason) {
+                        Ok(v) => pretty(v),
+                        Err(p) => pretty(json!({ "halted": false, "problems": p })),
+                    }
+                }
+                "resume" => {
+                    let author = cfg.get("author").and_then(|a| a.as_str()).unwrap_or("agent");
+                    match crate::mcp::orders::resume(author) {
+                        Ok(v) => pretty(v),
+                        Err(p) => pretty(json!({ "resumed": false, "problems": p })),
+                    }
+                }
                 "history" => pretty(json!(crate::mcp::orders::history())),
                 "check" | "diff" => match proposed() {
                     Ok(d) => pretty(json!({
@@ -105,7 +150,7 @@ pub async fn execute(params: PolicyParams) -> Vec<Content> {
                     }
                     Err(e) => vec![Content::text(format!("Error: {e}"))],
                 },
-                other => vec![Content::text(format!("Error: unknown orders action '{other}'. Use show, check, diff, apply, history."))],
+                other => vec![Content::text(format!("Error: unknown orders action '{other}'. Use show, check, diff, apply, history, halt, resume, save, library, load."))],
             }
         }
 

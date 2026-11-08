@@ -41,6 +41,8 @@ pub struct Projection {
     /// The chain would refuse the next step for this reason.
     pub stalled: Option<Refused>,
     pub aim: u64,
+    /// Heights of the projected mines, in order.
+    pub mine_heights: Vec<u64>,
 }
 
 fn rig(world: &World, planet: &str, mining: bool) -> Option<(String, u64)> {
@@ -118,6 +120,7 @@ pub fn project(world: &World, tip: u64, player: &str, aim: u64) -> Option<Projec
         drained_at: None,
         stalled: None,
         aim,
+        mine_heights: Vec::new(),
     };
     let miner = rig(&w, &planet_id, true);
     let refinery = rig(&w, &planet_id, false);
@@ -156,6 +159,7 @@ pub fn project(world: &World, tip: u64, player: &str, aim: u64) -> Option<Projec
         match res {
             Ok(_) if step.0 => {
                 out.mines += 1;
+                out.mine_heights.push(now);
                 if w.planets.get(&planet_id).and_then(|p| p.buried_ore) == Some(0) {
                     out.depleted_at = Some(now);
                 }

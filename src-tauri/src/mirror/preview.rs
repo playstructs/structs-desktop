@@ -179,6 +179,67 @@ pub fn preview_now(m: &Move) -> Option<Preview> {
     Some(Preview { action: m.clone(), exec, world, result })
 }
 
+// ── Plans ────────────────────────────────────────────────────────────────────
+
+/// One step of a previewed plan.
+#[derive(Clone, Debug, Serialize)]
+pub struct Step {
+    pub action: Move,
+    pub height: u64,
+    pub result: Result<Applied, Refused>,
+}
+
+/// Apply `steps` in order to one copy of `world`, one block apart from
+/// `exec`, stopping at the first the chain would refuse — so each step sees
+/// the effects of the ones before it. Pure.
+pub fn plan(world: &World, exec: u64, steps: &[Move]) -> Vec<Step> {
+    let mut w = world.clone();
+    let mut out = Vec::new();
+    for (i, m) in steps.iter().enumerate() {
+        let height = exec + i as u64;
+        let result = apply(&mut w, height, m);
+        let stop = result.is_err();
+        out.push(Step { action: m.clone(), height, result });
+        if stop {
+            break;
+        }
+    }
+    out
+}
+
+/// Preview a plan against the live snapshot: the world covers every step's
+/// owner and destination.
+pub fn plan_now(steps: &[Move]) -> Option<(u64, Vec<Step>)> {
+    let tip = {
+        let clock = crate::game_state::GAME_STATE.read().ok()?.current_block_height;
+        clock.max(crate::mcp::perception::with_snapshot(|s| s.height).unwrap_or(0))
+    };
+    let types = {
+        let gs = crate::game_state::GAME_STATE.read().ok()?;
+        super::world::types_from_game_state(&gs)
+    };
+    let w = crate::mcp::perception::with_snapshot(|snap| {
+        let mut owners: Vec<String> = Vec::new();
+        let mut extra: Vec<String> = Vec::new();
+        for m in steps {
+            let (subject, dest) = m.subject();
+            if let Some(o) = snap
+                .struct_row(subject)
+                .map(|r| r.owner.clone())
+                .or_else(|| snap.fleet_row(subject).and_then(|f| f.get("owner").and_then(|o| o.as_str()).map(String::from)))
+            {
+                owners.push(o);
+            }
+            extra.extend(dest.map(String::from));
+        }
+        owners.sort();
+        owners.dedup();
+        World::from_snapshot_with(snap, types, "live", Some(&owners), &extra)
+    })?;
+    let exec = super::rules::earliest_execution(tip);
+    Some((exec, plan(&w, exec, steps)))
+}
+
 // ── Accuracy ─────────────────────────────────────────────────────────────────
 
 /// Seconds a landed prediction waits before it is checked: long enough for
@@ -383,5 +444,20 @@ mod tests {
         let w = rig_world();
         assert_eq!(shows(&w, &Effect::AlphaMinted { player: "1-1".into(), ualpha: 1 }, 1, 2), None);
         assert_eq!(shows(&w, &Effect::ListStart { planet: "2-1".into(), fleet: "9-1".into() }, 1, 2), None);
+    }
+
+    #[test]
+    fn a_plan_runs_in_order_and_stops_at_the_first_refusal() {
+        let w = rig_world();
+        let steps = vec![
+            Move::Deactivate { structure: "5-1".into() },
+            Move::Mine { structure: "5-1".into() }, // offline now: refused
+            Move::Activate { structure: "5-1".into() },
+        ];
+        let out = plan(&w, 20_000, &steps);
+        assert_eq!(out.len(), 2, "stops at the refused mine");
+        assert!(out[0].result.is_ok());
+        assert_eq!(out[1].result.as_ref().unwrap_err().rule, "offline");
+        assert_eq!((out[0].height, out[1].height), (20_000, 20_001));
     }
 }

@@ -34,6 +34,45 @@ const tick = (ms) => new Promise((r) => setTimeout(r, ms));
   const w = dom.window, d = w.document;
   await until(() => d.querySelectorAll('#tm-grid .tm-card').length >= 5);
   check('solo attribute set', d.documentElement.getAttribute('data-solo') === 'terminal');
+  {
+    const T = w.Board.Terminal;
+    const broken = Object.keys(T.types().concat([])).length >= 0 && T.types().filter((t) => (t.sdkErrors || []).length).map((t) => t.type + ': ' + t.sdkErrors.join('; '));
+    check('every registered card keeps the card SDK v' + T.SDK_VERSION + ' contract', broken.length === 0, broken.join(' | '));
+    check('the contract refuses a card without render', T.validate('x', { label: 'X' }).some((e) => /render/.test(e)));
+    check('the contract requires kinds on an id param', T.validate('x', { label: 'X', render() {}, params: [{ key: 'id', kind: 'id' }] }).some((e) => /kinds/.test(e)));
+    check('a card written for a newer SDK is named', T.validate('x', { label: 'X', render() {}, sdk: T.SDK_VERSION + 1 }).some((e) => /SDK/.test(e)));
+  }
+  {
+    // Installed third-party cards: sandboxed, and only read-only queries answered.
+    const T = w.Board.Terminal;
+    const ext = T.types().find((t) => t.type === 'external');
+    check('the installed-card type is registered and keeps the contract', !!ext && !(ext.sdkErrors || []).length);
+    const calls = [];
+    const real = w.Board.T.core.invoke;
+    w.Board.T.core.invoke = (cmd, args) => {
+      calls.push(cmd);
+      if (cmd === 'terminal_card_get') return Promise.resolve('<p>hello</p>');
+      if (cmd === 'mirror_card_query') return Promise.resolve('forecast text');
+      return real(cmd, args);
+    };
+    const host = d.createElement('div');
+    d.body.appendChild(host);
+    await ext.render(host, { card: 'demo' }, { id: 'ext-1' });
+    const frame = host.querySelector('iframe');
+    check('an installed card runs in a sandboxed frame', !!frame && frame.getAttribute('sandbox') === 'allow-scripts', frame && frame.getAttribute('sandbox'));
+    check('…with no same-origin escape', !!frame && !/allow-same-origin/.test(frame.getAttribute('sandbox') || ''));
+    check('…drawn from its own document', !!frame && frame.srcdoc === '<p>hello</p>');
+    // A query the card may not make is refused without reaching Rust.
+    const before = calls.length;
+    w.dispatchEvent(new w.MessageEvent('message', { data: { type: 'structs.query', id: 1, query: 'query', args: {} }, source: frame.contentWindow }));
+    await tick(50);
+    check('a query outside the read-only list never reaches the app', calls.slice(before).indexOf('mirror_card_query') < 0, calls.slice(before).join(','));
+    w.dispatchEvent(new w.MessageEvent('message', { data: { type: 'structs.query', id: 2, query: 'forecast', args: {} }, source: frame.contentWindow }));
+    await tick(50);
+    check('an allowed query is answered through mirror_card_query', calls.indexOf('mirror_card_query') >= 0);
+    ext.unmount(host);
+    w.Board.T.core.invoke = real;
+  }
   const cards = [...d.querySelectorAll('#tm-grid .tm-card')];
   check('the saved layout is drawn, in its order — a saved whole-page card migrated into the cards that carry its data', cards.map((c) => c.getAttribute('data-card')).join(',') === 'people-1,market-1,pow-1,tasks-1,player-1,stats-1', cards.map((c) => c.getAttribute('data-card')).join(','));
   check('no card is titled after a window', [...d.querySelectorAll('#tm-grid .tm-title')].every((t) => !/Team Ops|Game Stats/.test(t.textContent)));

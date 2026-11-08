@@ -168,6 +168,7 @@ pub fn router(state: WebState) -> axum08::Router {
         .route("/board/", get(board_index))
         .route("/board/events", get(board_events))
         .route("/board/invoke/{command}", post(board_invoke))
+        .route("/board/proof/{store}/{attribute}/{object}", get(board_proof))
         .route("/board/{*path}", get(board_asset))
         .with_state(state)
 }
@@ -392,6 +393,27 @@ fn err_json(e: String) -> Response {
 fn from_result<S: serde::Serialize>(r: Result<S, String>) -> Response {
     match r {
         Ok(v) => ok_json(v),
+        Err(e) => err_json(e),
+    }
+}
+
+
+/// A proven Structs attribute for a teammate (mirror::verify::Bundle). The
+/// receiver verifies it with its own light client; this machine is a relay,
+/// not an authority. Behind the board token like every board route.
+async fn board_proof(Path((store, attribute, object)): Path<(String, String, String)>) -> Response {
+    if !is_enabled() {
+        return disabled();
+    }
+    use crate::mirror::verify::Store;
+    let store = match store.as_str() {
+        "grid" => Store::Grid,
+        "planet" => Store::Planet,
+        "struct" => Store::Struct,
+        other => return err_json(format!("unknown store '{other}' (grid, planet, struct)")),
+    };
+    match crate::mirror::verify::relay_bundle(store, &attribute, &object).await {
+        Ok(b) => ok_json(serde_json::to_value(b).unwrap_or(Value::Null)),
         Err(e) => err_json(e),
     }
 }

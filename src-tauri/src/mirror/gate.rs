@@ -419,6 +419,7 @@ pub fn check(action: &Action) -> Option<Decision> {
         }
         decide(&world, tip, action)
     })?;
+    let decision = stand_down_if_untrusted(decision);
     record(&decision);
     Some(decision)
 }
@@ -492,6 +493,19 @@ pub fn blocked_now(kind: TaskType, object_id: &str) -> Option<String> {
 
 static STATS: std::sync::LazyLock<std::sync::Mutex<std::collections::BTreeMap<&'static str, u64>>> =
     std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::BTreeMap::new()));
+
+/// A refusal stands only while the mirror's rules are the chain's rules;
+/// otherwise it becomes a recorded `undecided` and the chain decides.
+fn stand_down_if_untrusted(mut d: Decision) -> Decision {
+    if d.refused() {
+        if let Err(why) = super::epoch::trusted() {
+            d.verdict = Verdict::Send;
+            d.detail = format!("would refuse ({}: {}) but {why}", d.rule, d.detail);
+            d.rule = "undecided_epoch";
+        }
+    }
+    d
+}
 
 fn record(d: &Decision) {
     if let Ok(mut m) = STATS.lock() {
@@ -668,5 +682,16 @@ mod tests {
         // shield 125: difficulty 1 at age 125.
         assert_eq!(decide(&w, 1_124, &a).rule, "allowed");
         assert_eq!(decide(&w, 1_050, &a).rule, "not_ripe");
+    }
+
+    #[test]
+    fn a_refusal_stands_down_when_the_chain_runs_other_rules() {
+        let refusal = Decision::refuse("insufficient_charge", "1 < 2", 10);
+        crate::mirror::epoch::set_for_test(crate::mirror::epoch::Epoch { mirror: "0.22.0".into(), chain: Some("0.23.0".into()), ..Default::default() });
+        let d = stand_down_if_untrusted(refusal.clone());
+        assert_eq!((d.verdict, d.rule), (Verdict::Send, "undecided_epoch"));
+        assert!(d.detail.contains("would refuse (insufficient_charge"));
+        crate::mirror::epoch::set_for_test(crate::mirror::epoch::Epoch { mirror: "0.22.0".into(), chain: Some("0.22.0".into()), ..Default::default() });
+        assert_eq!(stand_down_if_untrusted(refusal).verdict, Verdict::Refuse);
     }
 }

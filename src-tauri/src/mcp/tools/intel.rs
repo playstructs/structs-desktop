@@ -80,6 +80,23 @@ pub async fn execute(
         "plan_timeline" => query_timeline(registry, &params.args),
         "forecast" => vec![Content::text(crate::mirror::report::intel(client, &params.args).await)],
         "preview" => vec![Content::text(crate::mirror::report::preview_intel(&params.args))],
+        "lab" => vec![Content::text(crate::mirror::report::lab_intel(&params.args))],
+        "backtest" => vec![Content::text(crate::mirror::report::backtest_intel(&params.args).await)],
+        "chronicle" => vec![Content::text(crate::mirror::report::chronicle_intel(&params.args).await)],
+        "verify_bundle" => {
+            let text = match serde_json::from_value::<crate::mirror::verify::Bundle>(params.args.get("bundle").cloned().unwrap_or_default()) {
+                Ok(b) => match crate::mirror::verify::verify_bundle(&b).await {
+                    Ok((v, anchor)) => format!(
+                        "Bundle verified by this machine's own light client (anchor {anchor:?}): value at {} is {}",
+                        b.height,
+                        v.map(|x| x.to_string()).unwrap_or_else(|| "proven absent (0)".into())
+                    ),
+                    Err(e) => format!("Bundle REFUSED: {e}"),
+                },
+                Err(e) => format!("verify_bundle: args.bundle does not parse ({e})"),
+            };
+            vec![Content::text(text)]
+        }
         // Power forecast: tries trend first, falls back to snapshot.
         "power_forecast" => query_power_forecast(client, &params.args).await,
         // Guild-API-backed analytical queries
@@ -107,7 +124,7 @@ pub async fn execute(
             raw_query(client, raw).await
         }
         other => vec![Content::text(format!(
-            "Unknown intel query '{}'. Available: whoami, intents, ruleset, simulate, strike_options, what_can_i_build, power_forecast, economy_status, plan_timeline, forecast, preview, planet_history, valid_targets, scout, battle_log, slot_map, is_active, market, metric_trend, query (raw entity read/list/filter)",
+            "Unknown intel query '{}'. Available: whoami, intents, ruleset, simulate, strike_options, what_can_i_build, power_forecast, economy_status, plan_timeline, forecast, preview, lab, backtest, chronicle, verify_bundle, planet_history, valid_targets, scout, battle_log, slot_map, is_active, market, metric_trend, query (raw entity read/list/filter)",
             other
         ))],
     }
