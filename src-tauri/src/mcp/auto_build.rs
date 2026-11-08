@@ -367,6 +367,60 @@ pub fn set(cfg: AutoBuildConfig) {
 /// not clear the guard or report liveness — otherwise a slow-but-alive scan
 /// that survives a reset would unlock a THIRD concurrent scan and corrupt the
 /// watchdog's picture, exactly when the node is already struggling.
+/// A slot this player has taken that the snapshot does not show yet.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Claim {
+    pub target: String,
+    pub ambit: String,
+    pub slot: u64,
+    /// The type our accepted initiate put there; `None` when only a live read
+    /// said the slot is occupied.
+    pub type_name: Option<String>,
+    pub at_ms: f64,
+}
+
+/// Slots claimed per player. An accepted initiate is in a block a few
+/// seconds later, but the snapshot only learns of the new struct from a
+/// frame or the next refresh; until then every scan re-picked the same slot
+/// and paid a live read to be told no (9,164 times in 30 min on
+/// 2026-11-08, every one a slot our own build had filled).
+static CLAIMS: LazyLock<Mutex<HashMap<String, Vec<Claim>>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+/// A claim outlives at least one snapshot refresh, then the snapshot rules.
+const CLAIM_TTL_MS: f64 = 15.0 * 60_000.0;
+
+fn claim(pid: &str, target: &str, ambit: &str, slot: u64, type_name: Option<&str>) {
+    CLAIMS.lock().unwrap().entry(pid.to_string()).or_default().push(Claim {
+        target: target.to_string(),
+        ambit: ambit.to_string(),
+        slot,
+        type_name: type_name.map(String::from),
+        at_ms: now_millis(),
+    });
+}
+
+/// Fold a player's live claims into the scan's view, dropping any the
+/// snapshot already shows (a struct is in that slot) or that have expired.
+pub fn apply_claims(
+    claims: &mut Vec<Claim>,
+    now_ms: f64,
+    occ: &mut HashMap<(String, String), HashSet<u64>>,
+    have: &mut HashMap<(String, String, String), usize>,
+    present: &mut HashSet<String>,
+) {
+    claims.retain(|c| {
+        let key = (c.target.clone(), c.ambit.clone());
+        if now_ms - c.at_ms > CLAIM_TTL_MS || occ.get(&key).is_some_and(|o| o.contains(&c.slot)) {
+            return false;
+        }
+        occ.entry(key).or_default().insert(c.slot);
+        if let Some(t) = &c.type_name {
+            *have.entry((c.target.clone(), c.ambit.clone(), t.clone())).or_insert(0) += 1;
+            present.insert(t.clone());
+        }
+        true
+    });
+}
+
 static RUN_GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// Watchdog remediation: invalidate the wedged scan and clear the
@@ -1127,6 +1181,10 @@ async fn scan(
                 // Everything buildable right now, then ONE pick weighted by this
                 // player's temperament. At temperature 0 this is the old
                 // "first ripe entry wins" walk exactly.
+                let (mut present, mut have) = (present, have);
+                if let Some(c) = CLAIMS.lock().unwrap().get_mut(pid.as_str()) {
+                    apply_claims(c, now_millis(), &mut occ, &mut have, &mut present);
+                }
                 let mut ripe = ripe_entries(loadout, &present, &have, &occ, |tn| resolve(tn).is_some());
                 let temperament = crate::mcp::variance::for_role(role);
                 while !ripe.is_empty() {
@@ -1152,7 +1210,10 @@ async fn scan(
                         match initiate_verified_on_chain(&client, &pid, &target, &ambit, slot, true, current_block).await {
                             InitiateCheck::Verified => {}
                             // This entry's slot is gone; another may still be free.
-                            InitiateCheck::SlotTaken => continue,
+                            InitiateCheck::SlotTaken => {
+                                claim(pid.as_str(), &target, &ambit, slot, None);
+                                continue;
+                            }
                             // The PLAYER cannot initiate this scan — stop, don't re-read per entry.
                             InitiateCheck::NoCharge | InitiateCheck::ReadFailed => break,
                         }
@@ -1167,6 +1228,7 @@ async fn scan(
                     .await;
                     match res {
                         Ok(_) => {
+                            claim(pid.as_str(), &target, &ambit, slot, Some(&type_name));
                             initiates.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                             run.actions.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                             // Composition changed — drop the shared struct cache
@@ -1240,6 +1302,21 @@ async fn scan(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn claims_hold_a_slot_until_the_snapshot_shows_it() {
+        let c = |slot, t: Option<&str>, at| Claim { target: "planet".into(), ambit: "land".into(), slot, type_name: t.map(String::from), at_ms: at };
+        let mut claims = vec![c(1, Some("Ore Extractor"), 1_000.0), c(2, None, 1_000.0), c(3, None, 0.0)];
+        let mut occ: HashMap<(String, String), HashSet<u64>> = HashMap::new();
+        occ.entry(("planet".into(), "land".into())).or_default().insert(2); // the snapshot caught up on slot 2
+        let (mut have, mut present) = (HashMap::new(), HashSet::new());
+        apply_claims(&mut claims, CLAIM_TTL_MS + 500.0, &mut occ, &mut have, &mut present);
+        let land = &occ[&("planet".to_string(), "land".to_string())];
+        assert!(land.contains(&1) && land.contains(&2) && !land.contains(&3), "{land:?}");
+        assert_eq!(have.get(&("planet".to_string(), "land".to_string(), "Ore Extractor".to_string())), Some(&1));
+        assert!(present.contains("Ore Extractor"));
+        assert_eq!(claims, vec![c(1, Some("Ore Extractor"), 1_000.0)], "slot 2 is in the snapshot now, slot 3 expired");
+    }
 
     /// Reach masks for every fleet hull, each confirmed from a live `scout`
     /// on 2026-08-18 (chain values Water=2 Land=4 Air=8 Space=16). Test-only:

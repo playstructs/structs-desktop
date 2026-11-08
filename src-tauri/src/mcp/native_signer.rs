@@ -525,18 +525,26 @@ fn block_tx_count_of(v: &Value) -> usize {
 }
 
 /// Every tx in block `height`, all pages.
+///
+/// Pages with `page`/`limit`: this endpoint IGNORES `pagination.offset` and
+/// answers page 1 every time, which read a 285-tx block as the same 100
+/// three times over (2026-11-08). Rows are deduplicated by hash so a repeat
+/// page can never pass for a complete block.
 async fn block_txs(base: &str, height: u64) -> Result<Vec<(String, i64, String)>, String> {
+    const LIMIT: usize = 100;
+    let mut seen = std::collections::HashSet::new();
     let mut out = Vec::new();
-    loop {
-        let url = format!("{base}/cosmos/tx/v1beta1/txs?query=tx.height%3D{height}&pagination.limit=100&pagination.offset={}", out.len());
+    for page in 1..=50usize {
+        let url = format!("{base}/cosmos/tx/v1beta1/txs?query=tx.height%3D{height}&limit={LIMIT}&page={page}");
         let v = super::cosmos_client::get_json(&url).await?;
         let (rows, total) = parse_block_txs(&v);
         let got = rows.len();
-        out.extend(rows);
-        if got == 0 || out.len() >= total {
-            return Ok(out);
+        out.extend(rows.into_iter().filter(|r| seen.insert(r.0.clone())));
+        if got < LIMIT || out.len() >= total {
+            break;
         }
     }
+    Ok(out)
 }
 
 /// Async mode: hand the accepted tx to the ONE settler. It reads each new

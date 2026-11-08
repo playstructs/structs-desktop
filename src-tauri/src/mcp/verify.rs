@@ -91,8 +91,63 @@ const SNAPSHOT_TRUST_MS: f64 = 2.5 * perception::REFRESH_EVERY_MS;
 /// The ore clocks answer while the hot refresh is younger than this.
 const HOT_TRUST_MS: f64 = 2.5 * perception::HOT_REFRESH_EVERY_MS;
 
+// ── Live-read agreement ──────────────────────────────────────────────────────
+//
+// Every `*_live` read skips the snapshot on purpose. Each one is also checked
+// against what the snapshot believed at that moment, so the cost of skipping
+// it is measured, not guessed: a read kind that always agrees is a candidate
+// to answer from memory; one that keeps disagreeing points at a frame or a
+// fold the snapshot is missing. `no_belief` = the snapshot had no row.
+
+#[derive(Default)]
+struct Agreement {
+    reads: AtomicU64,
+    agreed: AtomicU64,
+    disagreed: AtomicU64,
+    no_belief: AtomicU64,
+}
+
+static AGREEMENT: std::sync::LazyLock<dashmap::DashMap<&'static str, Agreement>> =
+    std::sync::LazyLock::new(dashmap::DashMap::new);
+
+/// The snapshot's belief, whatever its age, without counting a hit.
+fn peek<R>(f: impl FnOnce(&Snapshot) -> Option<R>) -> Option<R> {
+    perception::with_snapshot(f).flatten()
+}
+
+fn note_agreement<T: PartialEq>(kind: &'static str, belief: Option<T>, live: &T) {
+    let e = AGREEMENT.entry(kind).or_default();
+    e.reads.fetch_add(1, Ordering::Relaxed);
+    match belief {
+        None => e.no_belief.fetch_add(1, Ordering::Relaxed),
+        Some(b) if &b == live => e.agreed.fetch_add(1, Ordering::Relaxed),
+        Some(_) => e.disagreed.fetch_add(1, Ordering::Relaxed),
+    };
+}
+
+/// Per live-read kind: reads, and how many agreed with the snapshot.
+pub fn agreement() -> Value {
+    let mut out = serde_json::Map::new();
+    for e in AGREEMENT.iter() {
+        let a = e.value();
+        let (reads, agreed) = (a.reads.load(Ordering::Relaxed), a.agreed.load(Ordering::Relaxed));
+        out.insert(
+            e.key().to_string(),
+            serde_json::json!({
+                "reads": reads,
+                "agreed": agreed,
+                "disagreed": a.disagreed.load(Ordering::Relaxed),
+                "no_belief": a.no_belief.load(Ordering::Relaxed),
+                "agreed_pct": if reads > 0 { (agreed as f64 * 1000.0 / reads as f64).round() / 10.0 } else { 0.0 },
+            }),
+        );
+    }
+    Value::Object(out)
+}
+
 pub fn health() -> Value {
     serde_json::json!({
+        "live_reads": agreement(),
         "source": source().name(),
         "snapshot_hits": SNAPSHOT_HITS.load(Ordering::Relaxed),
         "guild_reads": GUILD_READS.load(Ordering::Relaxed),
@@ -275,6 +330,15 @@ pub async fn struct_state(client: &CosmosClient, sid: &StructId) -> Result<Struc
 /// snapshot (see structs-config.js grass tap stats), so a struct can sit
 /// "building" here long after it went Online there.
 pub async fn struct_state_live(client: &CosmosClient, sid: &StructId) -> Result<StructState, String> {
+    let belief = peek(|s| s.struct_row(sid.as_str()).map(|_| state_from_status_bits(s.struct_status(sid.as_str()))));
+    let live = struct_state_read(client, sid).await;
+    if let Ok(l) = &live {
+        note_agreement("struct_state", belief.map(|b| (b.built, b.online, b.destroyed)), &(l.built, l.online, l.destroyed));
+    }
+    live
+}
+
+async fn struct_state_read(client: &CosmosClient, sid: &StructId) -> Result<StructState, String> {
     with_failover!(
         "struct",
         async { struct_state_from_guild(&client.guild.struct_by_id(sid.as_str()).await?) },
@@ -300,6 +364,18 @@ pub async fn defender_target(client: &CosmosClient, defender: &StructId) -> Resu
 /// can hold a link the chain dropped: "is not_defending but must be
 /// defending for defense_clear", 15 in the first hour of the native build.
 pub async fn defender_target_live(client: &CosmosClient, defender: &StructId) -> Result<Option<StructId>, String> {
+    let belief = peek(|s| {
+        s.struct_attr(defender.as_str(), "protectedStructIndex")
+            .map(|i| if i == 0 { None } else { Some(StructId::from_index(i).to_string()) })
+    });
+    let live = defender_target_read(client, defender).await;
+    if let Ok(l) = &live {
+        note_agreement("defender_target", belief, &l.as_ref().map(|x| x.to_string()));
+    }
+    live
+}
+
+async fn defender_target_read(client: &CosmosClient, defender: &StructId) -> Result<Option<StructId>, String> {
     with_failover!(
         "defender",
         async {
@@ -440,6 +516,15 @@ pub async fn player_view(client: &CosmosClient, pid: &PlayerId) -> Result<Player
 /// precondition ("my current planet is mined out") is about a planet the
 /// snapshot may have already been moved off of.
 pub async fn player_view_live(client: &CosmosClient, pid: &PlayerId) -> Result<PlayerView, String> {
+    let belief = peek(|s| s.player_row(pid.as_str()).map(|p| str_field(p, "planetId").map(String::from)));
+    let live = player_view_read(client, pid).await;
+    if let Ok(l) = &live {
+        note_agreement("player_planet", belief, &l.planet_id.as_ref().map(|x| x.to_string()));
+    }
+    live
+}
+
+async fn player_view_read(client: &CosmosClient, pid: &PlayerId) -> Result<PlayerView, String> {
     with_failover!(
         "player",
         async { player_view_from_guild(&client.guild.player_by_id(pid.as_str()).await?) },
@@ -462,6 +547,15 @@ pub async fn planet_ore(client: &CosmosClient, planet: &PlanetId) -> Result<f64,
 
 /// [`planet_ore`] that skips the snapshot (see `player_view_live`).
 pub async fn planet_ore_live(client: &CosmosClient, planet: &PlanetId) -> Result<f64, String> {
+    let belief = peek(|s| s.grid_attr(planet.as_str(), "ore"));
+    let live = planet_ore_read(client, planet).await;
+    if let Ok(l) = &live {
+        note_agreement("planet_ore", belief, &(l.max(0.0) as u64));
+    }
+    live
+}
+
+async fn planet_ore_read(client: &CosmosClient, planet: &PlanetId) -> Result<f64, String> {
     with_failover!(
         "planet_ore",
         async {
@@ -546,9 +640,29 @@ pub async fn slot_occupied(client: &CosmosClient, loc: &ObjectId, ambit: &str, s
 pub async fn slot_occupied_live(client: &CosmosClient, loc: &ObjectId, ambit: &str, slot: u64) -> Result<bool, String> {
     let kind = location_kind(loc)?;
     let id = loc.to_string();
+    let belief = peek(|s| location_row(s, kind, &id).and_then(|row| slot_occupied_in_map(&row, ambit, slot).ok()));
+    let live = slot_occupied_read(client, loc, kind, &id, ambit, slot).await;
+    if let Ok(l) = &live {
+        note_agreement("slot_occupied", belief, l);
+    }
+    live
+}
+
+async fn slot_occupied_read(client: &CosmosClient, loc: &ObjectId, kind: LocationKind, id: &str, ambit: &str, slot: u64) -> Result<bool, String> {
+    let _ = loc;
+    let id = id.to_string();
     with_failover!(
         "slot",
-        async { slot_occupied_in_map(&slot_map(&guild_object_row(client, &id).await?)?, ambit, slot) },
+        async {
+            let map = slot_map(&guild_object_row(client, &id).await?)?;
+            // Keep what we just learned. The guild indexer can trail the
+            // GRASS-fed snapshot, so this only FILLS empty slots, never
+            // clears one. Without it the next scan re-picked the same slot
+            // and re-read it: 9,164 such repeats in 30 min on 2026-11-08,
+            // every one a slot our own build had already filled.
+            perception::fill_slots(kind, &id, &map);
+            slot_occupied_in_map(&map, ambit, slot)
+        },
         async {
             let entity = client.query_entity(kind.as_str(), &id).await?;
             if kind == LocationKind::Planet {

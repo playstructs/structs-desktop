@@ -1206,6 +1206,43 @@ pub fn absorb_struct_entity(entity: &Value) {
     }
 }
 
+/// Fill a planet's or fleet's EMPTY slots from a freshly read slot map
+/// (`land`/`water`/`air`/`space` arrays of struct ids). Never clears a slot:
+/// the indexed source can trail the GRASS-fed snapshot, and a slot it still
+/// shows empty may already be taken here.
+pub fn fill_slots(kind: crate::mcp::types::LocationKind, loc: &str, map: &Value) {
+    if let Ok(mut g) = CURRENT.write() {
+        if let Some(s) = g.as_mut() {
+            let rows = match kind {
+                crate::mcp::types::LocationKind::Planet => &mut s.planets,
+                crate::mcp::types::LocationKind::Fleet => &mut s.fleets,
+            };
+            if let Some(row) = rows.get_mut(loc) {
+                fill_slots_in_row(row, map);
+            }
+        }
+    }
+}
+
+/// The fill rule itself. Pure.
+pub(crate) fn fill_slots_in_row(row: &mut Value, map: &Value) {
+    for ambit in ["land", "water", "air", "space"] {
+        let Some(fresh) = map.get(ambit).and_then(|a| a.as_array()) else { continue };
+        let Some(obj) = row.as_object_mut() else { return };
+        let arr = obj.entry(ambit).or_insert_with(|| Value::Array(Vec::new()));
+        let Some(arr) = arr.as_array_mut() else { continue };
+        for (i, v) in fresh.iter().enumerate() {
+            let Some(id) = v.as_str().filter(|x| !x.is_empty()) else { continue };
+            while arr.len() <= i {
+                arr.push(Value::String(String::new()));
+            }
+            if arr[i].as_str().map_or(true, |x| x.is_empty()) {
+                arr[i] = Value::String(id.to_string());
+            }
+        }
+    }
+}
+
 /// Fold a just-read PLANET entity into the live snapshot: its attributes
 /// (the ore clocks — GRASS never streams them) and grid. Call after a
 /// pre-sign planet read so the next scan stops re-nominating a struct whose
@@ -2347,6 +2384,16 @@ async fn join_running_refresh() -> Result<Value, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_fresh_slot_map_fills_empty_slots_and_never_clears_one() {
+        let mut row = json!({"land": ["5-1", "", ""], "space": ["", "5-9"]});
+        let fresh = json!({"land": ["5-1", "5-2", ""], "space": ["5-7", ""], "air": ["", "5-4"]});
+        fill_slots_in_row(&mut row, &fresh);
+        assert_eq!(row["land"], json!(["5-1", "5-2", ""]));
+        assert_eq!(row["space"], json!(["5-7", "5-9"]), "5-9 is newer here than in the indexer: kept");
+        assert_eq!(row["air"], json!(["", "5-4"]));
+    }
 
     #[test]
     fn early_frames_are_replayed_only_if_newer_than_every_page() {
