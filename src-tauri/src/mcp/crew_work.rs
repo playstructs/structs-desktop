@@ -560,7 +560,7 @@ async fn run(app_handle: &tauri::AppHandle, cfg: &CrewWorkConfig) -> Result<(), 
         if members.len() < 2 {
             continue; // a crew of one is just a colony
         }
-        let tasks = ripe_tasks(&members, &me, current_block, cfg.difficulty_threshold);
+        let tasks = ripe_tasks(&members, &me, cfg.difficulty_threshold).await;
         let rates = if cfg.prefer_paying { crate::mcp::crew_pay::rates_by_player() } else { Default::default() };
         looked_at += tasks.len();
         if tasks.is_empty() {
@@ -788,93 +788,49 @@ fn guild_members(guild_id: &str) -> Vec<String> {
     .unwrap_or_default()
 }
 
-/// Every crewmate task ripe enough to be worth a stranger's GPU.
-///
-/// Read straight from the perception snapshot, which already holds the whole
-/// galaxy — so a crew of fifty costs no extra chain reads to plan for.
-/// Is there anything for the chain to ACCEPT?
-///
-/// A nonce for an extractor on a drained planet, or for a refinery whose
-/// owner holds no ore, is a perfectly valid proof the chain refuses every
-/// time ("planet (2-29903) is empty, nothing to mine"), and because the
-/// refusal never moves the anchor the task reads as ripe forever. The first
-/// live crew pass found exactly this: a helper posted the same proof for
-/// 5-254363 every two minutes and the owner spent a transaction being refused
-/// each time. The harvest loop has carried this guard since the futile-mining
-/// incident; crew work needs the same one on BOTH ends.
-///
-/// `None` is unknown and is allowed through — a read failure must not silence
-/// a whole crew — only a reading of zero says no.
-pub fn worth_doing(task: TaskType, planet_ore: Option<u64>, owner_ore: Option<u64>) -> bool {
-    match task {
-        TaskType::Mine => planet_ore != Some(0),
-        TaskType::Refine => owner_ore != Some(0),
-        _ => true,
-    }
-}
-
-/// Why the chain would refuse this task right now, from our own reading of
-/// the world; `None` when it would not.
-pub fn nothing_to_do(task: TaskType, planet: Option<&str>, owner: &str) -> Option<String> {
-    let planet_ore = planet.and_then(crate::mcp::perception::ore_of);
-    let owner_ore = crate::mcp::perception::ore_of(owner);
-    if worth_doing(task, planet_ore, owner_ore) {
-        return None;
-    }
-    Some(match task {
-        TaskType::Mine => format!("planet {} is empty, nothing to mine", planet.unwrap_or("?")),
-        _ => format!("{owner} holds no ore to refine"),
-    })
-}
-
-fn ripe_tasks(members: &[String], me: &str, current_block: u64, threshold: u64) -> Vec<CrewTask> {
-    let mut out = Vec::new();
+/// Other members' ripe ore work, as the mirror forecasts it: the chain's own
+/// rules over the snapshot — the planet's clock, the rig TYPE's own range, the
+/// integer curve at execution height — and every precondition the chain checks
+/// beside them (rig and owner online, buried ore, stored ore, under raid,
+/// mining/refining active). A helper only grinds what the chain would accept;
+/// the old guard (`worth_doing`) caught only empty planets and empty piles.
+async fn ripe_tasks(members: &[String], me: &str, threshold: u64) -> Vec<CrewTask> {
     // Our own work is the harvest loop's job, not the crew's.
-    let wanted: std::collections::HashSet<String> =
-        members.iter().filter(|p| p.as_str() != me).cloned().collect();
-    // One walk of the store for everybody, not one per member — the
-    // difference between a pass and a multi-minute scan at guild scale.
-    let by_owner = crate::mcp::perception::work_for_players(&wanted);
-    for (pid, rows) in by_owner {
-        for r in rows {
-            let Some(category) = r.get("category").and_then(|c| c.as_str()) else {
-                continue;
-            };
-            let Some(task) = TaskType::parse(category) else {
-                continue;
-            };
-            // BUILD is deliberately excluded for now: its anchor lives on the
-            // struct and a build that has already completed reads as ripe
-            // forever from a snapshot. Ore clocks live on the planet and are
-            // hot-swept, so they are the ones we can trust unread.
-            if !task.is_ore() {
-                continue;
-            }
-            let block_start = crate::mcp::perception::to_u64(r.get("block_start"));
-            let difficulty_target = crate::mcp::perception::to_u64(r.get("difficulty_target"));
-            if block_start == 0 || difficulty_target == 0 {
-                continue;
-            }
-            let age = current_block.saturating_sub(block_start);
-            if !crate::mcp::auto_harvest::is_ripe(age, difficulty_target, threshold) {
-                continue;
-            }
-            let planet_id = r.get("planet_id").and_then(|p| p.as_str()).map(str::to_string);
-            if nothing_to_do(task, planet_id.as_deref(), &pid).is_some() {
-                continue;
-            }
-            out.push(CrewTask {
-                object_id: r.get("object_id").and_then(|o| o.as_str()).unwrap_or_default().to_string(),
-                owner_player: pid.clone(),
-                task,
-                block_start,
-                difficulty_target,
-                planet_id,
-            });
-        }
+    let others: Vec<String> = members.iter().filter(|p| p.as_str() != me).cloned().collect();
+    if others.is_empty() {
+        return Vec::new();
     }
-    out.retain(|t| !t.object_id.is_empty());
-    one_per_cycle(out)
+    let opts = crate::mirror::forecast::Options { target: threshold, within: None, project: false, verify: false };
+    let Some(now) = crate::mirror::forecast_now(None, Some(&others), &opts).await else {
+        return Vec::new();
+    };
+    one_per_cycle(crew_tasks_from(&now.forecasts))
+}
+
+/// Ready mine/refine forecasts → crew tasks. Pure. BUILD stays out: a helper
+/// grinding someone else's build has no ore clock to share and a build is a
+/// one-off the owner's own loop already completes.
+pub(crate) fn crew_tasks_from(forecasts: &[crate::mirror::forecast::Forecast]) -> Vec<CrewTask> {
+    use crate::mirror::forecast::{Kind, Status};
+    forecasts
+        .iter()
+        .filter(|f| f.status == Status::Ready && f.anchor > 0 && !f.subject.is_empty())
+        .filter_map(|f| {
+            let task = match f.kind {
+                Kind::Mine => TaskType::Mine,
+                Kind::Refine => TaskType::Refine,
+                _ => return None,
+            };
+            Some(CrewTask {
+                object_id: f.subject.clone(),
+                owner_player: f.owner.clone(),
+                task,
+                block_start: f.anchor,
+                difficulty_target: f.range,
+                planet_id: f.planet.clone(),
+            })
+        })
+        .collect()
 }
 
 // ── Commands ────────────────────────────────────────────────────────────────
@@ -922,7 +878,7 @@ pub async fn crew_work_preview(room_id: String) -> Result<Value, String> {
     }
     let epoch = epoch_of(current_block);
     let members = members_of(&c, &me).await;
-    let tasks = ripe_tasks(&members, &me, current_block, cfg.difficulty_threshold);
+    let tasks = ripe_tasks(&members, &me, cfg.difficulty_threshold).await;
     let rates = if cfg.prefer_paying { crate::mcp::crew_pay::rates_by_player() } else { Default::default() };
     let mine = assign_paid(&tasks, &members, &me, epoch, cfg.max_slots, &rates);
     Ok(json!({
@@ -1029,17 +985,6 @@ mod tests {
     /// The chain refuses a proof for an empty planet or a penniless refiner
     /// every time, and the anchor never moves, so the task is ripe forever.
     /// Unknown is not zero: a missing reading must not silence the crew.
-    #[test]
-    fn drained_work_is_not_worth_doing_but_unread_work_is() {
-        assert!(!worth_doing(TaskType::Mine, Some(0), Some(5)));
-        assert!(worth_doing(TaskType::Mine, Some(3), Some(0)));
-        assert!(worth_doing(TaskType::Mine, None, None));
-        assert!(!worth_doing(TaskType::Refine, Some(9), Some(0)));
-        assert!(worth_doing(TaskType::Refine, Some(0), Some(1)));
-        assert!(worth_doing(TaskType::Refine, None, None));
-        assert!(worth_doing(TaskType::Build, Some(0), Some(0)));
-    }
-
     /// One proof per cycle: once ours is posted the task is left alone until
     /// the anchor moves, and a new cycle is a new job.
     /// Newest first, bounded, and a posted proof shows up in it.
@@ -1252,5 +1197,34 @@ mod tests {
         assert!(!c.enabled);
         assert!(c.max_slots >= 1);
         assert!(c.difficulty_threshold <= 64);
+    }
+
+    #[test]
+    fn crew_takes_only_work_the_mirror_says_is_ready() {
+        use crate::mirror::forecast::{Forecast, Kind, Status};
+        let f = |kind, sid: &str, status| Forecast {
+            kind,
+            subject: sid.into(),
+            owner: "1-2".into(),
+            label: "rig".into(),
+            planet: Some("2-2".into()),
+            anchor: 100,
+            range: 14_000,
+            target: 8,
+            ready_height: Some(150),
+            blocks_away: Some(0),
+            difficulty_now: Some(8),
+            status,
+            exact: true,
+            checks: vec![],
+        };
+        let tasks = crew_tasks_from(&[
+            f(Kind::Mine, "5-1", Status::Ready),
+            f(Kind::Refine, "5-2", Status::Blocked),
+            f(Kind::Mine, "5-3", Status::Uncertain),
+            f(Kind::Build, "5-4", Status::Ready),
+        ]);
+        assert_eq!(tasks.len(), 1);
+        assert_eq!((tasks[0].object_id.as_str(), tasks[0].difficulty_target, tasks[0].planet_id.as_deref()), ("5-1", 14_000, Some("2-2")));
     }
 }

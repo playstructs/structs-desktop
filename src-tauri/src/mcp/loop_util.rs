@@ -570,20 +570,12 @@ where
 /// duplicate rather than letting it through to a certain reject.
 pub const BLOCK_WINDOW_MS: f64 = 6_000.0;
 
-/// Message types that consume a player's once-per-block charge. Deliberately a
-/// short allow-list of types confirmed to cost charge: being conservative means
-/// we occasionally fail to suppress a race, never that we wrongly withhold work.
-const CHARGED_TYPES: &[&str] = &[
-    "MsgStructBuildInitiate",
-    "MsgStructDefenseSet",
-    "MsgStructDefenseClear",
-    "MsgStructAttack",
-    "MsgFleetMove",
-    "MsgStructMove",
-];
-
+/// Message types that consume a player's once-per-block charge — the
+/// chain's own list (`mirror::rules::DISCHARGING`, read from the keeper's
+/// handlers). `MsgFleetMove` is not one: the chain neither checks nor spends
+/// charge for it, so reserving charge for a fleet move only delayed it.
 pub fn is_charged_type(type_url: &str) -> bool {
-    CHARGED_TYPES.iter().any(|t| type_url.ends_with(t))
+    crate::mirror::rules::discharges(type_url)
 }
 
 static CHARGE_LEDGER: LazyLock<Mutex<HashMap<String, f64>>> =
@@ -639,17 +631,6 @@ pub fn reserve_charge(player_id: &PlayerId) -> Option<ChargeReservation> {
         *m.entry(player_id.to_string()).or_insert(0) += 1;
     }
     Some(ChargeReservation(player_id.to_string()))
-}
-
-/// Charge a message type consumes on the keeper. A build initiate costs the
-/// struct's build charge (8 for every type the loops build); everything
-/// else charged costs one.
-pub fn charge_cost(type_url: &str) -> u64 {
-    if type_url.ends_with("MsgStructBuildInitiate") {
-        8
-    } else {
-        1
-    }
 }
 
 /// Live charge reservations for a player (ours included).
@@ -710,11 +691,11 @@ pub(crate) fn test_pid(s: &str) -> PlayerId {
 #[cfg(test)]
 mod tests {
     #[test]
-    fn charge_costs_and_reservation_counts() {
+    fn charged_types_and_reservation_counts() {
         use super::*;
-        assert_eq!(charge_cost("/structs.structs.MsgStructBuildInitiate"), 8);
-        assert_eq!(charge_cost("/structs.structs.MsgStructDefenseSet"), 1);
-        assert_eq!(charge_cost("/structs.structs.MsgStructAttack"), 1);
+        assert!(is_charged_type("/structs.structs.MsgStructBuildInitiate"));
+        assert!(is_charged_type("/structs.structs.MsgStructActivate"));
+        assert!(!is_charged_type("/structs.structs.MsgFleetMove"));
         let pid = crate::mcp::loop_util::test_pid("1-777001");
         assert_eq!(charge_reservations(&pid), 0);
         let a = reserve_charge(&pid).unwrap();
@@ -797,7 +778,11 @@ mod tests {
     fn only_charged_message_types_consume_the_block() {
         assert!(is_charged_type("/structs.structs.MsgStructDefenseSet"));
         assert!(is_charged_type("/structs.structs.MsgStructBuildInitiate"));
-        assert!(is_charged_type("/structs.structs.MsgFleetMove"));
+        // The chain neither checks nor spends charge for a fleet move
+        // (msg_server_fleet_move.go); reserving for one only delayed it.
+        assert!(!is_charged_type("/structs.structs.MsgFleetMove"));
+        assert!(is_charged_type("/structs.structs.MsgStructStealthActivate"));
+        assert!(is_charged_type("/structs.structs.MsgStructTrash"));
         // Free traffic must never suppress a later charged action.
         assert!(!is_charged_type("/structs.structs.MsgPermissionGrantOnObject"));
         assert!(!is_charged_type("/cosmos.bank.v1beta1.MsgSend"));

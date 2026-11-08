@@ -95,6 +95,71 @@ pub fn ready_height(start: u64, range: u64, target: u64) -> Option<u64> {
     ready_age(range, target).and_then(|a| start.checked_add(a))
 }
 
+/// Messages that DISCHARGE the player — every handler that checks
+/// `GetCharge()` and then calls `PlayerCache.Discharge()` (lastAction :=
+/// block height): msg_server_struct_{activate, attack, build_initiate,
+/// defense_set, defense_clear, move, stealth_activate, stealth_deactivate,
+/// trash}.go. `MsgFleetMove`, `MsgStructDeactivate` and the proof
+/// completions neither check nor spend charge.
+pub const DISCHARGING: &[&str] = &[
+    "MsgStructActivate",
+    "MsgStructAttack",
+    "MsgStructBuildInitiate",
+    "MsgStructDefenseSet",
+    "MsgStructDefenseClear",
+    "MsgStructMove",
+    "MsgStructStealthActivate",
+    "MsgStructStealthDeactivate",
+    "MsgStructTrash",
+];
+
+/// Does a message of this type URL (or bare name) spend the player's charge?
+pub fn discharges(type_url: &str) -> bool {
+    let name = type_url.rsplit('.').next().unwrap_or(type_url);
+    DISCHARGING.contains(&name)
+}
+
+/// What a completion's proof hashes (`hashInput` in the four completion
+/// handlers): `{struct}MINE{anchor}NONCE{nonce}`, `…REFINE…`, `…BUILD…`, and
+/// for a raid `{fleet}@{planet}RAID{anchor}NONCE{nonce}`.
+pub fn proof_input(kind: crate::mcp::types::TaskType, object_id: &str, raid_planet: Option<&str>, anchor: u64, nonce: &str) -> String {
+    use crate::mcp::types::TaskType;
+    match kind {
+        TaskType::Mine => format!("{object_id}MINE{anchor}NONCE{nonce}"),
+        TaskType::Refine => format!("{object_id}REFINE{anchor}NONCE{nonce}"),
+        TaskType::Build => format!("{object_id}BUILD{anchor}NONCE{nonce}"),
+        TaskType::Raid => format!("{object_id}@{}RAID{anchor}NONCE{nonce}", raid_planet.unwrap_or("")),
+    }
+}
+
+/// `types.HashBuild`: lowercase hex SHA-256 of the input.
+pub fn hash_build(input: &str) -> String {
+    use sha2::{Digest, Sha256};
+    hex::encode(Sha256::digest(input.as_bytes()))
+}
+
+/// Leading hex zeros of a hash string.
+pub fn leading_zeros(hash: &str) -> u64 {
+    hash.bytes().take_while(|b| *b == b'0').count() as u64
+}
+
+/// `types.HashBuildAndCheckDifficulty`: the proof must BE the input's hash and
+/// carry at least `difficulty(age, range)` leading zeros. Returns the chain's
+/// `(valid, achieved)` — `achieved` counts zeros only up to the requirement,
+/// stopping at the first non-zero, exactly as the Go loop does.
+pub fn proof_accepted(input: &str, proof: &str, age: u64, range: u64) -> (bool, u64) {
+    if hash_build(input) != proof {
+        return (false, 0);
+    }
+    let need = difficulty(age, range);
+    let zeros = leading_zeros(proof);
+    if zeros >= need {
+        (true, need)
+    } else {
+        (false, zeros)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -146,6 +211,39 @@ mod tests {
                 assert_eq!(ready_age(row.range, target), *want, "ready_age(range={}, target={target})", row.range);
             }
         }
+    }
+
+    #[derive(Deserialize)]
+    struct ProofCase {
+        input: String,
+        proof: String,
+        age: u64,
+        range: u64,
+        valid: bool,
+        achieved: u64,
+    }
+
+    #[test]
+    fn proof_acceptance_matches_the_chain() {
+        #[derive(Deserialize)]
+        struct G {
+            proofs: Vec<ProofCase>,
+        }
+        let g: G = serde_json::from_str(include_str!("golden/difficulty.json")).unwrap();
+        assert!(g.proofs.len() > 100);
+        for c in g.proofs {
+            assert_eq!(proof_accepted(&c.input, &c.proof, c.age, c.range), (c.valid, c.achieved), "{} age {} range {}", c.input, c.age, c.range);
+        }
+    }
+
+    #[test]
+    fn the_discharge_list_is_the_chains() {
+        assert!(discharges("/structs.structs.MsgStructAttack"));
+        assert!(discharges("/structs.structs.MsgStructStealthDeactivate"));
+        assert!(discharges("MsgStructTrash"));
+        assert!(!discharges("/structs.structs.MsgFleetMove"), "fleet move neither checks nor spends charge");
+        assert!(!discharges("/structs.structs.MsgStructOreMinerComplete"));
+        assert!(!discharges("/structs.structs.MsgStructDeactivate"));
     }
 
     #[test]

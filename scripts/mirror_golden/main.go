@@ -11,6 +11,7 @@ package main
 import (
 	"encoding/json"
 	"os"
+	"strconv"
 )
 
 type inverse struct {
@@ -20,11 +21,23 @@ type inverse struct {
 	ReadyAge []*uint64 `json:"ready_age"`
 }
 
+// A completion as the chain judges it: HashBuildAndCheckDifficulty(input,
+// proof, age, range) -> (valid, achieved).
+type proofCase struct {
+	Input    string `json:"input"`
+	Proof    string `json:"proof"`
+	Age      uint64 `json:"age"`
+	Range    uint64 `json:"range"`
+	Valid    bool   `json:"valid"`
+	Achieved uint64 `json:"achieved"`
+}
+
 type golden struct {
 	Source     string      `json:"source"`
 	SourceSHA  string      `json:"source_sha256"`
 	Difficulty [][3]uint64 `json:"difficulty"` // [age, range, difficulty]
 	Inverse    []inverse   `json:"inverse"`
+	Proofs     []proofCase `json:"proofs"`
 }
 
 func main() {
@@ -75,7 +88,35 @@ func main() {
 		inv = append(inv, row)
 	}
 
-	out := golden{Source: os.Getenv("GOLDEN_SOURCE"), SourceSHA: os.Getenv("GOLDEN_SHA"), Difficulty: cases, Inverse: inv}
+	// Proofs: search nonces for hashes with 0..3 leading zeros, then judge
+	// each (and a deliberately wrong proof) at several ages.
+	var proofs []proofCase
+	inputs := []string{"5-1MINE1000NONCE", "5-2REFINE2000NONCE", "5-3BUILD300NONCE", "9-1@2-1RAID400NONCE"}
+	for _, prefix := range inputs {
+		want := 0
+		for n := 0; n < 200000 && want <= 3; n++ {
+			input := prefix + strconv.Itoa(n)
+			h := HashBuild(input)
+			zeros := 0
+			for zeros < len(h) && h[zeros] == '0' {
+				zeros++
+			}
+			if zeros != want {
+				continue
+			}
+			want++
+			for _, age := range []uint64{0, 1, 10, 1000, 20000, 28000} {
+				for _, r := range []uint64{125, 14000, 28000} {
+					v, a := HashBuildAndCheckDifficulty(input, h, age, r)
+					proofs = append(proofs, proofCase{input, h, age, r, v, a})
+				}
+			}
+			v, a := HashBuildAndCheckDifficulty(input, HashBuild(input+"x"), 28000, 28000)
+			proofs = append(proofs, proofCase{input, HashBuild(input + "x"), 28000, 28000, v, a})
+		}
+	}
+
+	out := golden{Source: os.Getenv("GOLDEN_SOURCE"), SourceSHA: os.Getenv("GOLDEN_SHA"), Difficulty: cases, Inverse: inv, Proofs: proofs}
 	enc := json.NewEncoder(os.Stdout)
 	if err := enc.Encode(out); err != nil {
 		panic(err)

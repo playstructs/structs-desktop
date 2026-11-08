@@ -63,6 +63,10 @@ prost = "0.14"
 async-nats = { version = "0.38", features = ["websockets"] }
 futures-util = "0.3"
 k256 = { version = "0.13", features = ["ecdsa"] }
+ics23 = "0.12"
+tendermint = "0.41"
+tendermint-light-client-verifier = { version = "0.41", default-features = false, features = ["rust-crypto"] }
+prost013 = { version = "0.13", package = "prost" }
 # Native notifications (macOS uses UNUserNotificationCenter via objc2)
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = { version = "0.6", features = ["exception"] }

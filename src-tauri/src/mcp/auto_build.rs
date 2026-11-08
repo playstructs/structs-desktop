@@ -18,7 +18,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tauri::Manager;
 
-use crate::hasher::difficulty::calculate_difficulty;
 use crate::hasher::types::{now_millis, TaskParams, TaskRegistry};
 use crate::mcp::cosmos_client::CosmosClient;
 
@@ -28,6 +27,26 @@ pub(crate) const SLOTS_PER_AMBIT: usize = 4;
 /// `buildCharge` in the synced struct catalogue (1 for every type since
 /// v0.22; it was 8). The old constant until the catalogue has synced, so an
 /// unknown never builds early.
+/// A build the mirror says can be completed now.
+#[derive(Clone, Debug, PartialEq)]
+pub struct BuildPick {
+    pub struct_id: String,
+    pub anchor: u64,
+    /// The type's own build range, from the chain's catalogue.
+    pub range: u64,
+}
+
+/// READY build forecasts per owner. Pure. Blocked (no power to take the
+/// passive draw) and undecidable builds are not hashed.
+pub fn build_plan(forecasts: &[crate::mirror::forecast::Forecast]) -> HashMap<String, Vec<BuildPick>> {
+    use crate::mirror::forecast::{Kind, Status};
+    let mut out: HashMap<String, Vec<BuildPick>> = HashMap::new();
+    for f in forecasts.iter().filter(|f| f.kind == Kind::Build && f.status == Status::Ready && f.anchor > 0) {
+        out.entry(f.owner.clone()).or_default().push(BuildPick { struct_id: f.subject.clone(), anchor: f.anchor, range: f.range });
+    }
+    out
+}
+
 fn build_charge() -> u64 {
     crate::game_state::GAME_STATE
         .read()
@@ -722,6 +741,26 @@ async fn scan(
     // landed yet (that was ~59k LCD requests per launch): wait for it.
     crate::mcp::loop_util::ensure_perception(&client, "auto_build", 120_000.0).await;
     crate::mcp::perception::resolve_pending(&client, 50).await;
+    // Which builds to complete, from one mirror forecast over the team.
+    let owners: Vec<String> = targets.iter().map(|(p, _, _)| p.as_str().to_string()).collect();
+    let opts = crate::mirror::forecast::Options { target: complete_difficulty, within: None, project: false, verify: false };
+    let (plan, tip) = match crate::mirror::forecast_now(None, Some(&owners), &opts).await {
+        Some(now) => (build_plan(&now.forecasts), now.tip),
+        None => (Default::default(), current_block),
+    };
+    let facts: Vec<crate::mirror::verify::Fact> = plan
+        .values()
+        .flatten()
+        .flat_map(|p| {
+            use crate::mirror::verify::{Fact, Store};
+            [
+                Fact { store: Store::Struct, attribute: "status", object: p.struct_id.clone() },
+                Fact { store: Store::Struct, attribute: "blockStartBuild", object: p.struct_id.clone() },
+            ]
+        })
+        .collect();
+    let proven = std::sync::Arc::new(crate::mirror::verify::prove_for("auto_build", &facts).await);
+    let plan = std::sync::Arc::new(plan);
     crate::mcp::loop_util::for_each_player_concurrent(
         targets,
         crate::mcp::capacity::reads_fanout(),
@@ -732,6 +771,8 @@ async fn scan(
             let completes = completes_c.clone();
             let initiates = initiates_c.clone();
             let run = run_c.clone();
+            let plan = plan.clone();
+            let proven = proven.clone();
             async move {
                 // Stand down while this player is answering a raid: charge is
                 // one action per block and the response needs it. Deferral
@@ -754,12 +795,13 @@ async fn scan(
                     return;
                 }
 
-                // ── 1. Complete ripe building structs ──
-                for s in &structs {
-                    if parse_bool(s.get("is_destroyed")) {
-                        continue;
-                    }
-                    let Some(sid) = s.get("id").and_then(|x| x.as_str()).map(String::from) else { continue };
+                // ── 1. Complete ripe builds: the mirror decides. ──
+                // A build is hashed only when the forecast is READY: ripe at
+                // the execution height under the type's own build range, and
+                // power to spare once the build draw is released and the
+                // passive draw added (the chain's completion check).
+                for pick in plan.get(pid.as_str()).into_iter().flatten() {
+                    let sid = pick.struct_id.clone();
                     if BUILT_CACHE.lock().unwrap().contains(&sid) {
                         continue;
                     }
@@ -768,66 +810,48 @@ async fn scan(
                             continue;
                         }
                     }
-                    let entity = match crate::mcp::loop_util::scan_entity(&client, "struct", &sid).await {
-                        Ok((e, _)) => e,
-                        Err(_) => continue,
-                    };
-                    let sa = entity.get("structAttributes");
-                    if parse_bool(sa.and_then(|x| x.get("isBuilt"))) {
-                        BUILT_CACHE.lock().unwrap().insert(sid);
-                        continue;
-                    }
-                    let anchor = read_u64_field(sa, "blockStartBuild");
-                    if anchor == 0 {
-                        continue;
-                    }
-                    let type_id = s.get("type").map(|x| match x {
-                        Value::Number(n) => n.to_string(),
-                        Value::String(t) => t.clone(),
-                        _ => String::new(),
-                    });
-                    let difficulty_target = type_id
-                        .as_ref()
-                        .and_then(|t| {
-                            crate::game_state::GAME_STATE.read().ok().and_then(|g| g.struct_types.get(t).map(|st| st.build_difficulty))
-                        })
-                        .unwrap_or(0);
-                    if difficulty_target == 0 {
-                        continue;
-                    }
-                    let age = current_block.saturating_sub(anchor);
-                    if calculate_difficulty(age, difficulty_target) > complete_difficulty {
-                        continue;
-                    }
                     // ── CHAIN RE-VERIFY before committing GPU work. ── The
-                    // struct came from the perception snapshot; the build
-                    // clock is the proof anchor, so read it from the chain
-                    // once per ISSUED completion (not once per struct per scan).
-                    let mut anchor = anchor;
-                    if scanned_from_snapshot {
-                        let Ok(sid_t) = crate::mcp::types::StructId::parse(&sid) else { continue };
-                        let Ok(live) = crate::mcp::verify::struct_state(&client, &sid_t).await else { continue };
-                        if live.built || live.destroyed {
-                            BUILT_CACHE.lock().unwrap().insert(sid.clone());
+                    // forecast ran on the snapshot; the build clock is the
+                    // proof anchor, so read it from the chain once per ISSUED
+                    // completion (not once per struct per scan).
+                    use crate::mirror::verify::Store;
+                    let Ok(sid_t) = crate::mcp::types::StructId::parse(&sid) else { continue };
+                    let proven_status = proven.as_ref().as_ref().and_then(|b| b.get(Store::Struct, "status", &sid));
+                    let proven_clock = proven.as_ref().as_ref().and_then(|b| b.get(Store::Struct, "blockStartBuild", &sid));
+                    let (built, destroyed) = match proven_status {
+                        Some(st) => (st & crate::mcp::perception::status::BUILT != 0, st & crate::mcp::perception::status::DESTROYED != 0),
+                        None => {
+                            let Ok(live) = crate::mcp::verify::struct_state(&client, &sid_t).await else { continue };
+                            (live.built, live.destroyed)
+                        }
+                    };
+                    if built || destroyed {
+                        BUILT_CACHE.lock().unwrap().insert(sid.clone());
+                        continue;
+                    }
+                    let live_anchor = match proven_clock {
+                        Some(c) => crate::mcp::types::Block::new(c),
+                        None => {
+                            let Ok(a) = crate::mcp::verify::build_anchor(&client, &sid_t).await else { continue };
+                            a
+                        }
+                    };
+                    let mut anchor = pick.anchor;
+                    if live_anchor.get() != anchor {
+                        crate::mcp::telemetry::tlog(
+                            "auto_build",
+                            crate::mcp::telemetry::Sev::Notice,
+                            format!("perception drift: {sid} build anchor {anchor} forecast vs {} on chain", live_anchor.get()),
+                        );
+                        anchor = live_anchor.get();
+                        let exec = crate::mirror::rules::earliest_execution(tip);
+                        let ripe = anchor != 0
+                            && crate::mirror::rules::ready_height(anchor, pick.range, complete_difficulty).is_some_and(|h| h <= exec);
+                        if !ripe {
                             continue;
                         }
-                        let Ok(live_anchor) = crate::mcp::verify::build_anchor(&client, &sid_t).await else { continue };
-                        let live_anchor = live_anchor.get();
-                        if live_anchor != anchor {
-                            crate::mcp::telemetry::tlog(
-                                "auto_build",
-                                crate::mcp::telemetry::Sev::Notice,
-                                format!("perception drift: {sid} build anchor {anchor} scanned vs {live_anchor} on chain"),
-                            );
-                            anchor = live_anchor;
-                            if anchor == 0
-                                || calculate_difficulty(current_block.saturating_sub(anchor), difficulty_target) > complete_difficulty
-                            {
-                                continue;
-                            }
-                        }
                     }
-                    let params = TaskParams::for_ore(&sid, "BUILD", anchor, difficulty_target);
+                    let params = TaskParams::for_ore(&sid, "BUILD", anchor, pick.range);
                     if crate::hasher::start_hash_task_core(params, app.clone(), &registry).is_ok() {
                         if let Some(idx) = idx_opt {
                             crate::hasher::register_vplayer_hash(sid.clone(), idx, crate::mcp::types::TaskType::Build);
@@ -837,7 +861,7 @@ async fn scan(
                         crate::mcp::telemetry::tlog(
                             "auto_build",
                             crate::mcp::telemetry::Sev::Info,
-                            format!("complete {} (age {}, build-difficulty ≤ {})", sid, age, complete_difficulty),
+                            format!("complete {sid} (anchor {anchor}, range {}, aim {complete_difficulty})", pick.range),
                         );
                     }
                 }
@@ -860,7 +884,10 @@ async fn scan(
                 };
                 let ga = player.get("gridAttributes");
                 let last_action = read_u64_field(ga, "lastAction");
-                let charge = crate::mcp::types::Block::new(current_block).since(crate::mcp::types::Block::new(last_action));
+                // The chain's charge at the height an initiate signed now would
+                // execute (mirror::rules), against the catalogue's build
+                // charge; the pre-sign gate re-checks the chosen type's own.
+                let charge = crate::mirror::rules::charge(crate::mirror::rules::earliest_execution(current_block), last_action);
                 if charge < build_charge() {
                     return; // not enough charge to build this scan
                 }
@@ -1524,5 +1551,28 @@ mod tests {
         occ.insert(2);
         occ.insert(3);
         assert_eq!(first_free(&occ), None); // full
+    }
+
+    #[test]
+    fn only_ready_builds_are_completed_with_the_types_own_range() {
+        use crate::mirror::forecast::{Forecast, Kind, Status};
+        let f = |sid: &str, status, anchor| Forecast {
+            kind: Kind::Build,
+            subject: sid.into(),
+            owner: "1-1".into(),
+            label: "Command Ship".into(),
+            planet: None,
+            anchor,
+            range: 200,
+            target: 4,
+            ready_height: Some(300),
+            blocks_away: Some(0),
+            difficulty_now: Some(4),
+            status,
+            exact: false,
+            checks: vec![],
+        };
+        let p = build_plan(&[f("5-1", Status::Ready, 100), f("5-2", Status::Blocked, 100), f("5-3", Status::Uncertain, 100), f("5-4", Status::Ready, 0)]);
+        assert_eq!(p["1-1"], vec![BuildPick { struct_id: "5-1".into(), anchor: 100, range: 200 }]);
     }
 }

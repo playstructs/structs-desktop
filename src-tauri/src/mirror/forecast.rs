@@ -44,6 +44,10 @@ impl Check {
     fn unknown(rule: &'static str, detail: impl Into<String>) -> Check {
         Check { rule, state: CheckState::Unknown, exact: false, detail: detail.into() }
     }
+    /// [`Check::known`], for the transition module.
+    pub(crate) fn known_pub(rule: &'static str, v: Option<bool>, detail: impl Into<String>) -> Check {
+        Check::known(rule, v, detail)
+    }
     /// An exact check when the input is known, otherwise unknown.
     fn known(rule: &'static str, v: Option<bool>, detail: impl Into<String>) -> Check {
         match v {
@@ -85,6 +89,8 @@ pub struct Forecast {
     pub owner: String,
     /// Struct type name, or the charge-gated action.
     pub label: String,
+    /// The planet whose clock and state the rule reads (mine, refine, raid).
+    pub planet: Option<String>,
     /// The anchor block the rule counts from (work start, lastAction).
     pub anchor: u64,
     /// The difficulty range (work), or the charge required (charge).
@@ -99,8 +105,11 @@ pub struct Forecast {
     /// The difficulty a proof would need at the earliest execution height.
     pub difficulty_now: Option<u64>,
     pub status: Status,
-    /// Every check was decided from the field the chain itself reads. A
-    /// `ready` forecast with `exact: false` rests on at least one estimate.
+    /// Every check was computed from the field the chain itself reads, with
+    /// the chain's arithmetic. This is about the CALCULATION: it says nothing
+    /// about how fresh or coherent those inputs are — that is the world's
+    /// provenance. A `ready` forecast with `exact: false` rests on at least
+    /// one estimate.
     pub exact: bool,
     pub checks: Vec<Check>,
 }
@@ -112,11 +121,15 @@ pub struct Options {
     /// Only forecasts satisfied within this many blocks of the earliest
     /// execution height (blocked and uncertain ones are always kept).
     pub within: Option<u64>,
+    /// Also project each scoped player's planet run (mirror::project).
+    pub project: bool,
+    /// Also prove the facts behind scoped forecasts (mirror::verify).
+    pub verify: bool,
 }
 
 impl Default for Options {
     fn default() -> Self {
-        Options { target: 4, within: None }
+        Options { target: 4, within: None, project: false, verify: false }
     }
 }
 
@@ -133,7 +146,7 @@ fn status_of(ready_height: Option<u64>, exec: u64, checks: &[Check]) -> Status {
 
 /// `StructCache.ReadinessCheck` (keeper/struct_cache.go): not destroyed,
 /// struct online, owner online.
-fn readiness(s: &StructState, owner: Option<&PlayerState>) -> Vec<Check> {
+pub(crate) fn readiness(s: &StructState, owner: Option<&PlayerState>) -> Vec<Check> {
     vec![
         Check::exact("destroyed", !s.has(status::DESTROYED), format!("status {}", s.status)),
         Check::exact("offline", s.has(status::ONLINE), format!("status {}", s.status)),
@@ -191,7 +204,7 @@ fn headroom(p: &PlayerState) -> Option<Headroom> {
 }
 
 /// `PlayerCache.IsOnline`.
-fn owner_power(p: Option<&PlayerState>) -> Check {
+pub(crate) fn owner_power(p: Option<&PlayerState>) -> Check {
     let Some(p) = p else { return Check::unknown("player_offline", "owner not in the snapshot") };
     match headroom(p) {
         Some(h) if h.load > h.capacity => Check::exact("player_offline", false, format!("load {} exceeds {} ({})", h.load, h.capacity, h.basis)),
@@ -203,7 +216,7 @@ fn owner_power(p: Option<&PlayerState>) -> Check {
 
 /// `CanSupportLoadAddition(passiveDraw)` at build completion, after the
 /// build draw is released (msg_server_struct_build_complete.go).
-fn build_headroom(p: Option<&PlayerState>, build_draw: Option<u64>, passive_draw: Option<u64>) -> Check {
+pub(crate) fn build_headroom(p: Option<&PlayerState>, build_draw: Option<u64>, passive_draw: Option<u64>) -> Check {
     let (Some(p), Some(bd), Some(pd)) = (p, build_draw, passive_draw) else {
         return Check::unknown("capacity_exceeded", "owner power or the type's build/passive draw not known");
     };
@@ -228,7 +241,7 @@ fn build_headroom(p: Option<&PlayerState>, build_draw: Option<u64>, passive_draw
 /// The planet row carries the pointer, but live events patch fleet rows and
 /// never the planet's list pointers, so the pointer is trusted only when the
 /// fleet rows agree with it (the chain's own list rule, applied to them).
-fn not_under_raid(p: &PlanetState) -> Check {
+pub(crate) fn not_under_raid(p: &PlanetState) -> Check {
     let scan = p.visitors.is_empty();
     match p.location_list_start.as_deref() {
         Some(start) if start.is_empty() == scan => Check::exact(
@@ -248,13 +261,29 @@ fn not_under_raid(p: &PlanetState) -> Check {
     }
 }
 
+/// `CanOreMinePlanet`: `oreMiningActiveQuantity > 0`.
+pub(crate) fn mining_active(p: &PlanetState) -> Check {
+    Check::exact("not_mining", p.mining_active > 0, format!("oreMiningActiveQuantity {}", p.mining_active))
+}
+
+/// `CanOreRefine`: `oreRefiningActiveQuantity > 0`.
+pub(crate) fn refining_active(p: &PlanetState) -> Check {
+    Check::exact("not_refining", p.refining_active > 0, format!("oreRefiningActiveQuantity {}", p.refining_active))
+}
+
+/// `CanOreRefine`: the owner has stored ore.
+pub(crate) fn stored_ore(owner: Option<&PlayerState>) -> Check {
+    let ore = owner.and_then(|o| o.stored_ore);
+    Check::known("ore", ore.map(|o| o > 0), format!("stored ore {ore:?}"))
+}
+
 /// `IsDefenderCommandStructVulnerable`, the raid-completion gate.
-fn shields_down(p: &PlanetState) -> Check {
+pub(crate) fn shields_down(p: &PlanetState) -> Check {
     Check::known("shields_active", p.defender.vulnerable, p.defender.reason.clone())
 }
 
 /// A raid can only complete while a raider is still listed at the planet.
-fn raider_present(p: &PlanetState) -> Check {
+pub(crate) fn raider_present(p: &PlanetState) -> Check {
     let present = match p.location_list_start.as_deref() {
         Some(start) if start.is_empty() == p.visitors.is_empty() => Some(!start.is_empty()),
         Some(_) => None,
@@ -265,6 +294,7 @@ fn raider_present(p: &PlanetState) -> Check {
 
 struct Work<'a> {
     kind: Kind,
+    planet: Option<&'a str>,
     subject: &'a str,
     owner: &'a str,
     label: &'a str,
@@ -281,6 +311,7 @@ fn work_forecast(w: Work<'_>, exec: u64, target: u64) -> Forecast {
         subject: w.subject.to_string(),
         owner: w.owner.to_string(),
         label: w.label.to_string(),
+        planet: w.planet.map(String::from),
         anchor: w.anchor,
         range: w.range,
         target,
@@ -309,7 +340,7 @@ pub fn forecast(world: &World, tip: u64, opts: &Options) -> Vec<Forecast> {
         if !s.has(status::BUILT) && s.build_start > 0 && t.build_difficulty > 0 {
             let checks = vec![build_headroom(owner, t.build_draw, t.passive_draw)];
             out.push(work_forecast(
-                Work { kind: Kind::Build, subject: &s.id, owner: &s.owner, label: &t.name, anchor: s.build_start, range: t.build_difficulty, checks },
+                Work { kind: Kind::Build, planet: None, subject: &s.id, owner: &s.owner, label: &t.name, anchor: s.build_start, range: t.build_difficulty, checks },
                 exec,
                 target,
             ));
@@ -323,12 +354,12 @@ pub fn forecast(world: &World, tip: u64, opts: &Options) -> Vec<Forecast> {
         if t.ore_mining_difficulty > 0 {
             if let Some(p) = planet {
                 let mut checks = readiness(s, owner);
-                checks.push(Check::exact("not_mining", p.mining_active > 0, format!("oreMiningActiveQuantity {}", p.mining_active)));
+                checks.push(mining_active(p));
                 checks.push(not_under_raid(p));
                 checks.push(Check::known("complete", p.complete.map(|c| !c), "planet status"));
                 checks.push(Check::known("empty", p.buried_ore.map(|o| o > 0), format!("buried ore {:?}", p.buried_ore)));
                 out.push(work_forecast(
-                    Work { kind: Kind::Mine, subject: &s.id, owner: &s.owner, label: &t.name, anchor: p.mine_start, range: t.ore_mining_difficulty, checks },
+                    Work { kind: Kind::Mine, planet: Some(&p.id), subject: &s.id, owner: &s.owner, label: &t.name, anchor: p.mine_start, range: t.ore_mining_difficulty, checks },
                     exec,
                     target,
                 ));
@@ -339,11 +370,11 @@ pub fn forecast(world: &World, tip: u64, opts: &Options) -> Vec<Forecast> {
         if t.ore_refining_difficulty > 0 {
             if let Some(p) = planet {
                 let mut checks = readiness(s, owner);
-                checks.push(Check::exact("not_refining", p.refining_active > 0, format!("oreRefiningActiveQuantity {}", p.refining_active)));
+                checks.push(refining_active(p));
                 checks.push(not_under_raid(p));
-                checks.push(Check::known("ore", owner.and_then(|o| o.stored_ore).map(|o| o > 0), format!("stored ore {:?}", owner.and_then(|o| o.stored_ore))));
+                checks.push(stored_ore(owner));
                 out.push(work_forecast(
-                    Work { kind: Kind::Refine, subject: &s.id, owner: &s.owner, label: &t.name, anchor: p.refine_start, range: t.ore_refining_difficulty, checks },
+                    Work { kind: Kind::Refine, planet: Some(&p.id), subject: &s.id, owner: &s.owner, label: &t.name, anchor: p.refine_start, range: t.ore_refining_difficulty, checks },
                     exec,
                     target,
                 ));
@@ -357,7 +388,7 @@ pub fn forecast(world: &World, tip: u64, opts: &Options) -> Vec<Forecast> {
     for p in planets {
         let checks = vec![shields_down(p), raider_present(p)];
         out.push(work_forecast(
-            Work { kind: Kind::Raid, subject: &p.id, owner: &p.owner, label: "raid", anchor: p.raid_start, range: p.shield, checks },
+            Work { kind: Kind::Raid, planet: Some(&p.id), subject: &p.id, owner: &p.owner, label: "raid", anchor: p.raid_start, range: p.shield, checks },
             exec,
             target,
         ));
@@ -386,6 +417,7 @@ pub fn forecast(world: &World, tip: u64, opts: &Options) -> Vec<Forecast> {
                 subject: p.id.clone(),
                 owner: p.id.clone(),
                 label: action.to_string(),
+                planet: None,
                 anchor: last,
                 range: need,
                 target: 0,
@@ -471,7 +503,7 @@ mod tests {
 
     #[test]
     fn mine_ready_height_is_the_exact_inverse_from_the_planet_clock() {
-        let f = forecast(&world(), 1_000, &Options { target: 4, within: None });
+        let f = forecast(&world(), 1_000, &Options { target: 4, within: None, project: false, verify: false });
         let m = find(&f, Kind::Mine, "5-1");
         let want = 900 + rules::ready_age(28_000, 4).unwrap();
         assert_eq!(m.ready_height, Some(want));
@@ -528,7 +560,7 @@ mod tests {
 
     #[test]
     fn build_forecasts_count_from_the_build_start() {
-        let f = forecast(&world(), 1_000, &Options { target: 1, within: None });
+        let f = forecast(&world(), 1_000, &Options { target: 1, within: None, project: false, verify: false });
         let b = find(&f, Kind::Build, "5-3");
         assert_eq!(b.ready_height, Some(990 + 100), "difficulty 1 at age == range");
     }
@@ -549,14 +581,14 @@ mod tests {
     fn a_raid_in_progress_uses_the_shield_as_its_range() {
         let mut w = world();
         w.planets.get_mut("2-1").unwrap().raid_start = 1_000;
-        let f = forecast(&w, 1_000, &Options { target: 1, within: None });
+        let f = forecast(&w, 1_000, &Options { target: 1, within: None, project: false, verify: false });
         let r = find(&f, Kind::Raid, "2-1");
         assert_eq!((r.range, r.ready_height), (125, Some(1_125)));
     }
 
     #[test]
     fn within_drops_distant_waits_but_keeps_problems() {
-        let f = forecast(&world(), 1_000, &Options { target: 1, within: Some(10) });
+        let f = forecast(&world(), 1_000, &Options { target: 1, within: Some(10), project: false, verify: false });
         assert!(f.iter().all(|x| x.ready_height.map_or(true, |h| h <= 1_011) || matches!(x.status, Status::Blocked | Status::Uncertain)));
         assert!(f.iter().any(|x| x.kind == Kind::Refine), "the blocked refine is kept");
     }
@@ -652,12 +684,12 @@ mod tests {
         p.location_list_start = Some("9-7".into());
         p.visitors = vec!["9-7".into()];
         p.defender = Defender { vulnerable: Some(true), reason: "Command Ship 5-9 offline".into() };
-        let f = forecast(&w, 2_000, &Options { target: 1, within: None });
+        let f = forecast(&w, 2_000, &Options { target: 1, within: None, project: false, verify: false });
         let r = find(&f, Kind::Raid, "2-1");
         assert_eq!((r.status, r.exact), (Status::Ready, true));
 
         w.planets.get_mut("2-1").unwrap().defender = Defender { vulnerable: Some(false), reason: "online on station".into() };
-        let f = forecast(&w, 2_000, &Options { target: 1, within: None });
+        let f = forecast(&w, 2_000, &Options { target: 1, within: None, project: false, verify: false });
         assert_eq!(find(&f, Kind::Raid, "2-1").status, Status::Blocked);
     }
 

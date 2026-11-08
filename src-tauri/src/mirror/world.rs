@@ -25,7 +25,10 @@ pub struct Provenance {
     /// events are applied on top, so the world is only known to be ONE chain
     /// state when `min_height == height`.
     pub min_height: u64,
-    /// `min_height == height`: every row describes the same block.
+    /// Evidence that every row describes the same block: an LCD walk pinned
+    /// to one height, or one whose lowest and highest PAGE heights match.
+    /// False is "not shown", not "known to differ" — guild snapshots, whose
+    /// pages carry no heights, report the indexer's before/after range.
     pub coherent: bool,
     /// Every bulk page was served pinned to `height` (an LCD walk with the
     /// height header): coherence proven by the node, not inferred.
@@ -50,10 +53,34 @@ pub struct TypeRules {
     pub ore_refining_difficulty: u64,
     /// Per-action charge requirements the chain checks (`< …Charge` refuses).
     pub charges: Vec<(&'static str, u64)>,
+    /// Every charge the chain checks against this type, `None` = not in the
+    /// catalogue (unknown, never free).
+    pub charge: ChargeCosts,
     /// Load held while building, released at completion; `None` = not known.
     pub build_draw: Option<u64>,
     /// Load the built struct draws from then on; `None` = not known.
     pub passive_draw: Option<u64>,
+}
+
+/// The StructType charge fields the discharging handlers compare against.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ChargeCosts {
+    pub build: Option<u64>,
+    pub activate: Option<u64>,
+    pub r#move: Option<u64>,
+    pub defend_change: Option<u64>,
+    pub stealth_activate: Option<u64>,
+    pub primary_weapon: Option<u64>,
+    pub secondary_weapon: Option<u64>,
+}
+
+/// A fleet of an owner in scope: where it is.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct FleetState {
+    pub id: String,
+    pub owner: String,
+    /// The planet the fleet is at, when it is at one.
+    pub planet: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -179,6 +206,7 @@ pub struct World {
     pub players: HashMap<String, PlayerState>,
     pub planets: HashMap<String, PlanetState>,
     pub structs: HashMap<String, StructState>,
+    pub fleets: HashMap<String, FleetState>,
     pub types: HashMap<String, TypeRules>,
 }
 
@@ -209,13 +237,16 @@ impl World {
         source: &str,
         owners: Option<&[String]>,
     ) -> World {
-        let wanted = |owner: &str| owners.map_or(true, |o| o.iter().any(|x| x == owner));
+        // A set, not a scan of the list: a team scope is thousands of owners
+        // against hundreds of thousands of struct rows.
+        let owner_set: Option<std::collections::HashSet<&str>> = owners.map(|o| o.iter().map(String::as_str).collect());
+        let wanted = |owner: &str| owner_set.as_ref().map_or(true, |o| o.contains(owner));
         let mut w = World {
             provenance: Some(Provenance {
                 rules: super::rules::RULES,
                 height: snap.height,
                 min_height: snap.min_height,
-                coherent: snap.min_height == snap.height && snap.height > 0,
+                coherent: snap.pinned || (snap.min_height == snap.height && snap.height > 0 && snap.page_heights),
                 pinned: snap.pinned,
                 replay_gap: snap.replay_gap,
                 source: source.to_string(),
@@ -246,6 +277,15 @@ impl World {
                     planet,
                 },
             );
+        }
+
+        for (id, f) in &snap.fleets {
+            let owner = s(f, "owner");
+            if !wanted(&owner) {
+                continue;
+            }
+            let planet = (s(f, "locationType") == "planet").then(|| s(f, "locationId")).filter(|p| !p.is_empty());
+            w.fleets.insert(id.clone(), FleetState { id: id.clone(), owner, planet });
         }
 
         let mut player_ids: Vec<String> = w.structs.values().map(|s| s.owner.clone()).collect();
@@ -283,6 +323,7 @@ impl World {
 
         let mut planet_ids: Vec<String> = w.structs.values().filter_map(|s| s.planet.clone()).collect();
         planet_ids.extend(w.players.keys().filter_map(|p| snap.player_row(p).map(|r| s(r, "planetId"))));
+        planet_ids.extend(w.fleets.values().filter_map(|f| f.planet.clone()));
         planet_ids.retain(|p| !p.is_empty());
         planet_ids.sort();
         planet_ids.dedup();
@@ -382,6 +423,15 @@ pub fn types_from_game_state(gs: &crate::game_state::GameStateSync) -> HashMap<S
                     ore_mining_difficulty: t.ore_mining_difficulty,
                     ore_refining_difficulty: t.ore_refining_difficulty,
                     charges,
+                    charge: ChargeCosts {
+                        build: t.build_charge,
+                        activate: t.activate_charge,
+                        r#move: t.move_charge,
+                        defend_change: t.defend_change_charge,
+                        stealth_activate: t.stealth_activate_charge,
+                        primary_weapon: t.primary_weapon_charge,
+                        secondary_weapon: t.secondary_weapon_charge,
+                    },
                     build_draw: t.build_draw,
                     passive_draw: t.passive_draw.filter(|d| *d >= 0.0).map(|d| d as u64),
                 },
@@ -390,6 +440,7 @@ pub fn types_from_game_state(gs: &crate::game_state::GameStateSync) -> HashMap<S
         .collect()
 }
 
+#[cfg(test)]
 /// The catalogue from an LCD `/structs/struct_type` page (`{StructType: […]}`),
 /// numbers as strings. The chain's live catalogue, never genesis (they differ).
 pub fn types_from_lcd(page: &Value) -> HashMap<String, TypeRules> {
@@ -417,6 +468,15 @@ pub fn types_from_lcd(page: &Value) -> HashMap<String, TypeRules> {
                     ore_mining_difficulty: n(t, "oreMiningDifficulty"),
                     ore_refining_difficulty: n(t, "oreRefiningDifficulty"),
                     charges,
+                    charge: ChargeCosts {
+                        build: crate::mcp::types::numeric_u64(t.get("buildCharge")),
+                        activate: crate::mcp::types::numeric_u64(t.get("activateCharge")),
+                        r#move: crate::mcp::types::numeric_u64(t.get("moveCharge")),
+                        defend_change: crate::mcp::types::numeric_u64(t.get("defendChangeCharge")),
+                        stealth_activate: crate::mcp::types::numeric_u64(t.get("stealthActivateCharge")),
+                        primary_weapon: crate::mcp::types::numeric_u64(t.get("primaryWeaponCharge")),
+                        secondary_weapon: crate::mcp::types::numeric_u64(t.get("secondaryWeaponCharge")),
+                    },
                     build_draw: crate::mcp::types::numeric_u64(t.get("buildDraw")),
                     passive_draw: crate::mcp::types::numeric_u64(t.get("passiveDraw")),
                 },
@@ -493,6 +553,19 @@ mod tests {
         s.players.insert("1-2".into(), json!({"id":"1-2","fleetId":"9-2","planetId":"2-2"}));
         s.fleets.insert("9-2".into(), json!({"id":"9-2","owner":"1-2","status":"away","locationType":"planet","locationId":"2-1"}));
         assert_eq!(world(&s).planets["2-1"].visitors, vec!["9-2".to_string()]);
+    }
+
+    #[test]
+    fn equal_heights_are_coherent_only_with_page_evidence() {
+        // A guild snapshot: one height on both ends, but from the indexer's
+        // before/after bracket, not from the pages.
+        let mut s = snap("onStation", ONLINE);
+        assert!(!world(&s).provenance.unwrap().coherent);
+        s.page_heights = true;
+        assert!(world(&s).provenance.unwrap().coherent, "LCD pages all served at one height");
+        s.page_heights = false;
+        s.pinned = true;
+        assert!(world(&s).provenance.unwrap().coherent, "pinned");
     }
 
     #[test]

@@ -17,19 +17,14 @@ use std::sync::{Arc, LazyLock, Mutex, RwLock};
 use serde::{Deserialize, Serialize};
 use tauri::Manager;
 
-use crate::hasher::difficulty::calculate_difficulty;
 use crate::hasher::types::{now_millis, TaskParams, TaskRegistry};
 use crate::mcp::cosmos_client::CosmosClient;
 
 const FILENAME: &str = "auto_harvest.json";
-// Pub: the roster sweep reuses these to estimate per-player cycle ETAs.
+// The roster sweep's per-player cycle ETA model. The harvest scan itself
+// takes each rig's range from the chain's struct-type catalogue (mirror).
 pub const MINE_TARGET: u64 = 14_000;
 pub const REFINE_TARGET: u64 = 28_000;
-pub const EXTRACTOR_TYPE: &str = "14";
-// Ore Refinery is struct type 15 (verified live: worker refinery entities report
-// `"type": 15, "type_name": "Ore Refinery"`). Was "16", so auto-refine never matched
-// a refinery and the refine step of the flywheel never fired.
-pub const REFINERY_TYPE: &str = "15";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AutoHarvestConfig {
@@ -99,23 +94,90 @@ pub fn set(cfg: AutoHarvestConfig) {
     crate::mcp::config_store::save_config(FILENAME, &cfg);
 }
 
-/// The decision: is a struct ripe to harvest at the given threshold?
+/// Is work aged `age` against `difficulty_target` ripe at the threshold?
+/// The chain's own integer curve (mirror::rules).
 pub fn is_ripe(age: u64, difficulty_target: u64, threshold: u64) -> bool {
-    calculate_difficulty(age, difficulty_target) <= threshold
+    crate::mirror::rules::difficulty(age, difficulty_target) <= threshold
 }
 
-/// The anchor age (in blocks) at which a proof becomes "ripe" for the given
-/// threshold — the inverse of `calculate_difficulty`:
-///   difficulty(age) = 64 − floor(log10(age)/log10(target)·63) ≤ t
-///   ⇒ age ≥ target^((64−t)/63)
-/// Used by the roster sweep to estimate time-to-next-completion per player.
+/// The anchor age at which work becomes ripe at the threshold: the exact
+/// inverse of the chain's curve (mirror::rules::ready_age). Used by the
+/// roster sweep for per-player cycle ETAs.
 pub fn ripe_age(difficulty_target: u64, threshold: u64) -> u64 {
-    let t = threshold.min(64) as f64;
-    let exp = (64.0 - t) / 63.0;
-    (difficulty_target as f64).powf(exp).ceil() as u64
+    crate::mirror::rules::ready_age(difficulty_target, threshold).unwrap_or(difficulty_target)
 }
 
-use crate::mcp::loop_util::{extract_type_id, parse_bool};
+/// One ripe rig the mirror says the chain will accept work from.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Pick {
+    pub struct_id: String,
+    pub kind: crate::mcp::types::TaskType,
+    pub anchor: u64,
+    /// The struct TYPE's own difficulty range, from the chain's catalogue.
+    pub range: u64,
+    pub planet: String,
+}
+
+/// What a scan does, decided from the mirror's forecasts.
+#[derive(Debug, Default)]
+pub struct Plan {
+    /// Ripe, accepted work per owner.
+    pub picks: std::collections::HashMap<String, Vec<Pick>>,
+    /// Owners whose extractor stands on a planet with no buried ore — the
+    /// chain's own `empty` refusal, and the cue to explore.
+    pub mined_out: std::collections::HashSet<String>,
+    /// Ripe-or-blocked work NOT started, by the reason the chain would give.
+    pub skipped: std::collections::BTreeMap<&'static str, u64>,
+}
+
+/// Turn forecasts into a scan plan. Pure. Work is started only when the
+/// forecast is READY: ripe at the execution height and every precondition the
+/// chain checks met. Blocked work is counted by the blocking rule; work with
+/// an undecidable precondition is counted as `unsure` and not hashed — GPU
+/// time is never spent on a proof the chain may refuse for a reason we can
+/// already see.
+pub fn plan(forecasts: &[crate::mirror::forecast::Forecast], may_refine: impl Fn(&str) -> bool) -> Plan {
+    use crate::mirror::forecast::{CheckState, Kind, Status};
+    use crate::mcp::types::TaskType;
+    let mut out = Plan::default();
+    for f in forecasts {
+        let kind = match f.kind {
+            Kind::Mine => TaskType::Mine,
+            Kind::Refine if may_refine(&f.owner) => TaskType::Refine,
+            _ => continue,
+        };
+        if kind == TaskType::Mine
+            && f.checks.iter().any(|c| c.rule == "empty" && c.state == CheckState::Blocked && c.exact)
+        {
+            out.mined_out.insert(f.owner.clone());
+        }
+        match f.status {
+            Status::Waiting => {}
+            Status::Blocked => {
+                for c in f.checks.iter().filter(|c| c.state == CheckState::Blocked) {
+                    *out.skipped.entry(c.rule).or_insert(0) += 1;
+                }
+            }
+            Status::Uncertain => *out.skipped.entry("unsure").or_insert(0) += 1,
+            Status::Ready => {
+                let Some(planet) = f.planet.clone() else { continue };
+                if f.anchor == 0 {
+                    *out.skipped.entry("no_clock").or_insert(0) += 1;
+                    continue;
+                }
+                out.picks.entry(f.owner.clone()).or_default().push(Pick {
+                    struct_id: f.subject.clone(),
+                    kind,
+                    anchor: f.anchor,
+                    range: f.range,
+                    planet,
+                });
+            }
+        }
+    }
+    out
+}
+
 
 /// Invoked each sync tick (cheap when throttled). Scans owned extractors (and
 /// refineries if enabled) and kicks off a PoW task for each ripe struct that
@@ -214,25 +276,70 @@ async fn scan(
             })
             .collect();
 
+    // Keep the shared perception snapshot current (no-op if fresh or already
+    // refreshing), and never fan out to the chain just because the launch
+    // refresh has not landed yet (that was ~59k LCD requests per launch).
+    crate::mcp::perception::maybe_refresh(&client);
+    crate::mcp::loop_util::ensure_perception(&client, "auto_harvest", 120_000.0).await;
+    crate::mcp::perception::resolve_pending(&client, 50).await;
+
+    // ── WHAT TO HASH: the mirror decides. ──
+    // One forecast over the whole team from the snapshot: the chain's own
+    // rules — the planet's ore clock, the TYPE's own difficulty range, the
+    // integer difficulty curve at the height a completion would execute — and
+    // every precondition the chain checks beside them (offline, owner power,
+    // no buried ore, no stored ore, under raid, mining/refining inactive).
+    // Only work the chain would accept is started; anything blocked or
+    // undecidable is counted, never hashed. This is where the futile-mining
+    // and futile-refine guards now live, as the chain's rules rather than
+    // hand-written skips.
+    let owners: Vec<String> = targets.iter().map(|(p, _, _)| p.as_str().to_string()).collect();
+    let opts = crate::mirror::forecast::Options { target: cfg.difficulty_threshold, within: None, project: false, verify: false };
+    let Some(now) = crate::mirror::forecast_now(None, Some(&owners), &opts).await else {
+        crate::mcp::telemetry::tlog("auto_harvest", crate::mcp::telemetry::Sev::Notice, "no snapshot or chain clock yet — scan deferred");
+        return;
+    };
+    let refiners: std::collections::HashSet<String> = targets
+        .iter()
+        .filter(|(_, _, caps)| cfg.refine && caps.refines)
+        .map(|(p, _, _)| p.as_str().to_string())
+        .collect();
+    let plan = plan(&now.forecasts, |owner| refiners.contains(owner));
+    if !plan.skipped.is_empty() {
+        let parts: Vec<String> = plan.skipped.iter().map(|(r, n)| format!("{r} {n}")).collect();
+        crate::mcp::telemetry::tlog(
+            "auto_harvest",
+            crate::mcp::telemetry::Sev::Debug,
+            format!("mirror: {} ripe, not started — {}", plan.picks.values().map(Vec::len).sum::<usize>(), parts.join(", ")),
+        );
+    }
+    // Prove what each pick's last check reads — the rig's status and the
+    // planet's clock — in ONE batch against a header the light client
+    // verified. Unprovable facts fall back to the ordinary reads below.
+    let facts: Vec<crate::mirror::verify::Fact> = plan
+        .picks
+        .values()
+        .flatten()
+        .flat_map(|p| {
+            use crate::mirror::verify::{Fact, Store};
+            let clock = if p.kind == crate::mcp::types::TaskType::Mine { "blockStartOreMine" } else { "blockStartOreRefine" };
+            [
+                Fact { store: Store::Struct, attribute: "status", object: p.struct_id.clone() },
+                Fact { store: Store::Planet, attribute: clock, object: p.planet.clone() },
+            ]
+        })
+        .collect();
+    let proven = Arc::new(crate::mirror::verify::prove_for("auto_harvest", &facts).await);
+    let plan = Arc::new(plan);
+
     // Fan out the per-player body with bounded concurrency so every player is
     // scanned in the same wave (≤ MAX_CONCURRENT_PLAYERS in flight) instead of
     // serially — the serial walk reached the tail cohort minutes late.
     let started = Arc::new(AtomicU32::new(0));
     let started_body = started.clone();
-    let difficulty_threshold = cfg.difficulty_threshold;
-    let refine = cfg.refine;
     let auto_explore = cfg.auto_explore;
     let app = app_handle.clone();
     let run_c = run.clone();
-    // Keep the shared perception snapshot current (no-op if fresh or already
-    // refreshing). The scan below reads from it when it is fresh and from the
-    // chain when it is not, so this never blocks the pass. Structs announced
-    // since the last refresh get their one entity read here (bounded).
-    crate::mcp::perception::maybe_refresh(&client);
-    // Never fan out to the chain just because the launch refresh has not
-    // landed yet (that was ~59k LCD requests per launch): wait for it.
-    crate::mcp::loop_util::ensure_perception(&client, "auto_harvest", 120_000.0).await;
-    crate::mcp::perception::resolve_pending(&client, 50).await;
     crate::mcp::loop_util::for_each_player_concurrent(
         targets,
         crate::mcp::capacity::reads_fanout(),
@@ -242,6 +349,8 @@ async fn scan(
             let registry = registry.clone();
             let started = started_body.clone();
             let run = run_c.clone();
+            let plan = plan.clone();
+            let proven = proven.clone();
             async move {
                 // Stand down while this player is answering a raid: charge is
                 // one action per block and the response needs it. Deferral
@@ -250,242 +359,91 @@ async fn scan(
                     return;
                 }
                 run.players.fetch_add(1, Ordering::Relaxed);
-                // Resolve THIS player's structs from its planet + fleet slot arrays.
-                // The guild struct-LIST endpoints (owner AND location) are broken —
-                // they ignore their filter and return a global page of every
-                // player's structs, so scanning them meant we never saw a vplayer's
-                // OWN extractor/refinery (refines never completed, explores never
-                // fired, the whole fleet froze). See loop_util::player_struct_ids.
-                //
-                // SCAN reads come from the shared perception snapshot when it
-                // is fresh (one whole-galaxy pull + GRASS deltas, see
-                // mcp::perception) and from the chain otherwise; the read
-                // right before a task is issued always goes to the chain.
-                let (sids, scan_src) = crate::mcp::loop_util::scan_player_struct_ids(&client, pid.as_str()).await;
-                let scanned_from_snapshot = scan_src == crate::mcp::loop_util::ReadSource::Snapshot;
-                let mut extractor_planet: Option<String> = None;
-                // The planet ENTITY, read at most ONCE per player per scan. It
-                // carries BOTH the mined-out guard's ore reserve and — since
-                // chain v0.21.0 — the shared ore clock this player's rigs
-                // anchor their proofs on, so one read serves both.
-                let mut planet_cache: Option<serde_json::Value> = None;
-                let mut planet_fetched = false;
-                // The PLAYER's stored ore, read at most once per player per scan
-                // (see the futile-refine guard below).
-                let mut player_ore_cache: Option<f64> = None;
-                for sid in sids.iter() {
-                    // The struct ENTITY is the reliable source for type + location +
-                    // online + anchors (the struct-LIST endpoints are unusable, above).
-                    let entity = match crate::mcp::loop_util::scan_entity(&client, "struct", sid).await {
-                        Ok((e, _)) => e,
-                        Err(_) => continue,
-                    };
-                    let s = entity.get("Struct");
-                    let sa = entity.get("structAttributes");
-                    let type_id = s.map(extract_type_id).unwrap_or_default();
-                    let is_extractor = type_id == EXTRACTOR_TYPE;
-                    let is_refinery = type_id == REFINERY_TYPE;
-                    // A planetary extractor's locationId IS the player's planet id → the
-                    // anchor the auto-explore block below keys off.
-                    if is_extractor && !parse_bool(sa.and_then(|x| x.get("isDestroyed"))) {
-                        if let Some(loc) = s.and_then(|x| x.get("locationId")).and_then(|x| x.as_str()) {
-                            extractor_planet = Some(loc.to_string());
-                        }
-                    }
-                    // Refine only for productive players (and if the config allows it);
-                    // bait players mine only.
-                    if !is_extractor && !(is_refinery && refine && caps.refines) {
-                        continue;
-                    }
-                    // Chain v0.21.0: a planet under raid can neither mine nor
-                    // refine — the chain rejects the completion, so issuing the
-                    // task burns real GPU time on a proof that cannot land, and
-                    // the completion sign spends the defender's once-per-block
-                    // action mid-fight (see economy_steals_combat_charge; this
-                    // is the same theft with a new mechanism). Difficulty keeps
-                    // decaying while paused, so skipping costs nothing: the
-                    // proof is CHEAPER when the raid ends and this loop
-                    // re-issues on its next pass. Explore is deliberately NOT
-                    // gated — re-planeting mid-raid is the defender's escape
-                    // hatch, not a casualty of the pause.
-                    if let Some(loc) = s.and_then(|x| x.get("locationId")).and_then(|x| x.as_str()) {
-                        if crate::mcp::auto_response::planet_under_raid(loc) {
-                            continue;
-                        }
-                    }
-                    // Skip if a task for this struct is already in flight (completed ones
-                    // linger in the registry — those we DO allow to re-issue).
+                let mined_out = plan.mined_out.contains(pid.as_str());
+                for pick in plan.picks.get(pid.as_str()).into_iter().flatten() {
+                    let sid = &pick.struct_id;
+                    // Skip if a task for this struct is already in flight
+                    // (completed ones linger in the registry — those we DO
+                    // allow to re-issue).
                     if let Some(t) = registry.tasks.get(sid) {
                         if matches!(t.snapshot().status.as_str(), "running" | "waiting" | "starting") {
                             continue;
                         }
                     }
-                    if !parse_bool(sa.and_then(|x| x.get("isOnline"))) {
-                        continue;
-                    }
-                    // The planet backs BOTH guards below and the proof anchor, so
-                    // read it once here — a planetary rig's `locationId` IS its
-                    // planet id. Fetched at most once per player per scan, and
-                    // only ONCE even on failure, so a planet the LCD refuses
-                    // can't spin a retry per struct.
-                    if !planet_fetched {
-                        planet_fetched = true;
-                        if let Some(loc) = s.and_then(|x| x.get("locationId")).and_then(|x| x.as_str()) {
-                            if let Ok((p, _)) = crate::mcp::loop_util::scan_entity(&client, "planet", loc).await {
-                                planet_cache = Some(p);
-                            }
-                        }
-                    }
-                    let planet = planet_cache.as_ref();
-                    // MINED-OUT GUARD. An extractor on a planet with no undiscovered
-                    // ore can never complete: the chain rejects the completion, the
-                    // anchor never resets, and this loop re-issues the task forever.
-                    // Measured on 2026-07-30: one struct burned 448 solves in 16h
-                    // (difficulty decaying 7→1 the whole time — proof of a frozen
-                    // anchor), and 19 of 25 sampled fleet planets were drained, which
-                    // accounted for ~95% of ALL GPU work.
-                    if is_extractor {
-                        // Unknown → don't block mining on a read failure.
-                        let planet_ore = planet
-                            .map(|p| crate::mcp::types::EntityView::new(p).grid_f64("ore"))
-                            .unwrap_or(1.0);
-                        if planet_ore <= 0.0 {
-                            continue;
-                        }
-                    } else {
-                        // THE SAME TRAP, ON THE REFINE SIDE. The guard above is
-                        // extractor-only, so a refinery whose owner holds NO ore
-                        // kept issuing proofs: the GPU solves them, and the
-                        // completion is then rejected with "player (1-2136)
-                        // cannot afford refine: requires ore". Refine cycles
-                        // auto-restart, so the anchor never clears and the loop
-                        // re-issues forever.
-                        //
-                        // Measured 2026-08-18: 41 such rejects in two hours from
-                        // ONE player — the single largest error source in the
-                        // whole system, and every one of them paid for with
-                        // wasted proof-of-work.
-                        if player_ore_cache.is_none() {
-                            player_ore_cache = Some(match crate::mcp::loop_util::scan_entity(&client, "player", pid.as_str()).await {
-                                Ok((p, _)) => crate::mcp::types::EntityView::new(&p).grid_f64("ore"),
-                                // Unknown → don't block refining on a read failure.
-                                Err(_) => 1.0,
-                            });
-                        }
-                        if player_ore_cache.unwrap_or(1.0) <= 0.0 {
-                            continue;
-                        }
-                    }
-                    let (task_type, target) = if is_extractor {
-                        (crate::mcp::types::TaskType::Mine, MINE_TARGET)
-                    } else {
-                        (crate::mcp::types::TaskType::Refine, REFINE_TARGET)
-                    };
-                    // CHAIN v0.21.0: THE ORE CLOCK LIVES ON THE PLANET. It used to
-                    // be a struct attribute; now one clock per planet is shared by
-                    // every eligible rig standing on it, and the struct's own
-                    // `blockStartOre*` fields survive for wire compatibility only,
-                    // permanently reading 0. Reading the struct therefore returned
-                    // anchor 0 for every extractor and refinery in the game and this
-                    // loop skipped all of them — 28,812 player-scans an hour, ZERO
-                    // tasks started, for 38 hours. That silence starved the whole
-                    // flywheel downstream: no proofs, so no Alpha (auto_sweep idle
-                    // for want of a single holder), and no ore for auto_raid to want.
-                    let anchor = crate::mcp::loop_util::planet_ore_anchor(planet, task_type);
-                    if anchor == 0 {
-                        continue; // planet's clock is clear — nothing to hash against
-                    }
-                    // A proof for this exact cycle is already solved and waiting
-                    // to be signed. The chain's clock stays put until it lands,
-                    // so the struct still looks ripe and we would grind the very
-                    // same proof again and queue a second, doomed completion
-                    // behind the first. See hasher::PENDING_COMPLETIONS.
-                    if crate::hasher::completion_in_flight(sid) == Some(anchor) {
-                        continue;
-                    }
-                    let age = current_block.saturating_sub(anchor);
-                    // Refines do NOT expire. An aged refine anchor is simply a LOW-difficulty
-                    // (cheap) proof — exactly like an aged mine — so it completes instantly
-                    // and the chain auto-restarts the cycle (resets blockStartOreRefine).
-                    // Verified live: completing a 49k-block-old "stale" refine yielded Alpha
-                    // and reset the anchor. The old STALE_REFINE_BLOCKS guard skipped these as
-                    // "unrecoverable", which silently froze the ENTIRE productive refine leg
-                    // (0 Alpha across 116 workers holding 461 ore). Removed — an old anchor is
-                    // the EASIEST alpha, not a phantom.
-                    if !is_ripe(age, target, difficulty_threshold) {
+                    // A proof for this exact cycle is already solved and
+                    // waiting to be signed: the chain's clock stays put until
+                    // it lands, so it still looks ripe. See
+                    // hasher::PENDING_COMPLETIONS.
+                    if crate::hasher::completion_in_flight(sid) == Some(pick.anchor) {
                         continue;
                     }
                     // ── CHAIN RE-VERIFY before committing GPU work. ──
-                    // Everything above may have come from the perception
-                    // snapshot. The anchor and the rig's online state are
-                    // action-gating (a wrong anchor is a proof that cannot
-                    // land — the futile-mining incident), so when the scan was
-                    // served from the snapshot, read the two entities that
-                    // decide this task from the chain now: one planet read +
-                    // one struct read per ISSUED task, instead of one per
-                    // struct per scan. Both results fold back into the
-                    // snapshot. A disagreement is logged: it is the measure of
-                    // how far perception drifts, and the reason this step stays.
-                    let mut anchor = anchor;
-                    if scanned_from_snapshot {
-                        let loc = s.and_then(|x| x.get("locationId")).and_then(|x| x.as_str()).unwrap_or("");
-                        let Ok(sid_t) = crate::mcp::types::StructId::parse(sid) else { continue };
-                        // Source-switched (mcp/verify.rs): Guild API by default.
-                        let Ok(live_struct) = crate::mcp::verify::struct_state(&client, &sid_t).await else { continue };
-                        if !live_struct.online || live_struct.destroyed {
-                            crate::mcp::telemetry::tlog(
-                                "auto_harvest",
-                                crate::mcp::telemetry::Sev::Notice,
-                                format!("perception drift: {sid} scanned online, chain says not — skipped"),
-                            );
-                            continue;
+                    // The forecast ran on the snapshot. The anchor and the
+                    // rig's online state decide whether a proof can land (a
+                    // wrong anchor is the futile-mining incident), so the two
+                    // entities that decide this task are read from the chain
+                    // now: one planet read + one struct read per ISSUED task.
+                    // Both fold back into the snapshot. A disagreement is
+                    // logged: it measures how far perception drifts.
+                    use crate::mirror::verify::Store;
+                    let clock = if pick.kind == crate::mcp::types::TaskType::Mine { "blockStartOreMine" } else { "blockStartOreRefine" };
+                    let proven_status = proven.as_ref().as_ref().and_then(|b| b.get(Store::Struct, "status", sid));
+                    let proven_clock = proven.as_ref().as_ref().and_then(|b| b.get(Store::Planet, clock, &pick.planet));
+                    let (online, destroyed) = match proven_status {
+                        Some(st) => (
+                            st & crate::mcp::perception::status::ONLINE != 0,
+                            st & crate::mcp::perception::status::DESTROYED != 0,
+                        ),
+                        None => {
+                            let Ok(sid_t) = crate::mcp::types::StructId::parse(sid) else { continue };
+                            let Ok(live_struct) = crate::mcp::verify::struct_state(&client, &sid_t).await else { continue };
+                            (live_struct.online, live_struct.destroyed)
                         }
-                        // The ore clocks never stream; the LCD path folds the
-                        // live planet back into the snapshot, the guild path
-                        // reads the work view (one row per rig, one call).
-                        // A rig not on a planet has no clock to verify against.
-                        let Ok(planet_t) = crate::mcp::types::PlanetId::parse(loc) else { continue };
-                        let Ok(live_anchor) = crate::mcp::verify::ore_anchor(&client, &planet_t, task_type).await else {
+                    };
+                    if !online || destroyed {
+                        crate::mcp::telemetry::tlog(
+                            "auto_harvest",
+                            crate::mcp::telemetry::Sev::Notice,
+                            format!("perception drift: {sid} forecast online, chain says not — skipped"),
+                        );
+                        continue;
+                    }
+                    let live_anchor = match proven_clock {
+                        Some(c) => crate::mcp::types::Block::new(c),
+                        None => {
+                            let Ok(planet_t) = crate::mcp::types::PlanetId::parse(&pick.planet) else { continue };
+                            let Ok(a) = crate::mcp::verify::ore_anchor(&client, &planet_t, pick.kind).await else { continue };
+                            a
+                        }
+                    };
+                    let mut anchor = pick.anchor;
+                    if live_anchor.get() != anchor {
+                        crate::mcp::telemetry::tlog(
+                            "auto_harvest",
+                            crate::mcp::telemetry::Sev::Notice,
+                            format!("perception drift: {sid} {} anchor {anchor} forecast vs {} on chain", pick.kind, live_anchor.get()),
+                        );
+                        anchor = live_anchor.get();
+                        let exec = crate::mirror::rules::earliest_execution(now.tip);
+                        let ripe = anchor != 0
+                            && crate::mirror::rules::ready_height(anchor, pick.range, opts.target).is_some_and(|h| h <= exec);
+                        if !ripe || crate::hasher::completion_in_flight(sid) == Some(anchor) {
                             continue;
-                        };
-                        let live_anchor = live_anchor.get();
-                        if live_anchor != anchor {
-                            crate::mcp::telemetry::tlog(
-                                "auto_harvest",
-                                crate::mcp::telemetry::Sev::Notice,
-                                format!("perception drift: {sid} {task_type} anchor {anchor} scanned vs {live_anchor} on chain"),
-                            );
-                            anchor = live_anchor;
-                            if anchor == 0
-                                || crate::hasher::completion_in_flight(sid) == Some(anchor)
-                                || !is_ripe(current_block.saturating_sub(anchor), target, difficulty_threshold)
-                            {
-                                continue;
-                            }
                         }
                     }
-                    let params = TaskParams::for_ore(sid, task_type.as_str(), anchor, target);
+                    let params = TaskParams::for_ore(sid, pick.kind.as_str(), anchor, pick.range);
                     if crate::hasher::start_hash_task_core(params, app.clone(), &registry).is_ok() {
                         if let Some(idx) = idx_opt {
-                            crate::hasher::register_vplayer_hash(sid.clone(), idx, task_type);
+                            crate::hasher::register_vplayer_hash(sid.clone(), idx, pick.kind);
                         }
                         started.fetch_add(1, Ordering::Relaxed);
                         run.actions.fetch_add(1, Ordering::Relaxed);
                         // Debug, not Info: one line per struct per scan was
-                        // 5,041 events/hour (90% of the whole telemetry DB) on
-                        // a 750-player fleet. The per-scan summary below keeps
-                        // the loop observable at Info.
+                        // 5,041 events/hour on a 750-player fleet.
                         crate::mcp::telemetry::tlog(
                             "auto_harvest",
                             crate::mcp::telemetry::Sev::Debug,
-                            format!(
-                                "{} {} (age {}, difficulty {} ≤ {})",
-                                task_type,
-                                sid,
-                                age,
-                                calculate_difficulty(age, target),
-                                difficulty_threshold
-                            ),
+                            format!("{} {sid} (anchor {anchor}, range {}, aim {})", pick.kind, pick.range, opts.target),
                         );
                     }
                 }
@@ -507,7 +465,9 @@ async fn scan(
                 //     the refinery mid-cycle or strand un-refined ore (refine-it-all-first;
                 //     Alpha survives explore, the refinery rebuilds on the new planet).
                 if auto_explore {
-                    if let (Some(_extractor_planet), Some(idx)) = (extractor_planet, idx_opt) {
+                    // The mirror found this player's extractor on a planet
+                    // with no buried ore — the chain's own `empty` refusal.
+                    if let (true, Some(idx)) = (mined_out, idx_opt) {
                         // The planet to judge is the player's CURRENT planet from
                         // the CHAIN, not the extractor's location. After an
                         // explore the rig can linger on the old, drained planet
@@ -643,9 +603,75 @@ mod tests {
         // Fully aged (huge age) → difficulty 1, ripe even at threshold 1.
         assert!(is_ripe(100_000, MINE_TARGET, 1));
         // ~6h of aging (~3600 blocks) → difficulty ~10, ripe at the aggressive default.
-        let d = calculate_difficulty(3600, MINE_TARGET);
+        let d = crate::mirror::rules::difficulty(3600, MINE_TARGET);
         assert_eq!(is_ripe(3600, MINE_TARGET, 10), d <= 10);
         // Lower threshold (efficient) rejects the same partially-aged struct.
         assert!(!is_ripe(3600, MINE_TARGET, 1));
+    }
+
+    fn fc(kind: crate::mirror::forecast::Kind, sid: &str, owner: &str, status: crate::mirror::forecast::Status, checks: Vec<crate::mirror::forecast::Check>) -> crate::mirror::forecast::Forecast {
+        crate::mirror::forecast::Forecast {
+            kind,
+            subject: sid.into(),
+            owner: owner.into(),
+            label: "rig".into(),
+            planet: Some("2-1".into()),
+            anchor: 100,
+            range: 14_000,
+            target: 4,
+            ready_height: Some(200),
+            blocks_away: Some(0),
+            difficulty_now: Some(4),
+            status,
+            exact: true,
+            checks,
+        }
+    }
+
+    fn blocked(rule: &'static str) -> crate::mirror::forecast::Check {
+        crate::mirror::forecast::Check { rule, state: crate::mirror::forecast::CheckState::Blocked, exact: true, detail: String::new() }
+    }
+
+    #[test]
+    fn only_ready_work_is_started() {
+        use crate::mirror::forecast::{Kind, Status};
+        let f = vec![
+            fc(Kind::Mine, "5-1", "1-1", Status::Ready, vec![]),
+            fc(Kind::Mine, "5-2", "1-2", Status::Waiting, vec![]),
+            fc(Kind::Mine, "5-3", "1-3", Status::Uncertain, vec![]),
+            fc(Kind::Refine, "5-4", "1-1", Status::Blocked, vec![blocked("ore")]),
+        ];
+        let p = plan(&f, |_| true);
+        assert_eq!(p.picks.len(), 1);
+        assert_eq!(p.picks["1-1"][0].struct_id, "5-1");
+        assert_eq!(p.picks["1-1"][0].range, 14_000, "the type's own range, not a constant");
+        assert_eq!(p.skipped.get("ore"), Some(&1));
+        assert_eq!(p.skipped.get("unsure"), Some(&1));
+    }
+
+    #[test]
+    fn an_empty_planet_marks_the_owner_for_explore_and_is_never_hashed() {
+        use crate::mirror::forecast::{Kind, Status};
+        let p = plan(&[fc(Kind::Mine, "5-1", "1-9", Status::Blocked, vec![blocked("empty")])], |_| true);
+        assert!(p.mined_out.contains("1-9"));
+        assert!(p.picks.is_empty());
+    }
+
+    #[test]
+    fn refining_follows_the_owners_profile() {
+        use crate::mirror::forecast::{Kind, Status};
+        let f = vec![fc(Kind::Refine, "5-4", "1-1", Status::Ready, vec![])];
+        assert!(plan(&f, |_| false).picks.is_empty(), "bait never refines");
+        assert_eq!(plan(&f, |_| true).picks["1-1"][0].kind, crate::mcp::types::TaskType::Refine);
+    }
+
+    #[test]
+    fn a_clear_clock_is_never_hashed() {
+        use crate::mirror::forecast::{Kind, Status};
+        let mut f = fc(Kind::Mine, "5-1", "1-1", Status::Ready, vec![]);
+        f.anchor = 0;
+        let p = plan(&[f], |_| true);
+        assert!(p.picks.is_empty());
+        assert_eq!(p.skipped.get("no_clock"), Some(&1));
     }
 }

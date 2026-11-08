@@ -183,6 +183,11 @@ pub struct Snapshot {
     /// guild snapshots (the indexer cannot be pinned) and for an LCD walk
     /// that had to fall back to unpinned pages.
     pub pinned: bool,
+    /// `min_height`/`height` are the lowest and highest heights the bulk
+    /// PAGES were served at (an LCD walk). False for guild snapshots, whose
+    /// range is the indexer's height before and after the walk — a bound,
+    /// not evidence that the rows share one block.
+    pub page_heights: bool,
     /// Live frames lost while this snapshot was being fetched (the replay
     /// queue was full). Non-zero = the snapshot may be missing changes made
     /// after its pages; the next refresh repairs it.
@@ -1622,7 +1627,7 @@ pub async fn hot_refresh_ore_clocks(client: &CosmosClient) -> Result<usize, Stri
 /// Measured 2026-11-01: 401k+ rows in the whole store (400+ pages at the
 /// v0.22 1000-row cap, every two minutes) against ~91k clock rows.
 async fn lcd_planet_clock_sweep(client: &CosmosClient) -> Result<usize, String> {
-    let (rows, _, _) =
+    let (rows, _, _, _) =
         walk_store(client, "/structs/planet_attribute", "planetAttributeRecords", Some("12-"), Some("14-"), None).await?;
     if rows.is_empty() {
         return Err("planet_attribute store returned no rows".into());
@@ -2168,11 +2173,13 @@ async fn lcd_pages_at(client: &CosmosClient, t0: f64, at: Option<u64>) -> Result
     if snap.rejection_rate_too_high() {
         return Err(format!("LCD stores: {} rows refused at the ingest edge — not trusting this snapshot", snap.rejected_rows));
     }
+    let lows = [st.3, sa.3, pa.3, gr.3, pl.3, pn.3, fl.3];
     snap.height = heights.iter().copied().max().unwrap_or(0);
-    snap.min_height = heights.iter().copied().filter(|h| *h > 0).min().unwrap_or(0);
+    snap.min_height = lows.iter().copied().filter(|h| *h > 0).min().unwrap_or(0);
     // Every page was refused unless served at the pin, so a pinned walk that
     // completes IS one height.
     snap.pinned = at.is_some_and(|h| snap.height == h && snap.min_height == h);
+    snap.page_heights = true;
     snap.taken_ms = t0;
     snap.taken_unix_s = [st.2, sa.2, pa.2, gr.2, pl.2, pn.2, fl.2].into_iter().fold(0.0, f64::max);
     Ok(snap)
@@ -2187,12 +2194,16 @@ async fn walk_store(
     start_key: Option<&str>,
     end_before: Option<&str>,
     at: Option<u64>,
-) -> Result<(Vec<Value>, u64, f64), String> {
+) -> Result<(Vec<Value>, u64, f64, u64), String> {
     use base64::Engine as _;
     let b64 = &base64::engine::general_purpose::STANDARD;
     let mut rows = Vec::new();
     let mut key: Option<String> = start_key.map(|k| b64.encode(k));
+    // Lowest and highest height ANY page was served at. The highest alone
+    // cannot show coherence: seven stores that each straddled blocks can
+    // still all finish on the same one.
     let mut height = 0;
+    let mut low = 0;
     let mut server_time = 0.0;
     loop {
         let q = match &key {
@@ -2201,6 +2212,9 @@ async fn walk_store(
         };
         let (body, h, st) = client.lcd_get_bulk_at(&q, at).await?;
         height = height.max(h);
+        if h > 0 {
+            low = if low == 0 { h } else { low.min(h) };
+        }
         server_time = f64::max(server_time, st);
         if let Some(arr) = body.get(list_key).and_then(|v| v.as_array()) {
             rows.extend(arr.iter().cloned());
@@ -2218,7 +2232,7 @@ async fn walk_store(
             }
         }
     }
-    Ok((rows, height, server_time))
+    Ok((rows, height, server_time, low))
 }
 
 /// Pull a whole-galaxy snapshot and install it. ~11 requests; the pages run
@@ -2368,9 +2382,9 @@ mod tests {
         rt.block_on(async {
             let tip = latest_block_height(&client.lcd_get("/cosmos/base/tendermint/v1beta1/blocks/latest").await.unwrap()).unwrap();
             let pin = tip - 3;
-            let (rows, h, _) = walk_store(&client, "/structs/fleet", "Fleet", None, None, Some(pin)).await.unwrap();
-            println!("tip {tip}, pinned {pin}: {} fleet rows, every page served at {h}", rows.len());
-            assert_eq!(h, pin);
+            let (rows, h, _, low) = walk_store(&client, "/structs/fleet", "Fleet", None, None, Some(pin)).await.unwrap();
+            println!("tip {tip}, pinned {pin}: {} fleet rows, pages served at {low}..={h}", rows.len());
+            assert_eq!((low, h), (pin, pin));
             assert!(rows.len() > 1000);
         });
     }

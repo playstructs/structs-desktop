@@ -263,6 +263,25 @@ fn record(
     }
 }
 
+/// Record a send the mirror's gate refused: the chain was certain to reject
+/// it, so no transaction was spent. Returns the caller's error.
+fn gate_refusal(context: &Context, action: &str, attempt: u32, since: f64, d: &crate::mirror::gate::Decision) -> String {
+    telemetry::record_tx_attempt(TxAttemptRow {
+        ts_ms: now_millis(),
+        context: context.to_string(),
+        action: action.to_string(),
+        player_id: context.subject().map(String::from),
+        attempt,
+        outcome: "skipped",
+        tx_hash: None,
+        code: None,
+        raw_error: Some(format!("mirror {}: {}", d.rule, d.detail)),
+        translated: None,
+        duration_ms: now_millis() - since,
+    });
+    format!("skipped by the mirror ({}): {}", d.rule, d.detail)
+}
+
 /// Sign & broadcast as a vplayer (HD `index`), with classification, ledger
 /// rows, and bounded retries. Returns the chain response Value on success or
 /// the translated error after the final attempt.
@@ -335,6 +354,15 @@ pub async fn sign_with_retry_guarded(
     } else {
         None
     };
+    // A proof that ripens within a few blocks waits for its height here,
+    // before taking a signing slot, instead of being spent on a certain
+    // rejection; anything the gate is certain of is refused without a tx.
+    let t_gate = now_millis();
+    if let Some(d) = crate::mirror::gate::ripen(type_url, &payload).await {
+        if d.refused() {
+            return Err(gate_refusal(context, type_url, 1, t_gate, &d));
+        }
+    }
     for attempt in 1..=MAX_ATTEMPTS {
         // Admission gate: keeps the signing façade's own FIFO shallow so a
         // deadline-bound combat answer isn't stuck behind hundreds of bulk
@@ -362,16 +390,13 @@ pub async fn sign_with_retry_guarded(
                 return Err("stale: the planet's ore clock moved while this proof waited to be signed".into());
             }
         }
-        // The same re-test for CHARGE. The pre-sign check ran before the gate
-        // wait; while this tx sat in the queue another loop's charged action
-        // for the same player could land (auto_build's initiate and
-        // auto_defend's set/clear are decided in the same tick): the chain
-        // then answers "already discharged" or "required charge of 8 but
-        // player only had 3", and the build loop backs the player off for
-        // 30 minutes. 23 of those in the first hour of 2026-09-05. So: let a
-        // sibling's in-flight or just-landed action clear the block window,
-        // then re-read the charge and SKIP (no tx, no back-off) if it no
-        // longer covers this message.
+        // Re-judge now that the slot is ours: the wait can be long, and
+        // another loop's charged action for the same player may have landed
+        // meanwhile (auto_build's initiate and auto_defend's set/clear are
+        // decided in the same tick). Let a sibling's in-flight action clear
+        // the block window first, then ask the mirror — the chain's own
+        // charge rule against the type's own cost — and SKIP (no tx, no
+        // back-off) anything it is certain the chain would refuse.
         if loop_util::is_charged_type(type_url) {
             if let Some(pid) = context.player() {
                 let t0 = now_millis();
@@ -380,29 +405,11 @@ pub async fn sign_with_retry_guarded(
                 {
                     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
                 }
-                let need = loop_util::charge_cost(type_url);
-                let block = crate::game_state::GAME_STATE.read().map(|g| g.current_block_height).unwrap_or(0);
-                if block > 0 {
-                    let client = crate::mcp::cosmos_client::CosmosClient::new();
-                    if let Ok(have) = crate::mcp::verify::player_charge(&client, pid, crate::mcp::types::Block::new(block)).await {
-                        if !have.covers(need) {
-                            telemetry::record_tx_attempt(TxAttemptRow {
-                                ts_ms: now_millis(),
-                                context: context.to_string(),
-                                action: type_url.to_string(),
-                                player_id: Some(pid.as_str().to_string()),
-                                attempt,
-                                outcome: "skipped",
-                                tx_hash: None,
-                                code: None,
-                                raw_error: Some(format!("charge {have} < {need} needed when the sign slot came up")),
-                                translated: None,
-                                duration_ms: now_millis() - slot_won,
-                            });
-                            return Err(format!("skipped: {pid} has charge {have} < {need} needed for this message (spent while queued)"));
-                        }
-                    }
-                }
+            }
+        }
+        if let Some(d) = crate::mirror::gate::check_message(type_url, &payload) {
+            if d.refused() {
+                return Err(gate_refusal(context, type_url, attempt, slot_won, &d));
             }
         }
         let started = now_millis();
@@ -478,6 +485,11 @@ pub async fn submit_with_retry(
         // Primary-player txs share the same façade, so they share the gate.
         let _slot = crate::mcp::capacity::acquire_tx(context.as_str()).await;
         let started = now_millis();
+        if let Some(d) = crate::mirror::gate::check_webview(action, &args) {
+            if d.refused() {
+                return Err(gate_refusal(context, action, attempt, started, &d));
+            }
+        }
         log_build(context, action, attempt, Some(&args));
         let res = tx_queue::submit_tx(app, action.to_string(), args.clone()).await;
         let outcome = match res {
@@ -538,6 +550,11 @@ pub async fn sign_once(
     let context: Context = context.into();
     let context = &context;
     let started = now_millis();
+    if let Some(d) = crate::mirror::gate::check_message(type_url, &payload) {
+        if d.refused() {
+            return Err(gate_refusal(context, type_url, 1, started, &d));
+        }
+    }
     let res = vplayer_bridge::sign_action(app, index, type_url, payload, 60).await;
     let outcome = match res {
         Ok(v) => {
@@ -582,6 +599,16 @@ pub async fn submit_once(
     let context: Context = context.into();
     let context = &context;
     let started = now_millis();
+    if let Some(d) = crate::mirror::gate::check_webview(action, &args) {
+        if d.refused() {
+            return Ok(tx_queue::TxResponse {
+                request_id: String::new(),
+                success: false,
+                tx_hash: None,
+                error: Some(gate_refusal(context, action, 1, started, &d)),
+            });
+        }
+    }
     let res = tx_queue::submit_tx(app, action.to_string(), args).await;
     let outcome = match &res {
         Ok(resp) if resp.success => AttemptResult::Success { tx_hash: resp.tx_hash.clone(), value: Value::Null },

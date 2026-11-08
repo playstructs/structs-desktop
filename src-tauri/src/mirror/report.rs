@@ -112,6 +112,27 @@ pub fn render(now: &Now, limit: usize, kinds: Option<&[String]>) -> String {
         p.events_applied,
         if now.tip > p.height { format!(", tip {} blocks past the pages", now.tip - p.height) } else { String::new() },
     ));
+    if let Some(v) = &now.verified {
+        out.push_str(&format!(
+            "  verified: {} facts proven at {} against header {} (light client, anchor {}){}\n",
+            v.proven,
+            v.height,
+            v.header_height,
+            match v.anchor {
+                crate::mirror::verify::Anchor::Pinned => "pinned",
+                crate::mirror::verify::Anchor::FirstUse => "taken on first use",
+            },
+            if v.failed > 0 { format!(", {} could not be proven", v.failed) } else { String::new() }
+        ));
+        if v.disagreements.is_empty() {
+            out.push_str("  the snapshot agrees with the chain on every proven fact\n");
+        } else {
+            out.push_str(&format!("  the snapshot disagrees with the chain on {}:\n", v.disagreements.len()));
+            for d in v.disagreements.iter().take(10) {
+                out.push_str(&format!("    {d}\n"));
+            }
+        }
+    }
     if p.replay_gap > 0 {
         out.push_str(&format!("  continuity: {} live events were dropped during the last refresh — recent changes may be missing\n", p.replay_gap));
     }
@@ -125,6 +146,10 @@ pub fn render(now: &Now, limit: usize, kinds: Option<&[String]>) -> String {
         }
         None => out.push_str("  power: judged on the stored-capacity bound (not read from the chain for this scope)\n"),
     }
+    if !now.gate.is_empty() {
+        let parts: Vec<String> = now.gate.iter().map(|(r, n)| format!("{r} {n}")).collect();
+        out.push_str(&format!("  pre-sign gate since launch: {}\n", parts.join(", ")));
+    }
     let shown: Vec<&Forecast> = now
         .forecasts
         .iter()
@@ -132,7 +157,7 @@ pub fn render(now: &Now, limit: usize, kinds: Option<&[String]>) -> String {
         .collect();
     let count = |s: Status| shown.iter().filter(|f| f.status == s).count();
     out.push_str(&format!(
-        "  {} forecasts: {} ready, {} waiting, {} unsure, {} blocked · {} decided exactly, {} rest on an estimate\n\n",
+        "  {} forecasts: {} ready, {} waiting, {} unsure, {} blocked · {} computed from the fields the chain reads, {} rest on an estimate (as fresh as the world above)\n\n",
         shown.len(),
         count(Status::Ready),
         count(Status::Waiting),
@@ -151,7 +176,50 @@ pub fn render(now: &Now, limit: usize, kinds: Option<&[String]>) -> String {
     if shown.len() > limit {
         out.push_str(&format!("  … {} more (raise `limit`, or narrow with `kinds`/`within`)\n", shown.len() - limit));
     }
+    if !now.projections.is_empty() {
+        out.push_str(&format!(
+            "\nPlanet runs at aim {} (each proof completing the moment it ripens; real runs are later, never earlier; raid pauses not modelled):\n",
+            now.projections[0].aim
+        ));
+        for p in now.projections.iter().take(limit) {
+            out.push_str(&projection_line(p, now.earliest_execution));
+            out.push('\n');
+        }
+        if now.projections.len() > limit {
+            out.push_str(&format!("  … {} more players\n", now.projections.len() - limit));
+        }
+    }
     out
+}
+
+fn at(h: u64, exec: u64) -> String {
+    if h <= exec {
+        "now".to_string()
+    } else {
+        format!("at {h} (+{} {})", h - exec, eta(h - exec))
+    }
+}
+
+fn projection_line(p: &crate::mirror::project::Projection, exec: u64) -> String {
+    let mut s = format!(
+        "  {} on {}: {} buried, {} stored → {} mines, {} refines, +{} alpha",
+        p.player,
+        p.planet,
+        p.buried_ore,
+        p.stored_ore,
+        p.mines,
+        p.refines,
+        p.ualpha / crate::mirror::transition::UALPHA_PER_REFINE
+    );
+    if let Some(h) = p.depleted_at {
+        s.push_str(&format!("; dry {}", at(h, exec)));
+    }
+    match (&p.drained_at, &p.stalled) {
+        (Some(h), _) => s.push_str(&format!("; explore-ready {}", at(*h, exec))),
+        (None, Some(r)) => s.push_str(&format!("; stalls: {} — {}", r.rule, r.detail)),
+        (None, None) => s.push_str("; not drained within the projection"),
+    }
+    s
 }
 
 /// `structs_intel {query:"forecast", args}`.
@@ -164,7 +232,12 @@ pub async fn intel(client: &crate::mcp::cosmos_client::CosmosClient, args: &Valu
         .get("target")
         .and_then(|v| v.as_u64())
         .unwrap_or_else(|| crate::mcp::auto_harvest::get().difficulty_threshold);
-    let opts = Options { target, within: args.get("within").and_then(|v| v.as_u64()) };
+    let opts = Options {
+        target,
+        within: args.get("within").and_then(|v| v.as_u64()),
+        project: args.get("project").and_then(|v| v.as_bool()).unwrap_or(false),
+        verify: args.get("verify").and_then(|v| v.as_bool()).unwrap_or(false),
+    };
     let limit = args.get("limit").and_then(|v| v.as_u64()).map(|l| l as usize).unwrap_or(DEFAULT_LIMIT);
     let kinds = kind_filter(args);
     match super::forecast_now(Some(client), owners.as_deref(), &opts).await {
@@ -196,6 +269,9 @@ mod tests {
             earliest_execution: 106,
             forecasts,
             power: None,
+            gate: vec![("allowed", 3), ("insufficient_charge", 1)],
+            projections: vec![],
+            verified: None,
         }
     }
 
@@ -205,6 +281,7 @@ mod tests {
             subject: "5-1".into(),
             owner: "1-1".into(),
             label: "Ore Extractor".into(),
+            planet: Some("2-1".into()),
             anchor: 50,
             range: 28_000,
             target: 4,
@@ -223,6 +300,7 @@ mod tests {
         assert!(s.contains("tip 105 (a tx signed now executes at ≥ 106)"), "{s}");
         assert!(s.contains("pages 98–100 (straddles blocks)"), "{s}");
         assert!(s.contains("tip 5 blocks past the pages"), "{s}");
+        assert!(s.contains("pre-sign gate since launch: allowed 3, insufficient_charge 1"), "{s}");
     }
 
     #[test]

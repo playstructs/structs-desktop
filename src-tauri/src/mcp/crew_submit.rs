@@ -499,14 +499,15 @@ pub async fn accept(
      * shipped verify path had done since it was written — demanded thousands
      * of leading zeros and refused every real proof ever computed.
      */
-    let (range, planet) = task_view(&owner, object, kind, &on_chain)
+    let (range, _planet) = task_view(&owner, object, kind, &on_chain)
         .ok_or("cannot establish this task's difficulty range from our own state or the chain")?;
     /* Would the chain even take it? Asked BEFORE the nonce is checked and
      * long before a transaction is spent. The first live pass spent one
      * every two minutes being told "planet (2-29903) is empty, nothing to
-     * mine" for a proof that was, as a proof, perfect. */
-    if let Some(why) = crate::mcp::crew_work::nothing_to_do(kind, planet.as_deref(), &owner) {
-        return Err(format!("{why}; not submitted"));
+     * mine" for a proof that was, as a proof, perfect. The mirror answers
+     * with every precondition the chain checks, not just the ore piles. */
+    if let Some(why) = crate::mirror::gate::blocked_now(kind, object) {
+        return Err(format!("the chain would refuse it now ({why}); not submitted"));
     }
     let at_block = crate::game_state::GAME_STATE.read().map(|g| g.current_block_height).unwrap_or(0);
     let Some(proof) =

@@ -17,7 +17,7 @@ use crate::mcp::{board_feed, loop_util, watchdog};
 
 #[derive(Debug, Deserialize)]
 pub struct SystemParams {
-    /// Command: status | logs | loops | tx | pow | watchdog | feed | config | perception
+    /// Command: status | logs | loops | tx | pow | watchdog | feed | config | perception | trust
     pub command: String,
     /// logs: filter by component (e.g. "auto_build", "tx", "watchdog", "policy", "conn")
     pub component: Option<String>,
@@ -352,8 +352,31 @@ pub async fn execute(params: SystemParams) -> Vec<Content> {
             }))
         }
 
+        // The light client's trust anchor (mirror::verify).
+        "trust" => {
+            let set = params.set.as_ref();
+            if set.and_then(|s| s.get("clear_pin")).and_then(|v| v.as_bool()).unwrap_or(false) {
+                return text(json!(crate::mirror::verify::clear_pin().await));
+            }
+            if let Some(p) = set.and_then(|s| s.get("pin")) {
+                let height = crate::mcp::types::numeric_u64(p.get("height"));
+                let hash = p.get("hash").and_then(|h| h.as_str());
+                let (Some(height), Some(hash)) = (height, hash) else {
+                    return err("pin needs {height, hash}: a block header's height and its 64-hex hash, from a source you trust");
+                };
+                return match crate::mirror::verify::pin(height, hash).await {
+                    Ok(st) => text(json!({ "pinned": true, "trust": st })),
+                    Err(e) => err(format!("pin refused: {e}")),
+                };
+            }
+            match crate::mirror::verify::status().await {
+                Ok(st) => text(json!(st)),
+                Err(e) => err(e),
+            }
+        }
+
         other => err(format!(
-            "unknown command '{other}'. Use: status, logs, loops, tx, pow, watchdog, feed, config, perception"
+            "unknown command '{other}'. Use: status, logs, loops, tx, pow, watchdog, feed, config, perception, trust"
         )),
     }
 }
