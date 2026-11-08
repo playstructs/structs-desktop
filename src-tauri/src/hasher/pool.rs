@@ -51,6 +51,14 @@ static CTX: OnceLock<(AppHandle, Arc<TaskRegistry>)> = OnceLock::new();
 /// under one block without busy-scanning.
 const IDLE_POLL_MS: u64 = 2000;
 
+/// How long, on average, an idle worker may spend on one task it takes
+/// before the task has decayed to `difficulty_start`.
+const EARLY_GRIND_SECS: f64 = 30.0;
+
+/// Workers currently grinding a task taken early. Kept below the cap so one
+/// worker is always free for work that is ripe at `difficulty_start`.
+static EARLY_GRINDS: AtomicU64 = AtomicU64::new(0);
+
 fn pool_cap() -> u64 {
     crate::hasher::max_concurrent().clamp(1, 64)
 }
@@ -121,7 +129,7 @@ fn worker_loop() {
         }
 
         match pop_ripest(&registry) {
-            Some(handle) => {
+            Some((handle, early)) => {
                 // Stamp the moment REAL work begins. Everything before this is
                 // queue wait, and folding that into "solve duration" is what
                 // drove the tuner into its concurrency collapse — see
@@ -129,7 +137,10 @@ fn worker_loop() {
                 if let Ok(mut p) = handle.progress.lock() {
                     p.work_start_time_ms = Some(now_millis());
                 }
-                run_one(&app, &registry, handle)
+                run_one(&app, &registry, handle);
+                if early {
+                    EARLY_GRINDS.fetch_sub(1, Ordering::SeqCst);
+                }
             }
             None => {
                 let pending = PENDING.lock().unwrap();
@@ -141,11 +152,41 @@ fn worker_loop() {
     }
 }
 
-/// Pop the easiest ripe task, pruning entries cancelled or superseded while
-/// queued. Also refreshes each pending task's `block_current_estimated` so
-/// list/board ETAs stay live without a thread per task. Returns `None` when
-/// nothing is ripe yet.
-fn pop_ripest(registry: &Arc<TaskRegistry>) -> Option<Arc<TaskHandle>> {
+/// Which pending task a free worker takes, by each task's current
+/// difficulty. Pure.
+///
+/// The easiest task at or under `start` first (earliest on ties) — the
+/// ordinary rule. With none, and `early_ok`, the easiest task at or under
+/// `ceiling`: the chain accepts any proof that meets the CURRENT difficulty,
+/// so a worker that would otherwise sit idle grinds it now instead of letting
+/// the task wait for the cheap threshold. Refining is the economy's
+/// bottleneck and its 28,000-block range takes ~4,000 blocks (~6 h) to decay
+/// from 7 to 5, so idle GPU time spent here is cycle time won. Returns the
+/// index and whether it was taken early.
+pub(crate) fn choose(difficulties: &[u64], start: u64, ceiling: Option<u64>, early_ok: bool) -> Option<(usize, bool)> {
+    let easiest = |limit: u64| {
+        difficulties
+            .iter()
+            .enumerate()
+            .filter(|(_, d)| **d <= limit)
+            .fold(None::<(usize, u64)>, |best, (i, d)| if best.is_none_or(|(_, b)| *d < b) { Some((i, *d)) } else { best })
+            .map(|(i, _)| i)
+    };
+    if let Some(i) = easiest(start) {
+        return Some((i, false));
+    }
+    match ceiling {
+        Some(c) if early_ok && c > start => easiest(c).map(|i| (i, true)),
+        _ => None,
+    }
+}
+
+/// Pop the task a free worker should run (see [`choose`]), pruning entries
+/// cancelled or superseded while queued. Also refreshes each pending task's
+/// `block_current_estimated` so list/board ETAs stay live without a thread
+/// per task. Returns `None` when nothing is worth grinding yet, and whether
+/// the task was taken early (its `grind_at` is then set).
+fn pop_ripest(registry: &Arc<TaskRegistry>) -> Option<(Arc<TaskHandle>, bool)> {
     let now_ms = now_millis();
     let difficulty_start = crate::hasher::difficulty_start();
     let mut pending = PENDING.lock().unwrap();
@@ -160,8 +201,8 @@ fn pop_ripest(registry: &Arc<TaskRegistry>) -> Option<Arc<TaskHandle>> {
                 .is_some_and(|e| Arc::ptr_eq(e.value(), h))
     });
 
-    let mut best: Option<(u64, usize)> = None;
-    for (i, h) in pending.iter().enumerate() {
+    let mut difficulties = Vec::with_capacity(pending.len());
+    for h in pending.iter() {
         // The SAME ripeness the worker will compute a moment later: refresh
         // the checkpoint from the live height first. Without this the pool
         // extrapolated from the checkpoint stamped at enqueue, and blocks run
@@ -188,12 +229,17 @@ fn pop_ripest(registry: &Arc<TaskRegistry>) -> Option<Arc<TaskHandle>> {
             let mut progress = h.progress.lock().unwrap();
             progress.block_current_estimated = block_est;
         }
-        // Strict `<` keeps the earliest-enqueued task on difficulty ties.
-        if difficulty <= difficulty_start && best.is_none_or(|(d, _)| difficulty < d) {
-            best = Some((difficulty, i));
-        }
+        difficulties.push(difficulty);
     }
-    best.map(|(_, i)| pending.swap_remove(i))
+    let ceiling = crate::hasher::tuner::measured_rate().map(|r| crate::hasher::tuner::affordable_difficulty(r, EARLY_GRIND_SECS));
+    let early_ok = EARLY_GRINDS.load(Ordering::SeqCst) + 1 < pool_cap();
+    let (i, early) = choose(&difficulties, difficulty_start, ceiling, early_ok)?;
+    let handle = pending.swap_remove(i);
+    if early {
+        handle.grind_at.store(difficulties[i], Ordering::Relaxed);
+        EARLY_GRINDS.fetch_add(1, Ordering::SeqCst);
+    }
+    Some((handle, early))
 }
 
 /// The old per-task thread body, run inline on a pool worker: engine dispatch,
@@ -280,9 +326,9 @@ mod tests {
         task(&registry, "t-hard", 4_000); // difficulty 8 == DIFFICULTY_START, still ripe
         task(&registry, "t-unripe", 10); // difficulty 49 > DIFFICULTY_START
 
-        let first = pop_ripest(&registry).expect("easiest ripe task pops first");
+        let (first, _) = pop_ripest(&registry).expect("easiest ripe task pops first");
         assert_eq!(first.params.object_id, "t-easy");
-        let second = pop_ripest(&registry).expect("next ripe task pops second");
+        let (second, _) = pop_ripest(&registry).expect("next ripe task pops second");
         assert_eq!(second.params.object_id, "t-hard");
         // Only the unripe task remains; it must NOT pop.
         assert!(pop_ripest(&registry).is_none());
@@ -347,5 +393,31 @@ mod work_start_tests {
             "a queued task has not started work yet"
         );
         assert!(p.process_start_time_ms > 0.0, "creation time is still stamped");
+    }
+
+    #[test]
+    fn a_free_worker_takes_ripe_work_first_then_the_easiest_affordable() {
+        // Ripe at start 5 wins, earliest on ties.
+        assert_eq!(choose(&[7, 5, 3, 3], 5, Some(7), true), Some((2, false)));
+        // Nothing ripe: the easiest task the GPU can afford, taken early.
+        assert_eq!(choose(&[8, 7, 9], 5, Some(7), true), Some((1, true)));
+        // Too hard for the budget, no measured rate, or no spare worker: wait.
+        assert_eq!(choose(&[8, 9], 5, Some(7), true), None);
+        assert_eq!(choose(&[7], 5, None, true), None);
+        assert_eq!(choose(&[7], 5, Some(7), false), None);
+        // A ceiling at or under start adds nothing.
+        assert_eq!(choose(&[6], 5, Some(5), true), None);
+        assert_eq!(choose(&[], 5, Some(7), true), None);
+    }
+
+    #[test]
+    fn affordable_difficulty_follows_the_measured_rate() {
+        use crate::hasher::tuner::affordable_difficulty;
+        // 20 MH/s: 16^7 = 268M tries ≈ 13 s fits 30 s; 16^8 ≈ 215 s does not.
+        assert_eq!(affordable_difficulty(2.0e7, 30.0), 7);
+        assert_eq!(affordable_difficulty(2.0e8, 30.0), 8, "16^8 / 2e8 = 21 s fits; 16^9 does not");
+        assert_eq!(affordable_difficulty(2.0e8, 20.0), 7);
+        assert_eq!(affordable_difficulty(1.0, 30.0), 1);
+        assert_eq!(affordable_difficulty(0.0, 30.0), 0);
     }
 }

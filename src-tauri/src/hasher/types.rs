@@ -1,6 +1,6 @@
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -288,6 +288,10 @@ pub struct TaskHandle {
     pub progress: Mutex<TaskProgress>,
     pub params: TaskParams,
     pub join_handle: Mutex<Option<JoinHandle<()>>>,
+    /// Set by the pool when an otherwise idle worker takes this task before
+    /// it decays to `difficulty_start`: the difficulty to grind at now (0 =
+    /// wait for the start as usual). See `pool::choose`.
+    pub grind_at: AtomicU64,
 }
 
 impl TaskHandle {
@@ -298,7 +302,16 @@ impl TaskHandle {
             progress: Mutex::new(progress),
             params,
             join_handle: Mutex::new(None),
+            grind_at: AtomicU64::new(0),
         }
+    }
+
+    /// The difficulty this task may start grinding at: its own or the
+    /// pool's `difficulty_start`, raised to `grind_at` when an idle worker
+    /// took it early.
+    pub fn start_difficulty(&self) -> u64 {
+        let base = self.params.difficulty_start.unwrap_or_else(crate::hasher::difficulty_start);
+        base.max(self.grind_at.load(Ordering::Relaxed))
     }
 
     pub fn is_cancelled(&self) -> bool {

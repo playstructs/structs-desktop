@@ -135,6 +135,19 @@ pub struct Plan {
     pub explore_ready: usize,
 }
 
+/// Whether a pick is already being worked: a task for the struct is queued or
+/// grinding (completed ones linger in the registry — those may re-issue), or
+/// a proof for this exact cycle is solved and waiting to be signed (the
+/// chain's clock stays put until it lands, so it still looks ripe — see
+/// hasher::PENDING_COMPLETIONS).
+fn already_queued(registry: &TaskRegistry, pick: &Pick) -> bool {
+    let queued = registry
+        .tasks
+        .get(&pick.struct_id)
+        .is_some_and(|t| matches!(t.snapshot().status.as_str(), "running" | "waiting" | "starting"));
+    queued || crate::hasher::completion_in_flight(&pick.struct_id) == Some(pick.anchor)
+}
+
 /// Turn forecasts into a scan plan. Pure. Work is started only when the
 /// forecast is READY: ripe at the execution height and every precondition the
 /// chain checks met. Blocked work is counted by the blocking rule; work with
@@ -344,10 +357,14 @@ async fn scan(
     // Prove what each pick's last check reads — the rig's status and the
     // planet's clock — in ONE batch against a header the light client
     // verified. Unprovable facts fall back to the ordinary reads below.
+    // Only picks this scan can actually start: one already queued or solved
+    // is skipped below anyway, and proving it cost two RPC queries per pick
+    // per scan (4,612 a minute with 2,306 refines queued on 2026-11-08).
     let facts: Vec<crate::mirror::verify::Fact> = plan
         .picks
         .values()
         .flatten()
+        .filter(|p| !already_queued(&registry, p))
         .flat_map(|p| {
             use crate::mirror::verify::{Fact, Store};
             let clock = if p.kind == crate::mcp::types::TaskType::Mine { "blockStartOreMine" } else { "blockStartOreRefine" };
@@ -390,19 +407,7 @@ async fn scan(
                 let mined_out = plan.mined_out.contains(pid.as_str());
                 for pick in plan.picks.get(pid.as_str()).into_iter().flatten() {
                     let sid = &pick.struct_id;
-                    // Skip if a task for this struct is already in flight
-                    // (completed ones linger in the registry — those we DO
-                    // allow to re-issue).
-                    if let Some(t) = registry.tasks.get(sid) {
-                        if matches!(t.snapshot().status.as_str(), "running" | "waiting" | "starting") {
-                            continue;
-                        }
-                    }
-                    // A proof for this exact cycle is already solved and
-                    // waiting to be signed: the chain's clock stays put until
-                    // it lands, so it still looks ripe. See
-                    // hasher::PENDING_COMPLETIONS.
-                    if crate::hasher::completion_in_flight(sid) == Some(pick.anchor) {
+                    if already_queued(&registry, pick) {
                         continue;
                     }
                     // ── CHAIN RE-VERIFY before committing GPU work. ──

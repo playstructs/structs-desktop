@@ -170,6 +170,22 @@ pub fn expected_solve_secs(digits: u64, rate_hps: f64) -> f64 {
     16f64.powi(digits as i32) / rate_hps
 }
 
+/// The per-task grind rate the tuner last measured (hashes/s), recent first
+/// then baseline. `None` before any solve has been timed.
+pub fn measured_rate() -> Option<f64> {
+    let sig = LAST_SIGNAL.lock().ok()?;
+    ["recent_grind_hps", "baseline_grind_hps"]
+        .iter()
+        .find_map(|k| sig.get(*k).and_then(|v| v.as_f64()))
+        .filter(|r| *r > 0.0)
+}
+
+/// The hardest difficulty (hex digits) a worker at `rate` clears within
+/// `budget_secs` on average. Pure.
+pub fn affordable_difficulty(rate_hps: f64, budget_secs: f64) -> u64 {
+    (1..=DIFF_MAX).take_while(|d| expected_solve_secs(*d, rate_hps) <= budget_secs).last().unwrap_or(0)
+}
+
 /// The tuner's last reading, for `structs_system status` — so a
 /// concurrency or difficulty change is explainable from the numbers it
 /// was made on, not reconstructed from the log afterwards.
