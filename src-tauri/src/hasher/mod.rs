@@ -413,7 +413,7 @@ pub fn maybe_complete_for_crew(app_handle: &AppHandle, snap: &TaskStateSnapshot)
             guard,
         )
         .await;
-        PENDING_COMPLETIONS.remove(&object_id);
+        release_claim(&object_id, solved_anchor, &signed);
 
         match signed {
             Ok(v) => {
@@ -461,6 +461,30 @@ pub fn maybe_complete_for_crew(app_handle: &AppHandle, snap: &TaskStateSnapshot)
 /// resource the whole economy is throttled by.
 static PENDING_COMPLETIONS: std::sync::LazyLock<dashmap::DashMap<String, u64>> =
     std::sync::LazyLock::new(dashmap::DashMap::new);
+
+/// Release a completion's claim once its sign returns. A sync sign returns
+/// after inclusion, so the claim goes now. An ASYNC sign returns at mempool
+/// acceptance, a block before the chain's clock moves: releasing then let the
+/// next scan see the old clock and solve the same proof again. So the claim
+/// stays until the settlement window has passed. It can only ever block this
+/// same anchor, and once the completion lands the clock has moved on; if it
+/// was dropped, the struct is free to retry after the window.
+fn release_claim(object_id: &str, anchor: u64, signed: &Result<serde_json::Value, String>) {
+    let is_async = signed.as_ref().is_ok_and(|v| v.get("async").and_then(|a| a.as_bool()) == Some(true));
+    if !is_async {
+        PENDING_COMPLETIONS.remove(object_id);
+        return;
+    }
+    let id = object_id.to_string();
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_secs(ASYNC_CLAIM_SECS)).await;
+        PENDING_COMPLETIONS.remove_if(&id, |_, a| *a == anchor);
+    });
+}
+
+/// How long an async completion keeps its claim: the settler's 90 s window
+/// plus slack.
+const ASYNC_CLAIM_SECS: u64 = 120;
 
 /// Completions solved and waiting to be signed (object id → anchor).
 pub fn completions_in_flight() -> Vec<(String, u64)> {
@@ -617,7 +641,7 @@ pub fn maybe_complete_virtual(app_handle: &AppHandle, snap: &TaskStateSnapshot) 
             &app, index, type_url, payload, &context, guard,
         )
         .await;
-        PENDING_COMPLETIONS.remove(&object_id);
+        release_claim(&object_id, solved_anchor, &signed);
         match signed
         {
             Ok(v) => {

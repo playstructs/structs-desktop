@@ -42,6 +42,13 @@ pub fn note_live_head(height: u64) {
     LIVE_AT_MS.store(now_millis() as u64, Ordering::Relaxed);
 }
 
+/// The reactor node's last reported head and how old that reading is (ms);
+/// `None` before the first poll.
+pub fn lcd_head() -> Option<(u64, u64)> {
+    let h = LCD_HEAD.load(Ordering::Relaxed);
+    (h > 0).then(|| (h, (now_millis() as u64).saturating_sub(LCD_AT_MS.load(Ordering::Relaxed))))
+}
+
 /// The reactor node's head, from its own latest-block endpoint.
 pub fn note_lcd_head(height: u64) {
     if height == 0 {

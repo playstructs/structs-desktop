@@ -33,7 +33,8 @@
 //! TRANSPORT. Plain LCD REST on the base every read already uses:
 //! `POST /cosmos/tx/v1beta1/txs` in BROADCAST_MODE_SYNC (the CheckTx result,
 //! so ante errors such as "zero charge this block" surface immediately) and
-//! `GET /cosmos/tx/v1beta1/txs/{hash}` for inclusion. Nothing touches :26657,
+//! `GET /cosmos/tx/v1beta1/txs/{hash}` for inclusion (async mode instead reads
+//! each block's results once: `txs?query=tx.height=H`). Nothing touches :26657,
 //! no websocket, no browser pool.
 //!
 //! OPT-IN. `sign_mode` "native" waits for inclusion; "native_async" returns
@@ -67,7 +68,6 @@ const INCLUSION_TIMEOUT_MS: u64 = 55_000;
 const INCLUSION_POLL_MS: u64 = 1_500;
 /// Async-mode settlement watch, mirroring `_vpWatchSettlement` in the patch.
 const SETTLE_TIMEOUT_MS: u64 = 90_000;
-const SETTLE_POLL_MS: u64 = 3_000;
 /// Concurrent native signs. The chain's tx gate (`tx_gate`) already orders
 /// admission; this only bounds the HTTP fan-out against one LCD.
 static NATIVE_GATE: Semaphore = Semaphore::const_new(16);
@@ -267,6 +267,7 @@ pub fn health() -> Value {
         "signs_failed": SIGNS_FAILED.load(Ordering::Relaxed),
         "sequence_resets": SEQ_RESETS.load(Ordering::Relaxed),
         "fallbacks_to_webview": FALLBACKS.load(Ordering::Relaxed),
+        "unsettled_async": unsettled_len(),
         "last_error": LAST_ERROR.lock().unwrap().clone(),
         "message_types": super::chain_codec::known_message_types(),
     })
@@ -462,51 +463,137 @@ async fn wait_for_inclusion(base: &str, hash: &str) -> Result<(i64, u64, String)
     }
 }
 
-/// Async mode: poll until the tx lands (or 90 s pass) and push ONE
-/// `tx_settled` event in the exact shape the JS watcher pushed, so
+/// Push ONE `tx_settled` event in the exact shape the JS watcher pushed, so
 /// `note_failed_settlement` ledgers a failure and the board shows it.
+async fn push_settled(app: &tauri::AppHandle, hash: &str, u: &Unsettled, status: &str, code: Option<i64>, height: Option<u64>, raw_log: Option<String>, error: Option<String>) {
+    let ev = super::event_buffer::GameEvent {
+        category: "tx_settled".to_string(),
+        subject: format!("{} {}", u.type_url, u.signer),
+        detail: json!({
+            "action": u.type_url, "status": status, "code": code, "transactionHash": hash,
+            "height": height, "error": error, "rawLog": raw_log, "signer": u.signer,
+            "async": true, "native": true,
+        }),
+        timestamp: now_ms(),
+    };
+    let _ = super::event_buffer::push_game_event(app.clone(), ev).await;
+}
+
+/// An accepted async tx not yet seen in a block.
+struct Unsettled {
+    type_url: String,
+    signer: String,
+    submitted_ms: f64,
+}
+
+/// Async txs awaiting their block, by upper-case hash.
+static UNSETTLED: LazyLock<Mutex<std::collections::HashMap<String, Unsettled>>> =
+    LazyLock::new(|| Mutex::new(std::collections::HashMap::new()));
+static SETTLER_RUNNING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// How often the settler looks for new blocks. Blocks run ~5.3 s.
+const SETTLE_TICK_MS: u64 = 2_000;
+/// Most blocks one tick reads, so a long outage catches up in steps.
+const SETTLE_MAX_BLOCKS_PER_TICK: u64 = 20;
+
+/// One block's tx results from `GET /cosmos/tx/v1beta1/txs?query=tx.height=H`:
+/// (upper-case hash, code, raw_log), plus the total the node reports. Pure.
+fn parse_block_txs(v: &Value) -> (Vec<(String, i64, String)>, usize) {
+    let rows: Vec<(String, i64, String)> = v
+        .get("tx_responses")
+        .and_then(|r| r.as_array())
+        .into_iter()
+        .flatten()
+        .filter_map(|r| {
+            let hash = r.get("txhash")?.as_str()?.to_ascii_uppercase();
+            let code = r.get("code").and_then(|c| c.as_i64()).unwrap_or(0);
+            Some((hash, code, r.get("raw_log").and_then(|l| l.as_str()).unwrap_or("").to_string()))
+        })
+        .collect();
+    let total = crate::mcp::types::numeric_u64(v.get("total")).map(|t| t as usize).unwrap_or(rows.len());
+    (rows, total)
+}
+
+/// Every tx in block `height`, all pages.
+async fn block_txs(base: &str, height: u64) -> Result<Vec<(String, i64, String)>, String> {
+    let mut out = Vec::new();
+    loop {
+        let url = format!("{base}/cosmos/tx/v1beta1/txs?query=tx.height%3D{height}&pagination.limit=100&pagination.offset={}", out.len());
+        let v = super::cosmos_client::get_json(&url).await?;
+        let (rows, total) = parse_block_txs(&v);
+        let got = rows.len();
+        out.extend(rows);
+        if got == 0 || out.len() >= total {
+            return Ok(out);
+        }
+    }
+}
+
+/// Async mode: hand the accepted tx to the ONE settler. It reads each new
+/// block's results once — a single LCD request per block however many txs
+/// are in flight — where a poller per tx cost a request every 3 s each
+/// (~50 a second at the throughput async exists for).
 fn spawn_settlement_watch(app: tauri::AppHandle, base: String, hash: String, type_url: String, signer: String) {
+    UNSETTLED.lock().unwrap().insert(hash.to_ascii_uppercase(), Unsettled { type_url, signer, submitted_ms: now_ms() });
+    if SETTLER_RUNNING.swap(true, Ordering::SeqCst) {
+        return;
+    }
     tokio::spawn(async move {
-        let started = now_ms();
-        let push = |status: &str, code: Option<i64>, height: Option<u64>, raw_log: Option<String>, error: Option<String>| {
-            let app = app.clone();
-            let ev = super::event_buffer::GameEvent {
-                category: "tx_settled".to_string(),
-                subject: format!("{type_url} {signer}"),
-                detail: json!({
-                    "action": type_url, "status": status, "code": code, "transactionHash": hash,
-                    "height": height, "error": error, "rawLog": raw_log, "signer": signer,
-                    "async": true, "native": true,
-                }),
-                timestamp: now_ms(),
-            };
-            async move {
-                let _ = super::event_buffer::push_game_event(app, ev).await;
-            }
-        };
+        // The last block whose results were read; starts one before the
+        // node's head when the first tx is handed over.
+        let mut done: Option<u64> = None;
         loop {
-            tokio::time::sleep(Duration::from_millis(SETTLE_POLL_MS)).await;
-            match lookup_tx(&base, &hash).await {
-                Ok(Some((code, height, raw_log))) => {
+            tokio::time::sleep(Duration::from_millis(SETTLE_TICK_MS)).await;
+            if UNSETTLED.lock().unwrap().is_empty() {
+                done = None;
+                continue;
+            }
+            // The node we query answers only up to ITS head; past it an
+            // empty list would read as "not in this block".
+            let head = match super::chain_health::lcd_head() {
+                Some((h, age)) if age < 30_000 => h,
+                _ => match super::cosmos_client::get_json(&format!("{base}/cosmos/base/tendermint/v1beta1/blocks/latest")).await {
+                    Ok(v) => match super::perception::latest_block_height(&v) {
+                        Some(h) => h,
+                        None => continue,
+                    },
+                    Err(_) => continue,
+                },
+            };
+            let from = done.map_or(head.saturating_sub(1), |d| d + 1);
+            let to = head.min(from + SETTLE_MAX_BLOCKS_PER_TICK - 1);
+            for h in from..=to {
+                let txs = match block_txs(&base, h).await {
+                    Ok(t) => t,
+                    Err(_) => break, // retry this block next tick
+                };
+                done = Some(h);
+                for (hash, code, raw_log) in txs {
+                    let Some(u) = UNSETTLED.lock().unwrap().remove(&hash) else { continue };
                     let ok = code == 0;
-                    let err = if ok { None } else { Some(if raw_log.is_empty() { format!("code {code}") } else { raw_log.clone() }) };
-                    push(if ok { "succeeded" } else { "dropped" }, Some(code), Some(height), Some(raw_log), err).await;
-                    return;
-                }
-                Ok(None) => {}
-                Err(e) => {
-                    if now_ms() - started > SETTLE_TIMEOUT_MS as f64 {
-                        push("dropped", None, None, None, Some(format!("tx lookup failed: {e}"))).await;
-                        return;
-                    }
+                    let err = (!ok).then(|| if raw_log.is_empty() { format!("code {code}") } else { raw_log.clone() });
+                    push_settled(&app, &hash, &u, if ok { "succeeded" } else { "dropped" }, Some(code), Some(h), Some(raw_log), err).await;
                 }
             }
-            if now_ms() - started > SETTLE_TIMEOUT_MS as f64 {
-                push("dropped", None, None, None, Some("not in a block after 90s".to_string())).await;
-                return;
+            // Only once the settler has caught up can a missing tx be called
+            // dropped.
+            if done.is_some_and(|d| d >= head) {
+                let now = now_ms();
+                let expired: Vec<(String, Unsettled)> = {
+                    let mut m = UNSETTLED.lock().unwrap();
+                    let keys: Vec<String> = m.iter().filter(|(_, u)| now - u.submitted_ms > SETTLE_TIMEOUT_MS as f64).map(|(k, _)| k.clone()).collect();
+                    keys.into_iter().filter_map(|k| m.remove(&k).map(|u| (k, u))).collect()
+                };
+                for (hash, u) in expired {
+                    push_settled(&app, &hash, &u, "dropped", None, None, None, Some("not in a block after 90s".to_string())).await;
+                }
             }
         }
     });
+}
+
+/// Async txs still waiting for their block. Telemetry.
+pub fn unsettled_len() -> usize {
+    UNSETTLED.lock().map(|m| m.len()).unwrap_or(0)
 }
 
 /// Sign `payload` as HD index `index` and broadcast it. Same result shape and
@@ -567,6 +654,19 @@ pub async fn sign(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn one_blocks_results_are_read_by_hash() {
+        let v = json!({"tx_responses": [
+            {"txhash": "ab12", "code": 0, "height": "7", "raw_log": ""},
+            {"txhash": "CD34", "code": 2022, "raw_log": "already discharged"},
+            {"code": 0}
+        ], "total": "3"});
+        let (rows, total) = parse_block_txs(&v);
+        assert_eq!(total, 3);
+        assert_eq!(rows, vec![("AB12".to_string(), 0, String::new()), ("CD34".to_string(), 2022, "already discharged".to_string())]);
+        assert_eq!(parse_block_txs(&json!({})), (vec![], 0));
+    }
 
     /// Throwaway mnemonic; the expected values come from
     /// `structsd keys add --recover --hd-path "m/44'/118'/0'/0/N"`.
