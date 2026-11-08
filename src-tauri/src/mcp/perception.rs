@@ -41,7 +41,7 @@
 
 use serde_json::{json, Map, Value};
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{LazyLock, Mutex, RwLock};
 
 use super::cosmos_client::CosmosClient;
@@ -178,6 +178,15 @@ pub struct Snapshot {
     /// and every scan for those minutes walked the chain per struct —
     /// 6,000 LCD reads in three minutes with a perfectly good snapshot.
     pub last_frame_ms: f64,
+    /// Every LCD page of the bulk walk was served at exactly `height` (the
+    /// `x-cosmos-block-height` pin): the rows are ONE chain state. False for
+    /// guild snapshots (the indexer cannot be pinned) and for an LCD walk
+    /// that had to fall back to unpinned pages.
+    pub pinned: bool,
+    /// Live frames lost while this snapshot was being fetched (the replay
+    /// queue was full). Non-zero = the snapshot may be missing changes made
+    /// after its pages; the next refresh repairs it.
+    pub replay_gap: u64,
     /// Rows the ingest edge refused because an id did not parse (a struct
     /// with no valid id, an owner that is not a player, a location that is
     /// not an object). Counted, never silently absorbed; a refresh with more
@@ -1043,6 +1052,8 @@ impl Snapshot {
             "events_skipped_stale": self.events_skipped_stale,
             "events_malformed": self.events_malformed,
             "rejected_rows": self.rejected_rows,
+            "pinned": self.pinned,
+            "replay_gap": self.replay_gap,
             "pending_new_structs": self.pending_new.len(),
             "fed_by": fed_by(),
             "hot_age_s": hot_age_ms().map(|a| (a / 1000.0) as u64),
@@ -1068,6 +1079,42 @@ static REFRESHING: AtomicBool = AtomicBool::new(false);
 static REFRESH_DONE: tokio::sync::Notify = tokio::sync::Notify::const_new();
 static PENDING: LazyLock<Mutex<Vec<(String, String, Value)>>> = LazyLock::new(|| Mutex::new(Vec::new()));
 const PENDING_CAP: usize = 20_000;
+/// Frames dropped because PENDING was full, since the current refresh began.
+static PENDING_DROPPED: AtomicU64 = AtomicU64::new(0);
+
+/// The last [`RECENT_CAP`] height-stamped frames, whether or not a refresh is
+/// running. GRASS can run ahead of the LCD node a refresh is pinned to, so a
+/// frame for a block past the pin can arrive just BEFORE the refresh starts —
+/// too early for PENDING, too new for the pages. Those are replayed from here.
+const RECENT_CAP: usize = 4_096;
+static RECENT: LazyLock<Mutex<std::collections::VecDeque<(u64, u64, String, String, Value)>>> =
+    LazyLock::new(|| Mutex::new(std::collections::VecDeque::with_capacity(RECENT_CAP)));
+static FRAME_SEQ: AtomicU64 = AtomicU64::new(0);
+
+fn frame_block_height(detail: &Value) -> u64 {
+    let bh = to_u64(detail.get("block_height"));
+    if bh != 0 {
+        return bh;
+    }
+    detail.get("detail").map(|d| to_u64(d.get("block_height"))).unwrap_or(0)
+}
+
+/// Frames that arrived before `before_seq` and describe a block strictly
+/// after `height` — newer than every page of a snapshot taken at `height`.
+fn recent_frames_after(before_seq: u64, height: u64) -> Vec<(String, String, Value)> {
+    RECENT.lock().map(|q| select_frames_after(q.iter(), before_seq, height)).unwrap_or_default()
+}
+
+fn select_frames_after<'a>(
+    frames: impl Iterator<Item = &'a (u64, u64, String, String, Value)>,
+    before_seq: u64,
+    height: u64,
+) -> Vec<(String, String, Value)> {
+    frames
+        .filter(|(seq, bh, ..)| *seq < before_seq && *bh > height)
+        .map(|(_, _, c, s, d)| (c.clone(), s.clone(), d.clone()))
+        .collect()
+}
 
 /// Read the live snapshot, if one has been taken. Callers hold the read lock
 /// only for the closure — clone out what you need, do not await inside.
@@ -1116,10 +1163,22 @@ pub fn is_ready() -> bool {
 /// webapp subscribes `structs.>`, so the whole galaxy's deltas pass through).
 /// Cheap: a category match and one hash-map write.
 pub fn on_grass(category: &str, subject: &str, detail: &Value) {
+    let bh = frame_block_height(detail);
+    if bh != 0 {
+        let seq = FRAME_SEQ.fetch_add(1, Ordering::Relaxed);
+        if let Ok(mut q) = RECENT.lock() {
+            if q.len() >= RECENT_CAP {
+                q.pop_front();
+            }
+            q.push_back((seq, bh, category.to_string(), subject.to_string(), detail.clone()));
+        }
+    }
     if REFRESHING.load(Ordering::Relaxed) {
         if let Ok(mut q) = PENDING.lock() {
             if q.len() < PENDING_CAP {
                 q.push((category.to_string(), subject.to_string(), detail.clone()));
+            } else {
+                PENDING_DROPPED.fetch_add(1, Ordering::Relaxed);
             }
         }
         // Fall through: also apply to the OLD snapshot so readers during the
@@ -1457,6 +1516,9 @@ pub(crate) fn snapshot_plausible(prev: Option<(usize, usize, usize)>, new: (usiz
 /// Build a snapshot from the guild catalog. Errors (so the caller can fall
 /// back to the LCD) when a store that can never legitimately be empty is.
 async fn guild_pages(client: &CosmosClient, t0: f64) -> Result<Snapshot, String> {
+    // The indexer cannot be pinned, so bracket the walk: every row describes
+    // some state between the indexer's height before and after it.
+    let start_height = client.guild.indexer_height().await.unwrap_or(0);
     let result = tokio::join!(
         walk_guild_list(client, "/api/struct/list/all"),
         walk_guild_list(client, "/api/struct-attribute/all"),
@@ -1499,6 +1561,9 @@ async fn guild_pages(client: &CosmosClient, t0: f64) -> Result<Snapshot, String>
         snap.height = client.guild.indexer_height().await.unwrap_or(0);
     }
     snap.min_height = heights.iter().copied().filter(|h| *h > 0).min().unwrap_or(snap.height);
+    if start_height > 0 && start_height < snap.min_height {
+        snap.min_height = start_height;
+    }
     snap.taken_ms = t0;
     // Grid GRASS frames carry the indexer's `updated_at`; the indexer and this
     // machine keep wall clocks, so "served now" is the right freshness anchor.
@@ -1558,7 +1623,7 @@ pub async fn hot_refresh_ore_clocks(client: &CosmosClient) -> Result<usize, Stri
 /// v0.22 1000-row cap, every two minutes) against ~91k clock rows.
 async fn lcd_planet_clock_sweep(client: &CosmosClient) -> Result<usize, String> {
     let (rows, _, _) =
-        walk_store(client, "/structs/planet_attribute", "planetAttributeRecords", Some("12-"), Some("14-")).await?;
+        walk_store(client, "/structs/planet_attribute", "planetAttributeRecords", Some("12-"), Some("14-"), None).await?;
     if rows.is_empty() {
         return Err("planet_attribute store returned no rows".into());
     }
@@ -2058,18 +2123,44 @@ pub fn install_snapshot(snap: Snapshot, source: &'static str) {
     *FED_BY.lock().unwrap_or_else(|e| e.into_inner()) = source;
 }
 
-/// The original source: the chain's own stores in 60k-row pages.
+/// The node's latest committed height, from `/cosmos/base/tendermint/v1beta1/blocks/latest`.
+pub(crate) fn latest_block_height(v: &Value) -> Option<u64> {
+    crate::mcp::types::numeric_u64(v.get("block")?.get("header")?.get("height"))
+}
+
+/// The original source: the chain's own stores, every page pinned to ONE
+/// height so the snapshot is a single chain state. If the node will not serve
+/// the pin (pruned mid-walk, a proxy dropping the header), the walk is redone
+/// unpinned and the snapshot says so.
 async fn lcd_pages(client: &CosmosClient, t0: f64) -> Result<Snapshot, String> {
+    let pin = match client.lcd_get("/cosmos/base/tendermint/v1beta1/blocks/latest").await {
+        Ok(v) => latest_block_height(&v),
+        Err(_) => None,
+    };
+    if let Some(h) = pin {
+        match lcd_pages_at(client, t0, Some(h)).await {
+            Ok(snap) => return Ok(snap),
+            Err(e) => crate::mcp::telemetry::tlog(
+                "perception",
+                crate::mcp::telemetry::Sev::Warn,
+                format!("pinned LCD walk at {h} failed, walking unpinned: {e}"),
+            ),
+        }
+    }
+    lcd_pages_at(client, t0, None).await
+}
+
+async fn lcd_pages_at(client: &CosmosClient, t0: f64, at: Option<u64>) -> Result<Snapshot, String> {
     let result = tokio::join!(
-        walk_store(client, "/structs/struct", "Struct", None, None),
+        walk_store(client, "/structs/struct", "Struct", None, None, at),
         // The struct_attribute store rejects an un-keyed walk (query gas), but
         // walks fine from its first key.
-        walk_store(client, "/structs/struct_attribute", "structAttributeRecords", Some("0-"), None),
-        walk_store(client, "/structs/planet_attribute", "planetAttributeRecords", None, None),
-        walk_store(client, "/structs/grid", "gridRecords", None, None),
-        walk_store(client, "/structs/player", "Player", None, None),
-        walk_store(client, "/structs/planet", "Planet", None, None),
-        walk_store(client, "/structs/fleet", "Fleet", None, None),
+        walk_store(client, "/structs/struct_attribute", "structAttributeRecords", Some("0-"), None, at),
+        walk_store(client, "/structs/planet_attribute", "planetAttributeRecords", None, None, at),
+        walk_store(client, "/structs/grid", "gridRecords", None, None, at),
+        walk_store(client, "/structs/player", "Player", None, None, at),
+        walk_store(client, "/structs/planet", "Planet", None, None, at),
+        walk_store(client, "/structs/fleet", "Fleet", None, None, at),
     );
     let (st, sa, pa, gr, pl, pn, fl) = (result.0?, result.1?, result.2?, result.3?, result.4?, result.5?, result.6?);
     let heights = [st.1, sa.1, pa.1, gr.1, pl.1, pn.1, fl.1];
@@ -2079,6 +2170,9 @@ async fn lcd_pages(client: &CosmosClient, t0: f64) -> Result<Snapshot, String> {
     }
     snap.height = heights.iter().copied().max().unwrap_or(0);
     snap.min_height = heights.iter().copied().filter(|h| *h > 0).min().unwrap_or(0);
+    // Every page was refused unless served at the pin, so a pinned walk that
+    // completes IS one height.
+    snap.pinned = at.is_some_and(|h| snap.height == h && snap.min_height == h);
     snap.taken_ms = t0;
     snap.taken_unix_s = [st.2, sa.2, pa.2, gr.2, pl.2, pn.2, fl.2].into_iter().fold(0.0, f64::max);
     Ok(snap)
@@ -2092,6 +2186,7 @@ async fn walk_store(
     list_key: &str,
     start_key: Option<&str>,
     end_before: Option<&str>,
+    at: Option<u64>,
 ) -> Result<(Vec<Value>, u64, f64), String> {
     use base64::Engine as _;
     let b64 = &base64::engine::general_purpose::STANDARD;
@@ -2104,7 +2199,7 @@ async fn walk_store(
             Some(k) => format!("{path}?pagination.limit={PAGE_LIMIT}&pagination.key={}", super::cosmos_client::encode_pagination_key(k)),
             None => format!("{path}?pagination.limit={PAGE_LIMIT}"),
         };
-        let (body, h, st) = client.lcd_get_bulk(&q).await?;
+        let (body, h, st) = client.lcd_get_bulk_at(&q, at).await?;
         height = height.max(h);
         server_time = f64::max(server_time, st);
         if let Some(arr) = body.get(list_key).and_then(|v| v.as_array()) {
@@ -2133,6 +2228,8 @@ pub async fn refresh(client: &CosmosClient) -> Result<Value, String> {
         return join_running_refresh().await;
     }
     let t0 = crate::hasher::types::now_millis();
+    let start_seq = FRAME_SEQ.load(Ordering::Relaxed);
+    PENDING_DROPPED.store(0, Ordering::Relaxed);
     let mut fed = "lcd";
     let outcome = match snapshot_source() {
         SnapshotSource::Guild => match guild_pages(client, t0).await {
@@ -2153,10 +2250,23 @@ pub async fn refresh(client: &CosmosClient) -> Result<Value, String> {
     };
     let summary = match outcome {
         Ok(mut snap) => {
-            // Replay what arrived mid-fetch, then swap in.
+            // Replay frames newer than every page that arrived just before
+            // the fetch began, then what arrived mid-fetch, then swap in.
+            let early = recent_frames_after(start_seq, snap.height);
+            for (c, s, d) in &early {
+                snap.apply(c, s, d);
+            }
             let pending: Vec<_> = PENDING.lock().map(|mut q| std::mem::take(&mut *q)).unwrap_or_default();
             for (c, s, d) in &pending {
                 snap.apply(c, s, d);
+            }
+            snap.replay_gap = PENDING_DROPPED.swap(0, Ordering::Relaxed);
+            if snap.replay_gap > 0 {
+                crate::mcp::telemetry::tlog(
+                    "perception",
+                    crate::mcp::telemetry::Sev::Warn,
+                    format!("snapshot refresh dropped {} live frames (replay queue full) — it may miss recent changes", snap.replay_gap),
+                );
             }
             let s = snap.summary();
             // A full refresh is the one moment the snapshot is known-good
@@ -2167,10 +2277,12 @@ pub async fn refresh(client: &CosmosClient) -> Result<Value, String> {
                 "perception",
                 crate::mcp::telemetry::Sev::Info,
                 format!(
-                    "snapshot refreshed @{} in {:.1}s ({} replayed)",
+                    "snapshot refreshed @{}{} in {:.1}s ({} replayed, {} from before the fetch)",
                     s.get("height").and_then(|h| h.as_u64()).unwrap_or(0),
+                    if s.get("pinned").and_then(|p| p.as_bool()).unwrap_or(false) { " (pinned)" } else { "" },
                     (crate::hasher::types::now_millis() - t0) / 1000.0,
-                    pending.len()
+                    pending.len(),
+                    early.len()
                 ),
                 s.clone(),
             );
@@ -2219,6 +2331,49 @@ async fn join_running_refresh() -> Result<Value, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn early_frames_are_replayed_only_if_newer_than_every_page() {
+        let f = |seq, bh| (seq, bh, "c".to_string(), "s".to_string(), json!({"block_height": bh}));
+        let frames = vec![f(1, 99), f(2, 100), f(3, 101), f(9, 105)];
+        // Refresh began at seq 5 and is pinned at 100: only the frame for block
+        // 101 that arrived before the start is new to the pages. Seq 9 arrived
+        // mid-fetch and is PENDING's to replay.
+        let got = select_frames_after(frames.iter(), 5, 100);
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].2["block_height"], 101);
+    }
+
+    #[test]
+    fn frame_heights_are_read_flat_or_nested() {
+        assert_eq!(frame_block_height(&json!({"block_height": "42"})), 42);
+        assert_eq!(frame_block_height(&json!({"detail": {"block_height": 7}})), 7);
+        assert_eq!(frame_block_height(&json!({"category": "x"})), 0);
+    }
+
+    #[test]
+    fn latest_block_height_parses_the_tendermint_shape() {
+        assert_eq!(latest_block_height(&json!({"block": {"header": {"height": "3485089"}}})), Some(3_485_089));
+        assert_eq!(latest_block_height(&json!({"block": {}})), None);
+    }
+
+    /// Walk one real store pinned to the node's tip and check every page was
+    /// served there. Read-only, ~15 requests:
+    /// `cargo test perception::tests::live_pinned_walk -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn live_pinned_walk() {
+        let client = CosmosClient::new();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let tip = latest_block_height(&client.lcd_get("/cosmos/base/tendermint/v1beta1/blocks/latest").await.unwrap()).unwrap();
+            let pin = tip - 3;
+            let (rows, h, _) = walk_store(&client, "/structs/fleet", "Fleet", None, None, Some(pin)).await.unwrap();
+            println!("tip {tip}, pinned {pin}: {} fleet rows, every page served at {h}", rows.len());
+            assert_eq!(h, pin);
+            assert!(rows.len() > 1000);
+        });
+    }
 
     #[test]
     fn guild_walk_cap_clears_the_october_2026_store_size() {

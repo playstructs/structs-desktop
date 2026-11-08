@@ -27,6 +27,12 @@ pub struct Provenance {
     pub min_height: u64,
     /// `min_height == height`: every row describes the same block.
     pub coherent: bool,
+    /// Every bulk page was served pinned to `height` (an LCD walk with the
+    /// height header): coherence proven by the node, not inferred.
+    pub pinned: bool,
+    /// Live frames dropped while the snapshot was fetched; non-zero means it
+    /// may miss changes after its pages.
+    pub replay_gap: u64,
     /// "guild" or "lcd" — which feed served the bulk pages.
     pub source: String,
     /// Seconds since the bulk pages were served (live events may be newer).
@@ -210,6 +216,8 @@ impl World {
                 height: snap.height,
                 min_height: snap.min_height,
                 coherent: snap.min_height == snap.height && snap.height > 0,
+                pinned: snap.pinned,
+                replay_gap: snap.replay_gap,
                 source: source.to_string(),
                 age_s: (snap.age_ms() / 1000.0).max(0.0),
                 events_applied: snap.events_applied,

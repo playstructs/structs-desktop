@@ -103,11 +103,18 @@ pub fn render(now: &Now, limit: usize, kinds: Option<&[String]>) -> String {
         "  world: {} snapshot, pages {}{}, {:.0}s old, {} live events applied{}\n",
         p.source,
         if p.coherent { format!("at {}", p.height) } else { format!("{}–{}", p.min_height, p.height) },
-        if p.coherent { "" } else { " (straddles blocks)" },
+        match (p.pinned, p.coherent) {
+            (true, _) => " (pinned: one chain state)",
+            (false, true) => "",
+            (false, false) => " (straddles blocks)",
+        },
         p.age_s,
         p.events_applied,
         if now.tip > p.height { format!(", tip {} blocks past the pages", now.tip - p.height) } else { String::new() },
     ));
+    if p.replay_gap > 0 {
+        out.push_str(&format!("  continuity: {} live events were dropped during the last refresh — recent changes may be missing\n", p.replay_gap));
+    }
     match &now.power {
         Some(n) => {
             out.push_str(&format!("  power: chain's usable capacity read for {} of {} owners", n.read, n.owners));
@@ -179,6 +186,8 @@ mod tests {
                 height: 100,
                 min_height: 98,
                 coherent: false,
+                pinned: false,
+                replay_gap: 0,
                 source: "guild".into(),
                 age_s: 12.0,
                 events_applied: 3,

@@ -412,6 +412,14 @@ impl CosmosClient {
     /// timeout and turn one big read into a retry storm. Not retried here:
     /// the caller decides whether a failed snapshot matters.
     pub async fn lcd_get_bulk(&self, path: &str) -> Result<(Value, u64, f64), String> {
+        self.lcd_get_bulk_at(path, None).await
+    }
+
+    /// [`lcd_get_bulk`](Self::lcd_get_bulk) answered AT `height`: the
+    /// `x-cosmos-block-height` request header makes the node serve that
+    /// block's state (within its pruning window). A pinned read whose answer
+    /// comes back at any other height is refused, never mixed in.
+    pub async fn lcd_get_bulk_at(&self, path: &str, height: Option<u64>) -> Result<(Value, u64, f64), String> {
         note_lcd_request_for(path);
         static BULK_CLIENT: OnceLock<Client> = OnceLock::new();
         let c = BULK_CLIENT.get_or_init(|| {
@@ -424,14 +432,24 @@ impl CosmosClient {
         });
         let base = self.reactor_api.read().unwrap().clone();
         let url = format!("{}{}", base.trim_end_matches('/'), path);
-        let resp = c.get(&url).send().await.map_err(|e| format!("HTTP error: {}", e))?;
+        let mut req = c.get(&url);
+        if let Some(h) = height {
+            req = req.header("x-cosmos-block-height", h.to_string());
+        }
+        let resp = req.send().await.map_err(|e| format!("HTTP error: {}", e))?;
         let status = resp.status();
-        let height = resp
+        let served_at = resp
             .headers()
             .get("grpc-metadata-x-cosmos-block-height")
             .and_then(|h| h.to_str().ok())
             .and_then(|s| s.parse::<u64>().ok())
             .unwrap_or(0);
+        if let Some(h) = height {
+            if status.is_success() && served_at != h {
+                return Err(format!("pinned read at {h} was served at {served_at} — refusing a mixed-height page"));
+            }
+        }
+        let height = served_at;
         let server_time = resp
             .headers()
             .get("x-server-time")
