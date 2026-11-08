@@ -103,7 +103,9 @@ impl McpServer {
                             ))
                             .unwrap());
                     }
-                    Ok::<_, std::convert::Infallible>(next.run(req).await)
+                    let is_mcp = path.starts_with("/mcp");
+                    let resp = next.run(req).await;
+                    Ok::<_, std::convert::Infallible>(if is_mcp { unknown_session_is_not_found(resp) } else { resp })
                 }
             }));
 
@@ -148,5 +150,46 @@ impl McpServer {
 
     pub fn stop(&self) {
         let _ = self.shutdown_tx.send(true);
+    }
+}
+
+/// An authenticated `/mcp` request whose `mcp-session-id` the server does not
+/// know gets 401 "Session not found" from rmcp's session layer. Sessions live
+/// in memory, so every app restart invalidates every connected client's id.
+/// A 401 sends Claude Code into its OAuth flow — which this server does not
+/// offer (Dynamic Client Registration answers 400), so the client stays
+/// disconnected until the user restarts it. The MCP spec answer for an
+/// unknown session is 404, which tells the client to re-`initialize`. Our own
+/// token check answers 400, so a 401 here can only be the session layer's.
+fn unknown_session_is_not_found(resp: axum08::response::Response) -> axum08::response::Response {
+    if resp.status() != axum08::http::StatusCode::UNAUTHORIZED {
+        return resp;
+    }
+    axum08::http::Response::builder()
+        .status(axum08::http::StatusCode::NOT_FOUND)
+        .header("content-type", "text/plain")
+        .body(axum08::body::Body::from("Session not found"))
+        .unwrap()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum08::http::StatusCode;
+
+    fn resp(status: StatusCode) -> axum08::response::Response {
+        axum08::http::Response::builder().status(status).body(axum08::body::Body::empty()).unwrap()
+    }
+
+    #[test]
+    fn a_stale_session_answers_404_so_the_client_reinitialises() {
+        assert_eq!(unknown_session_is_not_found(resp(StatusCode::UNAUTHORIZED)).status(), StatusCode::NOT_FOUND);
+    }
+
+    #[test]
+    fn every_other_status_passes_through() {
+        for s in [StatusCode::OK, StatusCode::ACCEPTED, StatusCode::BAD_REQUEST, StatusCode::NOT_FOUND, StatusCode::INTERNAL_SERVER_ERROR] {
+            assert_eq!(unknown_session_is_not_found(resp(s)).status(), s);
+        }
     }
 }
