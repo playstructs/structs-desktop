@@ -254,6 +254,14 @@ pub fn on_sync(app: &AppHandle) {
     tokio::spawn(async {
         crate::mirror::epoch::refresh(&crate::mcp::cosmos_client::CosmosClient::new()).await;
     });
+    // Keep the snapshot on its own clock. The loops call this only when a
+    // scan STARTS, and a sign-bound scan can run for half an hour: on
+    // 2026-11-08 harvest, build and defend each spent ~33 min in one scan,
+    // nothing refreshed, the snapshot went 34 min stale, and the loops fell
+    // back to ~2,500 single-struct chain reads a minute and signed against
+    // drifted state (59 failed defense clears). A no-op unless one is due and
+    // none is running.
+    crate::mcp::perception::maybe_refresh(&crate::mcp::cosmos_client::CosmosClient::new());
     // ── Combat ── a raid resolves in about four minutes end to end, and every
     // defensive win on record fired back inside the first two.
     spawn!(app, |a| crate::mcp::auto_response::tick(a, false));

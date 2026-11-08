@@ -513,6 +513,17 @@ fn parse_block_txs(v: &Value) -> (Vec<(String, i64, String)>, usize) {
     (rows, total)
 }
 
+/// How many txs block `height` carries, from the block itself.
+async fn block_tx_count(base: &str, height: u64) -> Result<usize, String> {
+    let v = super::cosmos_client::get_json(&format!("{base}/cosmos/base/tendermint/v1beta1/blocks/{height}")).await?;
+    Ok(block_tx_count_of(&v))
+}
+
+/// The tx count of an LCD block response. Pure.
+fn block_tx_count_of(v: &Value) -> usize {
+    v.get("block").and_then(|b| b.get("data")).and_then(|d| d.get("txs")).and_then(|t| t.as_array()).map_or(0, |a| a.len())
+}
+
 /// Every tx in block `height`, all pages.
 async fn block_txs(base: &str, height: u64) -> Result<Vec<(String, i64, String)>, String> {
     let mut out = Vec::new();
@@ -559,12 +570,23 @@ fn spawn_settlement_watch(app: tauri::AppHandle, base: String, hash: String, typ
                     Err(_) => continue,
                 },
             };
+            // One block behind the head: the node indexes a block's txs in
+            // the background AFTER it reports the height.
+            let head = head.saturating_sub(1);
             let from = done.map_or(head.saturating_sub(1), |d| d + 1);
             let to = head.min(from + SETTLE_MAX_BLOCKS_PER_TICK - 1);
             for h in from..=to {
+                // A block is settled only once its index is COMPLETE. On
+                // 2026-11-08 the index answered a busy block (37 txs) before
+                // it had all of them; the block was marked read, and 640 txs
+                // that had landed with code 0 were reported "not in a block".
+                let in_block = match block_tx_count(&base, h).await {
+                    Ok(n) => n,
+                    Err(_) => break,
+                };
                 let txs = match block_txs(&base, h).await {
-                    Ok(t) => t,
-                    Err(_) => break, // retry this block next tick
+                    Ok(t) if t.len() >= in_block => t,
+                    _ => break, // index incomplete or unreachable: retry this block next tick
                 };
                 done = Some(h);
                 for (hash, code, raw_log) in txs {
@@ -666,6 +688,13 @@ mod tests {
         assert_eq!(total, 3);
         assert_eq!(rows, vec![("AB12".to_string(), 0, String::new()), ("CD34".to_string(), 2022, "already discharged".to_string())]);
         assert_eq!(parse_block_txs(&json!({})), (vec![], 0));
+    }
+
+    #[test]
+    fn a_block_is_counted_from_its_own_txs() {
+        assert_eq!(block_tx_count_of(&json!({"block": {"data": {"txs": ["a", "b", "c"]}}})), 3);
+        assert_eq!(block_tx_count_of(&json!({"block": {"data": {"txs": null}}})), 0);
+        assert_eq!(block_tx_count_of(&json!({})), 0);
     }
 
     /// Throwaway mnemonic; the expected values come from
