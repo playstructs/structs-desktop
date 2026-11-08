@@ -363,6 +363,8 @@ pub async fn sign_with_retry_guarded(
             return Err(gate_refusal(context, type_url, 1, t_gate, &d));
         }
     }
+    // What the mirror expects this message to do, checked once it lands.
+    let prediction = crate::mirror::preview::predict(type_url, &payload);
     for attempt in 1..=MAX_ATTEMPTS {
         // Admission gate: keeps the signing façade's own FIFO shallow so a
         // deadline-bound combat answer isn't stuck behind hundreds of bulk
@@ -451,16 +453,27 @@ pub async fn sign_with_retry_guarded(
                             crate::mcp::loop_util::note_charged_action(pid);
                         }
                     }
-                    // Our own action landed: clocks restarted, ore moved, a
-                    // planet changed. The need-gated loops re-forecast.
-                    crate::mcp::schedule::mark_dirty();
+                    // Our own action landed: a mine completion folds its
+                    // known next ripening into the harvest plan; anything else
+                    // that moved an economy input makes the loops re-forecast.
+                    crate::mcp::schedule::landed_with(type_url, &payload);
+                    if let Some(p) = prediction {
+                        crate::mirror::preview::landed(p);
+                    }
                     return Ok(value);
                 }
                 unreachable!("success outcome without value");
             }
             Some(class) => {
-                if let AttemptResult::Failure { raw, .. } = &outcome {
+                if let AttemptResult::Failure { raw, code } = &outcome {
                     last_err = raw.clone();
+                    // A refusal by the chain itself (it answered with a code),
+                    // not a transport failure: count it against the mirror.
+                    if code.is_some_and(|c| c != 0) && !class.retryable() {
+                        if let Some(p) = &prediction {
+                            crate::mirror::preview::refused(p, raw);
+                        }
+                    }
                 }
                 if class.retryable() && attempt < MAX_ATTEMPTS {
                     tokio::time::sleep(Duration::from_millis(jitter(class.delay_ms(attempt)))).await;
@@ -499,6 +512,7 @@ pub async fn submit_with_retry(
             Ok(resp) if resp.success => {
                 let r = AttemptResult::Success { tx_hash: resp.tx_hash.clone(), value: Value::Null };
                 record(context, action, attempt, started, &r);
+                crate::mcp::schedule::landed(action);
                 return Ok(resp);
             }
             Ok(resp) => AttemptResult::Failure {
@@ -558,6 +572,8 @@ pub async fn sign_once(
             return Err(gate_refusal(context, type_url, 1, started, &d));
         }
     }
+    let payload_seen = payload.clone();
+    let prediction = crate::mirror::preview::predict(type_url, &payload);
     let res = vplayer_bridge::sign_action(app, index, type_url, payload, 60).await;
     let outcome = match res {
         Ok(v) => {
@@ -585,7 +601,13 @@ pub async fn sign_once(
     };
     record(context, type_url, 1, started, &outcome);
     match outcome {
-        AttemptResult::Success { value, .. } => Ok(value),
+        AttemptResult::Success { value, .. } => {
+            crate::mcp::schedule::landed_with(type_url, &payload_seen);
+            if let Some(p) = prediction {
+                crate::mirror::preview::landed(p);
+            }
+            Ok(value)
+        }
         AttemptResult::Failure { raw, .. } => Err(translate_error(&raw)),
     }
 }
@@ -612,6 +634,7 @@ pub async fn submit_once(
             });
         }
     }
+    let prediction = crate::mirror::preview::predict(action, &args);
     let res = tx_queue::submit_tx(app, action.to_string(), args).await;
     let outcome = match &res {
         Ok(resp) if resp.success => AttemptResult::Success { tx_hash: resp.tx_hash.clone(), value: Value::Null },
@@ -622,6 +645,12 @@ pub async fn submit_once(
         Err(e) => AttemptResult::Failure { raw: e.clone(), code: None },
     };
     record(context, action, 1, started, &outcome);
+    if matches!(&res, Ok(r) if r.success) {
+        crate::mcp::schedule::landed(action);
+        if let Some(p) = prediction {
+            crate::mirror::preview::landed(p);
+        }
+    }
     res
 }
 

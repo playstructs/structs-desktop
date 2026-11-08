@@ -491,7 +491,7 @@ mod tests {
         for (id, ty, st, build) in [("5-1", "14", ONLINE_BUILT, 0), ("5-2", "7", ONLINE_BUILT, 0), ("5-3", "1", status::MATERIALIZED, 990)] {
             w.structs.insert(
                 id.into(),
-                StructState { id: id.into(), owner: "1-1".into(), type_id: ty.into(), status: st, build_start: build, planet: Some("2-1".into()) },
+                StructState { id: id.into(), owner: "1-1".into(), type_id: ty.into(), status: st, build_start: build, planet: Some("2-1".into()), ..Default::default() },
             );
         }
         w

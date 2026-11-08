@@ -89,6 +89,107 @@ pub fn report(name: &'static str, next_due: Option<u64>, pending: usize, summary
     }
 }
 
+/// Messages whose landing moves an input of the economy forecasts — ore and
+/// clocks (completions, a raid's end), where rigs stand and whether they run
+/// (explore, build, activate/deactivate, struct and fleet moves, trash), and
+/// power (allocations, substations, infusions, agreements). Defense wiring,
+/// stealth, attacks, permissions, guild and bank traffic change none of them,
+/// so they do not wake the need-gated loops.
+const ECONOMY_INPUTS: &[&str] = &[
+    "MsgStructOreMinerComplete",
+    "MsgStructOreRefineryComplete",
+    "MsgStructBuildComplete",
+    "MsgStructBuildInitiate",
+    "MsgStructBuildCancel",
+    "MsgPlanetExplore",
+    "MsgPlanetRaidComplete",
+    "MsgStructActivate",
+    "MsgStructDeactivate",
+    "MsgStructDeactivateBatch",
+    "MsgStructMove",
+    "MsgFleetMove",
+    "MsgStructTrash",
+    "MsgStructGeneratorInfuse",
+    "MsgReactorInfuse",
+    "MsgReactorDefuse",
+    "MsgReactorCancelDefusion",
+    "MsgAllocationCreate",
+    "MsgAllocationDelete",
+    "MsgAllocationUpdate",
+    "MsgAllocationTransfer",
+    "MsgSubstationAllocationConnect",
+    "MsgSubstationAllocationDisconnect",
+    "MsgSubstationPlayerConnect",
+    "MsgSubstationPlayerDisconnect",
+    "MsgSubstationPlayerMigrate",
+    "MsgAgreementOpen",
+    "MsgAgreementClose",
+    "MsgAgreementCapacityIncrease",
+    "MsgAgreementCapacityDecrease",
+];
+
+/// Does a landed message (type URL, bare name, or webview action like
+/// `struct_activate`) move an economy forecast input? Pure.
+pub fn affects_economy(action: &str) -> bool {
+    let name = action.rsplit('.').next().unwrap_or(action);
+    if ECONOMY_INPUTS.contains(&name) {
+        return true;
+    }
+    // Webview actions: snake_case of the message without `Msg`.
+    let camel: String = name
+        .split('_')
+        .map(|w| {
+            let mut c = w.chars();
+            c.next().map(|f| f.to_ascii_uppercase().to_string() + c.as_str()).unwrap_or_default()
+        })
+        .collect();
+    ECONOMY_INPUTS.contains(&format!("Msg{camel}").as_str())
+}
+
+/// One of our own messages landed: wake the need-gated loops if it moved
+/// something they forecast from.
+pub fn landed(action: &str) {
+    if affects_economy(action) {
+        mark_dirty();
+    }
+}
+
+/// A landed message with its payload. A MINE completion's effect on the
+/// harvest plan is known exactly — the planet's mine clock restarts at the
+/// inclusion height (`StructCache.OreMinePlanet`), so this rig is next ripe
+/// at that height plus `ready_age(range, aim)` — and is folded into the
+/// loop's next due height instead of forcing a rescan. Everything else that
+/// moves an economy input marks the loops changed (a refine can empty a pile
+/// and make an explore due; a build adds a rig).
+pub fn landed_with(type_url: &str, payload: &serde_json::Value) {
+    if type_url.ends_with("MsgStructOreMinerComplete") {
+        let sid = payload.get("structId").and_then(|s| s.as_str()).unwrap_or("");
+        let tip = crate::game_state::GAME_STATE.read().map(|g| g.current_block_height).unwrap_or(0);
+        let range = crate::mcp::perception::with_snapshot(|s| s.struct_row(sid).map(|r| r.type_id.clone()))
+            .flatten()
+            .and_then(|t| crate::game_state::GAME_STATE.read().ok()?.struct_types.get(&t).map(|t| t.ore_mining_difficulty))
+            .filter(|r| *r > 0);
+        let aim = crate::mcp::auto_harvest::get().difficulty_threshold;
+        match (tip, range.and_then(|r| crate::mirror::rules::ready_age(r, aim))) {
+            (t, Some(age)) if t > 0 => {
+                fold_due("auto_harvest", crate::mirror::rules::earliest_execution(t) + age);
+                return;
+            }
+            _ => {}
+        }
+    }
+    landed(type_url);
+}
+
+/// Bring a loop's next due height forward to `height` if that is sooner.
+pub fn fold_due(name: &'static str, height: u64) {
+    if let Ok(mut m) = STATE.lock() {
+        if let Some(st) = m.get_mut(name) {
+            st.next_due = Some(st.next_due.map_or(height, |d| d.min(height)));
+        }
+    }
+}
+
 /// Something changed that forecasts do not show; every need-gated loop runs
 /// at its next interval.
 pub fn mark_dirty() {
@@ -259,6 +360,27 @@ mod tests {
     #[test]
     fn the_backstop_catches_what_nothing_reported() {
         assert_eq!(reason_to_run(Some(&st(None, 0, false, BACKSTOP_MS)), 1, 1_000_000.0), Some("backstop"));
+    }
+
+    #[test]
+    fn only_messages_that_move_economy_inputs_wake_the_loops() {
+        for a in ["/structs.structs.MsgStructOreMinerComplete", "/structs.structs.MsgPlanetExplore", "MsgFleetMove", "struct_activate", "planet_explore", "fleet_move", "struct_build_initiate"] {
+            assert!(affects_economy(a), "{a}");
+        }
+        for a in ["/structs.structs.MsgStructDefenseSet", "/structs.structs.MsgStructAttack", "/structs.structs.MsgStructStealthActivate", "/cosmos.bank.v1beta1.MsgSend", "struct_defense_set", "struct_attack", "/structs.structs.MsgPermissionGrantOnObject"] {
+            assert!(!affects_economy(a), "{a}");
+        }
+    }
+
+    #[test]
+    fn a_folded_due_height_only_ever_moves_earlier() {
+        report("test_fold", Some(1_000), 0, "");
+        fold_due("test_fold", 1_500);
+        assert_eq!(STATE.lock().unwrap()["test_fold"].next_due, Some(1_000));
+        fold_due("test_fold", 900);
+        assert_eq!(STATE.lock().unwrap()["test_fold"].next_due, Some(900));
+        fold_due("never_reported", 5);
+        assert!(!STATE.lock().unwrap().contains_key("never_reported"), "folding does not invent a loop");
     }
 
     #[test]

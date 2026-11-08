@@ -56,6 +56,15 @@ pub struct TypeRules {
     /// Every charge the chain checks against this type, `None` = not in the
     /// catalogue (unknown, never free).
     pub charge: ChargeCosts,
+    /// `category`: "planet" or "fleet" — where the type may stand.
+    pub category: String,
+    /// `possibleAmbit` bitmask (water 2, land 4, air 8, space 16).
+    pub possible_ambit: Option<u64>,
+    pub movable: Option<bool>,
+    /// The type is the Command Ship (`Type == CommandStruct`).
+    pub is_command: bool,
+    /// Planetary shield added when a struct of this type comes online.
+    pub planetary_shield_contribution: Option<u64>,
     /// Load held while building, released at completion; `None` = not known.
     pub build_draw: Option<u64>,
     /// Load the built struct draws from then on; `None` = not known.
@@ -89,6 +98,7 @@ pub struct FleetState {
     /// planet's visitor list ("" at the ends).
     pub forward: String,
     pub backward: String,
+    pub slots: Slots,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -144,6 +154,31 @@ pub struct PlanetState {
     /// `PlanetCache.IsDefenderCommandStructVulnerable`, decided from the
     /// owner, their fleet and its Command Ship.
     pub defender: Defender,
+    /// Slot arrays per ambit (`land`, `water`, `air`, `space`) and how many
+    /// slots each ambit has.
+    pub slots: Slots,
+}
+
+/// A planet's or fleet's slot arrays.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Slots {
+    pub occupants: std::collections::BTreeMap<String, Vec<String>>,
+    pub counts: std::collections::BTreeMap<String, u64>,
+}
+
+impl Slots {
+    pub fn from_row(row: &Value) -> Slots {
+        let mut out = Slots::default();
+        for ambit in ["land", "water", "air", "space"] {
+            if let Some(arr) = row.get(ambit).and_then(|a| a.as_array()) {
+                out.occupants.insert(ambit.into(), arr.iter().map(|v| v.as_str().unwrap_or("").to_string()).collect());
+            }
+            if let Some(n) = crate::mcp::types::numeric_u64(row.get(&format!("{ambit}Slots"))) {
+                out.counts.insert(ambit.into(), n);
+            }
+        }
+        out
+    }
 }
 
 /// Is the planet's defending Command Ship vulnerable (the raid puzzle can be
@@ -208,6 +243,11 @@ pub struct StructState {
     /// The planet the struct works on (`StructCache.GetPlanet`: its own
     /// location, or its fleet's).
     pub planet: Option<String>,
+    /// "planet" or "fleet", and the id of that object.
+    pub location_type: String,
+    pub location_id: String,
+    pub ambit: String,
+    pub slot: u64,
 }
 
 impl StructState {
@@ -254,6 +294,18 @@ impl World {
         source: &str,
         owners: Option<&[String]>,
     ) -> World {
+        World::from_snapshot_with(snap, types, source, owners, &[])
+    }
+
+    /// [`World::from_snapshot`], also carrying `extra_planets` — a fleet
+    /// move's destination, which may belong to someone else.
+    pub fn from_snapshot_with(
+        snap: &Snapshot,
+        types: HashMap<String, TypeRules>,
+        source: &str,
+        owners: Option<&[String]>,
+        extra_planets: &[String],
+    ) -> World {
         // A set, not a scan of the list: a team scope is thousands of owners
         // against hundreds of thousands of struct rows.
         let owner_set: Option<std::collections::HashSet<&str>> = owners.map(|o| o.iter().map(String::as_str).collect());
@@ -292,6 +344,10 @@ impl World {
                     status: snap.struct_status(id),
                     build_start: snap.struct_attr(id, "blockStartBuild").unwrap_or(0),
                     planet,
+                    location_type: row.location_type.clone(),
+                    location_id: row.location_id.clone(),
+                    ambit: row.operating_ambit.clone(),
+                    slot: row.slot,
                 },
             );
         }
@@ -317,6 +373,7 @@ impl World {
                     command_struct: s(f, "commandStruct"),
                     forward: s(f, "locationListForward"),
                     backward: s(f, "locationListBackward"),
+                    slots: Slots::from_row(f),
                 },
             );
         }
@@ -358,6 +415,7 @@ impl World {
         let mut planet_ids: Vec<String> = w.structs.values().filter_map(|s| s.planet.clone()).collect();
         planet_ids.extend(w.players.keys().filter_map(|p| snap.player_row(p).map(|r| s(r, "planetId"))));
         planet_ids.extend(w.fleets.values().filter_map(|f| f.planet.clone()));
+        planet_ids.extend(extra_planets.iter().cloned());
         planet_ids.retain(|p| !p.is_empty());
         planet_ids.sort();
         planet_ids.dedup();
@@ -406,6 +464,7 @@ impl World {
                     location_list_extra: crate::mcp::types::numeric_u64(row.get("locationListExtra")),
                     visitors,
                     defender,
+                    slots: Slots::from_row(row),
                 },
             );
         }
@@ -474,6 +533,11 @@ pub fn types_from_game_state(gs: &crate::game_state::GameStateSync) -> HashMap<S
                         primary_weapon: t.primary_weapon_charge,
                         secondary_weapon: t.secondary_weapon_charge,
                     },
+                    category: t.category.clone().unwrap_or_default(),
+                    possible_ambit: t.possible_ambit,
+                    movable: t.movable,
+                    is_command: t.name.eq_ignore_ascii_case("Command Ship"),
+                    planetary_shield_contribution: t.planetary_shield_contribution,
                     build_draw: t.build_draw,
                     passive_draw: t.passive_draw.filter(|d| *d >= 0.0).map(|d| d as u64),
                 },
@@ -519,6 +583,11 @@ pub fn types_from_lcd(page: &Value) -> HashMap<String, TypeRules> {
                         primary_weapon: crate::mcp::types::numeric_u64(t.get("primaryWeaponCharge")),
                         secondary_weapon: crate::mcp::types::numeric_u64(t.get("secondaryWeaponCharge")),
                     },
+                    category: s(t, "category"),
+                    possible_ambit: crate::mcp::types::numeric_u64(t.get("possibleAmbit")),
+                    movable: t.get("movable").and_then(|v| v.as_bool()),
+                    is_command: s(t, "type") == "Command Ship",
+                    planetary_shield_contribution: crate::mcp::types::numeric_u64(t.get("planetaryShieldContribution")),
                     build_draw: crate::mcp::types::numeric_u64(t.get("buildDraw")),
                     passive_draw: crate::mcp::types::numeric_u64(t.get("passiveDraw")),
                 },

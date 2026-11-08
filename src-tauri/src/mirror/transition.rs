@@ -47,6 +47,8 @@ pub enum Effect {
     /// The planet's raid clock (`blockStartRaid`); 0 = cleared.
     RaidClock { planet: String, height: u64 },
     RaiderArrived { planet: String, height: u64 },
+    Shield { planet: String, after: u64 },
+    StructPlace { structure: String, location: String, ambit: String, slot: u64 },
 }
 
 #[derive(Clone, Debug, Default, Serialize, PartialEq)]
@@ -149,36 +151,16 @@ pub fn build_complete(world: &mut World, height: u64, struct_id: &str) -> Result
     if let Some(r) = first_block(&[forecast::build_headroom(world.players.get(&s.owner), t.build_draw, t.passive_draw)]) {
         return Err(r);
     }
-    let mut out = Applied { effects: Vec::new(), unmodelled: vec!["planetary shield contribution", "planetary defense quantities"] };
+    let mut out = Applied::default();
+    // Remove the build draw; `GoOnline` below adds the passive draw.
     if let Some(owner) = world.players.get_mut(&s.owner) {
-        if let (Some(load), Some(bd), Some(pd)) = (owner.structs_load, t.build_draw, t.passive_draw) {
-            let after = load.saturating_sub(bd) + pd;
-            owner.structs_load = Some(after);
-            out.effects.push(Effect::StructsLoad { player: s.owner.clone(), after });
+        if let (Some(load), Some(bd)) = (owner.structs_load, t.build_draw) {
+            owner.structs_load = Some(load.saturating_sub(bd));
         }
     }
-    let new_status = s.status | status::BUILT | status::ONLINE;
+    let new_status = s.status | status::BUILT;
     world.structs.get_mut(struct_id).expect("present").status = new_status;
-    out.effects.push(Effect::Status { structure: struct_id.to_string(), after: new_status });
-    if let Some(p) = s.planet.as_ref().and_then(|p| world.planets.get_mut(p)) {
-        // A mining/refining system: the type carries a difficulty range for it.
-        if t.ore_mining_difficulty > 0 {
-            if p.mining_active == 0 {
-                p.mine_start = height;
-                out.effects.push(Effect::MineClock { planet: p.id.clone(), height });
-            }
-            p.mining_active += 1;
-            out.effects.push(Effect::MiningActive { planet: p.id.clone(), after: p.mining_active });
-        }
-        if t.ore_refining_difficulty > 0 {
-            if p.refining_active == 0 {
-                p.refine_start = height;
-                out.effects.push(Effect::RefineClock { planet: p.id.clone(), height });
-            }
-            p.refining_active += 1;
-            out.effects.push(Effect::RefiningActive { planet: p.id.clone(), after: p.refining_active });
-        }
-    }
+    go_online(world, height, struct_id, &mut out, false);
     Ok(out)
 }
 
@@ -374,6 +356,297 @@ pub fn fleet_move(world: &mut World, height: u64, fleet_id: &str, dest: &str) ->
             }
         }
     }
+    Ok(out)
+}
+
+/// The home planet of `owner` re-checks its defender after the owner's Command
+/// Ship changed state or place, and starts or clears a running raid's clock
+/// to match (`RefreshRaidVulnerability`, planet_cache.go).
+fn refresh_home_raid(world: &mut World, owner: &str, height: u64, out: &mut Applied) {
+    let home = world.players.get(owner).map(|p| p.home_planet.clone()).unwrap_or_default();
+    let fleet = world.fleets.values().find(|f| f.owner == owner).cloned();
+    let defender = match &fleet {
+        None => super::world::Defender { vulnerable: None, reason: "owner's fleet not in the world".into() },
+        Some(f) if f.command_struct.is_empty() => super::world::Defender { vulnerable: Some(true), reason: "fleet has no Command Ship".into() },
+        Some(f) if f.on_station == Some(false) => super::world::Defender { vulnerable: Some(true), reason: format!("fleet {} is away", f.id) },
+        Some(f) => match world.structs.get(&f.command_struct) {
+            Some(c) if c.has(status::DESTROYED) => super::world::Defender { vulnerable: Some(true), reason: format!("Command Ship {} destroyed", c.id) },
+            Some(c) if !c.has(status::ONLINE) => super::world::Defender { vulnerable: Some(true), reason: format!("Command Ship {} offline", c.id) },
+            Some(c) => super::world::Defender { vulnerable: Some(false), reason: format!("Command Ship {} online on station", c.id) },
+            None => super::world::Defender { vulnerable: None, reason: "Command Ship state not in the world".into() },
+        },
+    };
+    let Some(h) = world.planets.get_mut(&home) else { return };
+    h.defender = defender;
+    if h.location_list_start.as_deref().is_some_and(|s| !s.is_empty()) {
+        match h.defender.vulnerable {
+            Some(true) if h.raid_start == 0 => {
+                h.raid_start = height;
+                out.effects.push(Effect::RaidClock { planet: h.id.clone(), height });
+            }
+            Some(false) if h.raid_start != 0 => {
+                h.raid_start = 0;
+                out.effects.push(Effect::RaidClock { planet: h.id.clone(), height: 0 });
+            }
+            _ => {}
+        }
+    }
+}
+
+/// `StructCache.GoOnline`: passive draw onto the owner, mining/refining
+/// switched on (first rig re-anchors the clock), the planetary shield raised,
+/// status online, and the Command Ship raid hook.
+fn go_online(world: &mut World, height: u64, struct_id: &str, out: &mut Applied, _activate: bool) {
+    let Some(s) = world.structs.get(struct_id).cloned() else { return };
+    let Some(t) = world.types.get(&s.type_id).cloned() else {
+        out.unmodelled.push("struct type not in the catalogue");
+        return;
+    };
+    if let Some(owner) = world.players.get_mut(&s.owner) {
+        match (owner.structs_load, t.passive_draw) {
+            (Some(load), Some(pd)) => {
+                owner.structs_load = Some(load + pd);
+                out.effects.push(Effect::StructsLoad { player: s.owner.clone(), after: load + pd });
+            }
+            _ => out.unmodelled.push("passive draw or structs load not known"),
+        }
+    }
+    if let Some(p) = s.planet.as_ref().and_then(|p| world.planets.get_mut(p)) {
+        if t.ore_mining_difficulty > 0 {
+            if p.mining_active == 0 {
+                p.mine_start = height;
+                out.effects.push(Effect::MineClock { planet: p.id.clone(), height });
+            }
+            p.mining_active += 1;
+            out.effects.push(Effect::MiningActive { planet: p.id.clone(), after: p.mining_active });
+        }
+        if t.ore_refining_difficulty > 0 {
+            if p.refining_active == 0 {
+                p.refine_start = height;
+                out.effects.push(Effect::RefineClock { planet: p.id.clone(), height });
+            }
+            p.refining_active += 1;
+            out.effects.push(Effect::RefiningActive { planet: p.id.clone(), after: p.refining_active });
+        }
+        if let Some(c) = t.planetary_shield_contribution.filter(|c| *c > 0) {
+            p.shield += c;
+            out.effects.push(Effect::Shield { planet: p.id.clone(), after: p.shield });
+        }
+    }
+    let st = world.structs.get_mut(struct_id).expect("present");
+    st.status |= status::ONLINE;
+    out.effects.push(Effect::Status { structure: struct_id.to_string(), after: st.status });
+    out.unmodelled.push("planetary defense quantities");
+    if t.is_command {
+        refresh_home_raid(world, &s.owner, height, out);
+    }
+}
+
+/// `StructCache.GoOffline`: the reverse of [`go_online`]; nothing happens to
+/// a struct already offline.
+fn go_offline(world: &mut World, height: u64, struct_id: &str, out: &mut Applied) {
+    let Some(s) = world.structs.get(struct_id).cloned() else { return };
+    if !s.has(status::ONLINE) {
+        return;
+    }
+    let Some(t) = world.types.get(&s.type_id).cloned() else {
+        out.unmodelled.push("struct type not in the catalogue");
+        return;
+    };
+    if let Some(owner) = world.players.get_mut(&s.owner) {
+        match (owner.structs_load, t.passive_draw) {
+            (Some(load), Some(pd)) => {
+                owner.structs_load = Some(load.saturating_sub(pd));
+                out.effects.push(Effect::StructsLoad { player: s.owner.clone(), after: load.saturating_sub(pd) });
+            }
+            _ => out.unmodelled.push("passive draw or structs load not known"),
+        }
+    }
+    if let Some(p) = s.planet.as_ref().and_then(|p| world.planets.get_mut(p)) {
+        // The clock is left alone: the active quantity is the on/off signal.
+        if t.ore_mining_difficulty > 0 {
+            p.mining_active = p.mining_active.saturating_sub(1);
+            out.effects.push(Effect::MiningActive { planet: p.id.clone(), after: p.mining_active });
+        }
+        if t.ore_refining_difficulty > 0 {
+            p.refining_active = p.refining_active.saturating_sub(1);
+            out.effects.push(Effect::RefiningActive { planet: p.id.clone(), after: p.refining_active });
+        }
+        if let Some(c) = t.planetary_shield_contribution.filter(|c| *c > 0) {
+            p.shield = p.shield.saturating_sub(c);
+            out.effects.push(Effect::Shield { planet: p.id.clone(), after: p.shield });
+        }
+    }
+    let st = world.structs.get_mut(struct_id).expect("present");
+    st.status &= !status::ONLINE;
+    out.effects.push(Effect::Status { structure: struct_id.to_string(), after: st.status });
+    out.unmodelled.push("planetary defense quantities");
+    if t.is_command {
+        refresh_home_raid(world, &s.owner, height, out);
+    }
+}
+
+fn charge_ok(world: &World, owner: &str, height: u64, need: Option<u64>, action: &str) -> Result<(), Refused> {
+    let Some(need) = need else { return Ok(()) };
+    let Some(last) = world.players.get(owner).and_then(|p| p.last_action) else { return Ok(()) };
+    let have = super::rules::charge(height, last);
+    if have < need {
+        return Err(refused("insufficient_charge", format!("{action}: {owner} has {have}, needs {need}")));
+    }
+    Ok(())
+}
+
+/// `MsgStructActivate` (msg_server_struct_activate.go +
+/// `ActivationReadinessCheck`): built, offline, not destroyed, owner online,
+/// room for the passive draw, activate charge — then discharge and go online.
+pub fn activate(world: &mut World, height: u64, struct_id: &str) -> Result<Applied, Refused> {
+    let s = world.structs.get(struct_id).ok_or_else(|| refused("not_found", format!("{struct_id} not in the world")))?.clone();
+    if s.has(status::DESTROYED) {
+        return Err(refused("destroyed", format!("{struct_id} is destroyed")));
+    }
+    if !s.has(status::BUILT) {
+        return Err(refused("building", format!("{struct_id} is not built")));
+    }
+    if s.has(status::ONLINE) {
+        return Err(refused("online", format!("{struct_id} is already online")));
+    }
+    let t = world.types.get(&s.type_id).cloned();
+    let owner = world.players.get(&s.owner);
+    let headroom = forecast::build_headroom(owner, Some(0), t.as_ref().and_then(|t| t.passive_draw));
+    if let Some(r) = first_block(&[forecast::owner_power(owner), headroom]) {
+        return Err(r);
+    }
+    charge_ok(world, &s.owner, height, t.and_then(|t| t.charge.activate), "activate")?;
+    let mut out = discharge(world, height, &s.owner);
+    go_online(world, height, struct_id, &mut out, true);
+    Ok(out)
+}
+
+/// `MsgStructDeactivate`: built and online — then go offline. No charge.
+pub fn deactivate(world: &mut World, height: u64, struct_id: &str) -> Result<Applied, Refused> {
+    let s = world.structs.get(struct_id).ok_or_else(|| refused("not_found", format!("{struct_id} not in the world")))?.clone();
+    if !s.has(status::BUILT) {
+        return Err(refused("building", format!("{struct_id} is not built")));
+    }
+    if !s.has(status::ONLINE) {
+        return Err(refused("offline", format!("{struct_id} is already offline")));
+    }
+    let mut out = Applied::default();
+    go_offline(world, height, struct_id, &mut out);
+    Ok(out)
+}
+
+/// `MsgStructMove` (msg_server_struct_move.go + `AttemptMove` and the
+/// planet/fleet `MoveReadiness`): to a slot on the owner's own planet or
+/// fleet. A Command Ship stays in its fleet and only changes ambit.
+pub fn struct_move(world: &mut World, height: u64, struct_id: &str, to_fleet: bool, ambit: &str, slot: u64) -> Result<Applied, Refused> {
+    let s = world.structs.get(struct_id).ok_or_else(|| refused("not_found", format!("{struct_id} not in the world")))?.clone();
+    if s.has(status::DESTROYED) {
+        return Err(refused("destroyed", format!("{struct_id} is destroyed")));
+    }
+    let t = world.types.get(&s.type_id).cloned().ok_or_else(|| refused("not_found", format!("type {} not in the catalogue", s.type_id)))?;
+    charge_ok(world, &s.owner, height, t.charge.r#move, "move")?;
+    if !s.has(status::ONLINE) {
+        return Err(refused("offline", format!("{struct_id} is offline")));
+    }
+    if let Some(r) = first_block(&[forecast::owner_power(world.players.get(&s.owner))]) {
+        return Err(r);
+    }
+    match t.movable {
+        Some(false) => return Err(refused("immovable", format!("{} cannot move", t.name))),
+        None => return Err(refused("not_found", "the type's movability is not in the catalogue")),
+        Some(true) => {}
+    }
+    if !to_fleet && t.is_command {
+        return Err(refused("command_struct_fleet_only", "a Command Ship stays in its fleet"));
+    }
+    let want_category = if to_fleet { "fleet" } else { "planet" };
+    if !t.category.eq_ignore_ascii_case(want_category) {
+        return Err(refused("outside_planet", format!("{} stands on a {}, not a {want_category}", t.name, t.category)));
+    }
+    let flag = match ambit {
+        "water" => 2,
+        "land" => 4,
+        "air" => 8,
+        "space" => 16,
+        _ => return Err(refused("invalid_ambit", format!("'{ambit}' is not an ambit"))),
+    };
+    match t.possible_ambit {
+        Some(m) if m & flag == 0 => return Err(refused("invalid_ambit", format!("{} cannot stand in {ambit}", t.name))),
+        None => return Err(refused("not_found", "the type's possible ambits are not in the catalogue")),
+        _ => {}
+    }
+    let owner = world.players.get(&s.owner).cloned().unwrap_or_default();
+    let dest_id = if to_fleet {
+        world.fleets.values().find(|f| f.owner == s.owner).map(|f| f.id.clone()).unwrap_or_default()
+    } else {
+        owner.home_planet.clone()
+    };
+    if dest_id.is_empty() {
+        return Err(refused("not_found", "the owner has no such destination"));
+    }
+    let command_in_fleet = to_fleet && t.is_command;
+    if !command_in_fleet {
+        let slots = if to_fleet { world.fleets.get(&dest_id).map(|f| f.slots.clone()) } else { world.planets.get(&dest_id).map(|p| p.slots.clone()) }
+            .ok_or_else(|| refused("not_found", format!("{dest_id} not in the world")))?;
+        let occupants = slots.occupants.get(ambit).cloned().unwrap_or_default();
+        let count = slots.counts.get(ambit).copied().unwrap_or(0);
+        if slot >= count || slot as usize >= occupants.len() {
+            return Err(refused("slot_unavailable", format!("{dest_id} has no {ambit} slot {slot}")));
+        }
+        if !occupants[slot as usize].is_empty() {
+            return Err(refused("slot_occupied", format!("{dest_id} {ambit} slot {slot} holds {}", occupants[slot as usize])));
+        }
+    }
+    let mut out = Applied::default();
+    // Clear the old slot (a Command Ship holds no fleet slot).
+    let clear = |sl: &mut super::world::Slots| {
+        if let Some(v) = sl.occupants.get_mut(&s.ambit) {
+            if let Some(x) = v.get_mut(s.slot as usize) {
+                if x == struct_id {
+                    x.clear();
+                }
+            }
+        }
+    };
+    match s.location_type.as_str() {
+        "planet" => {
+            if let Some(p) = world.planets.get_mut(&s.location_id) {
+                clear(&mut p.slots);
+            }
+        }
+        "fleet" if !t.is_command => {
+            if let Some(f) = world.fleets.get_mut(&s.location_id) {
+                clear(&mut f.slots);
+            }
+        }
+        _ => {}
+    }
+    {
+        let st = world.structs.get_mut(struct_id).expect("present");
+        st.ambit = ambit.to_string();
+        if !command_in_fleet {
+            st.location_type = want_category.to_string();
+            st.location_id = dest_id.clone();
+            st.slot = slot;
+        }
+    }
+    if !command_in_fleet {
+        let take = |sl: &mut super::world::Slots| {
+            if let Some(v) = sl.occupants.get_mut(ambit) {
+                v[slot as usize] = struct_id.to_string();
+            }
+        };
+        if to_fleet {
+            if let Some(f) = world.fleets.get_mut(&dest_id) {
+                take(&mut f.slots);
+            }
+        } else if let Some(p) = world.planets.get_mut(&dest_id) {
+            take(&mut p.slots);
+        }
+    }
+    out.effects.push(Effect::StructPlace { structure: struct_id.to_string(), location: dest_id, ambit: ambit.to_string(), slot });
+    out.effects.extend(discharge(world, height, &s.owner).effects);
     Ok(out)
 }
 
@@ -578,5 +851,104 @@ mod tests {
         w.planets.get_mut("2-2").unwrap().location_list_count = None;
         let a = fleet_move(&mut w, 1_000, "9-1", "2-2").unwrap();
         assert!(a.unmodelled.contains(&"visitor queue capacity not known"));
+    }
+
+    #[test]
+    fn deactivating_a_rig_stops_mining_but_keeps_its_clock() {
+        let mut w = world();
+        w.players.get_mut("1-1").unwrap().structs_load = Some(50);
+        deactivate(&mut w, 2_000, "5-1").unwrap();
+        let p = &w.planets["2-1"];
+        assert_eq!((p.mining_active, p.mine_start), (0, 500));
+        assert_eq!(w.players["1-1"].structs_load, Some(30), "passive draw 20 released");
+        assert!(!w.structs["5-1"].has(status::ONLINE));
+        assert_eq!(deactivate(&mut w, 2_001, "5-1").unwrap_err().rule, "offline");
+    }
+
+    #[test]
+    fn reactivating_spends_charge_and_restarts_a_stopped_clock() {
+        let mut w = world();
+        w.types.get_mut("14").unwrap().charge.activate = Some(3);
+        w.players.get_mut("1-1").unwrap().last_action = Some(1_999);
+        deactivate(&mut w, 2_000, "5-1").unwrap();
+        assert_eq!(activate(&mut w, 2_001, "5-1").unwrap_err().rule, "insufficient_charge", "2 < 3");
+        activate(&mut w, 2_002, "5-1").unwrap();
+        let p = &w.planets["2-1"];
+        assert_eq!((p.mining_active, p.mine_start), (1, 2_002), "the first rig back re-anchors the clock");
+        assert_eq!(w.players["1-1"].last_action, Some(2_002));
+        assert_eq!(activate(&mut w, 2_100, "5-1").unwrap_err().rule, "online");
+    }
+
+    #[test]
+    fn a_shield_struct_raises_and_lowers_the_planets_shield() {
+        let mut w = world();
+        w.types.insert("20".into(), TypeRules { name: "Shield".into(), planetary_shield_contribution: Some(25), passive_draw: Some(1), build_draw: Some(1), ..Default::default() });
+        w.structs.insert("5-7".into(), StructState { id: "5-7".into(), owner: "1-1".into(), type_id: "20".into(), status: status::MATERIALIZED, planet: Some("2-1".into()), ..Default::default() });
+        let before = w.planets["2-1"].shield;
+        build_complete(&mut w, 3_000, "5-7").unwrap();
+        assert_eq!(w.planets["2-1"].shield, before + 25);
+        deactivate(&mut w, 3_100, "5-7").unwrap();
+        assert_eq!(w.planets["2-1"].shield, before);
+    }
+
+    #[test]
+    fn a_command_ship_going_offline_opens_a_running_raid_at_home() {
+        let mut w = fleets_world();
+        w.types.insert("1".into(), TypeRules { name: "Command Ship".into(), is_command: true, passive_draw: Some(1), ..Default::default() });
+        w.structs.get_mut("5-9").unwrap().type_id = "1".into();
+        let home = w.planets.get_mut("2-1").unwrap();
+        home.location_list_start = Some("9-7".into());
+        home.raid_start = 0;
+        deactivate(&mut w, 4_000, "5-9").unwrap();
+        assert_eq!(w.planets["2-1"].defender.vulnerable, Some(true));
+        assert_eq!(w.planets["2-1"].raid_start, 4_000, "the raid clock starts once shields are down");
+    }
+
+    fn movers() -> World {
+        use crate::mirror::world::{ChargeCosts, FleetState, Slots};
+        let mut w = fleets_world();
+        w.types.insert(
+            "3".into(),
+            TypeRules { name: "Frigate".into(), category: "fleet".into(), possible_ambit: Some(8 | 16), movable: Some(true), charge: ChargeCosts { r#move: Some(2), ..Default::default() }, ..Default::default() },
+        );
+        let slots = |a: &str, occ: Vec<&str>| {
+            let mut sl = Slots::default();
+            for amb in ["land", "water", "air", "space"] {
+                let v: Vec<String> = if amb == a { occ.iter().map(|x| x.to_string()).collect() } else { vec![String::new(); 4] };
+                sl.occupants.insert(amb.into(), v);
+                sl.counts.insert(amb.into(), 4);
+            }
+            sl
+        };
+        w.fleets.insert("9-1".into(), FleetState { slots: slots("air", vec!["5-30", "", "", ""]), ..w.fleets["9-1"].clone() });
+        w.structs.insert(
+            "5-30".into(),
+            StructState { id: "5-30".into(), owner: "1-1".into(), type_id: "3".into(), status: BUILT_ONLINE, location_type: "fleet".into(), location_id: "9-1".into(), ambit: "air".into(), slot: 0, ..Default::default() },
+        );
+        w.players.get_mut("1-1").unwrap().last_action = Some(0);
+        w
+    }
+
+    #[test]
+    fn a_struct_move_frees_the_old_slot_and_takes_the_new() {
+        let mut w = movers();
+        struct_move(&mut w, 100, "5-30", true, "space", 2).unwrap();
+        let f = &w.fleets["9-1"];
+        assert_eq!(f.slots.occupants["air"][0], "");
+        assert_eq!(f.slots.occupants["space"][2], "5-30");
+        assert_eq!((w.structs["5-30"].ambit.as_str(), w.structs["5-30"].slot), ("space", 2));
+        assert_eq!(w.players["1-1"].last_action, Some(100), "a move discharges");
+    }
+
+    #[test]
+    fn moves_the_chain_refuses_are_refused_with_its_reasons() {
+        let mut w = movers();
+        assert_eq!(struct_move(&mut w, 100, "5-30", true, "land", 0).unwrap_err().rule, "invalid_ambit");
+        assert_eq!(struct_move(&mut w, 100, "5-30", true, "air", 0).unwrap_err().rule, "slot_occupied");
+        assert_eq!(struct_move(&mut w, 100, "5-30", true, "air", 9).unwrap_err().rule, "slot_unavailable");
+        assert_eq!(struct_move(&mut w, 100, "5-30", false, "air", 0).unwrap_err().rule, "outside_planet");
+        assert_eq!(struct_move(&mut w, 1, "5-30", true, "space", 0).unwrap_err().rule, "insufficient_charge");
+        w.types.get_mut("3").unwrap().movable = Some(false);
+        assert_eq!(struct_move(&mut w, 100, "5-30", true, "space", 0).unwrap_err().rule, "immovable");
     }
 }

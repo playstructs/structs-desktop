@@ -19,6 +19,7 @@
 pub mod forecast;
 pub mod gate;
 pub mod power;
+pub mod preview;
 pub mod project;
 pub mod report;
 pub mod rules;
@@ -250,6 +251,22 @@ mod live {
             for (k, e) in b.failed.iter().take(3) {
                 println!("  failed: {k}: {e}");
             }
+        }
+        if let Ok(spec) = std::env::var("MIRROR_PREVIEW") {
+            // MIRROR_PREVIEW='fleet_move {"fleet_id":"9-194","destination_id":"2-1"}'
+            let (action, args) = spec.split_once(' ').unwrap_or((spec.as_str(), "{}"));
+            let args: serde_json::Value = serde_json::from_str(args).unwrap();
+            let m = preview::Move::parse(action, &args).expect("modelled action");
+            let (subject, extra) = match &m {
+                preview::Move::FleetMove { fleet, destination } => (fleet.clone(), vec![destination.clone()]),
+                other => (format!("{other:?}"), vec![]),
+            };
+            let owner = snap.fleet_row(&subject).and_then(|f| f.get("owner").and_then(|o| o.as_str()).map(String::from)).or_else(|| snap.struct_row(&subject).map(|r| r.owner.clone())).unwrap_or_default();
+            let t_p = std::time::Instant::now();
+            let mut pw = world::World::from_snapshot_with(&snap, world::types_from_lcd(&types_page), "saved", Some(&[owner]), &extra);
+            let built = t_p.elapsed();
+            let r = preview::apply(&mut pw, rules::earliest_execution(tip), &m);
+            println!("preview {m:?}: world built in {built:?}\n  {r:#?}");
         }
         let limit = std::env::var("MIRROR_LIMIT").ok().and_then(|t| t.parse().ok()).unwrap_or(40);
         println!("{}", report::render(&now, limit, None));

@@ -79,6 +79,7 @@ pub async fn execute(
         "economy_status" => query_economy(registry),
         "plan_timeline" => query_timeline(registry, &params.args),
         "forecast" => vec![Content::text(crate::mirror::report::intel(client, &params.args).await)],
+        "preview" => vec![Content::text(crate::mirror::report::preview_intel(&params.args))],
         // Power forecast: tries trend first, falls back to snapshot.
         "power_forecast" => query_power_forecast(client, &params.args).await,
         // Guild-API-backed analytical queries
@@ -106,7 +107,7 @@ pub async fn execute(
             raw_query(client, raw).await
         }
         other => vec![Content::text(format!(
-            "Unknown intel query '{}'. Available: whoami, intents, ruleset, simulate, strike_options, what_can_i_build, power_forecast, economy_status, plan_timeline, forecast, planet_history, valid_targets, scout, battle_log, slot_map, is_active, market, metric_trend, query (raw entity read/list/filter)",
+            "Unknown intel query '{}'. Available: whoami, intents, ruleset, simulate, strike_options, what_can_i_build, power_forecast, economy_status, plan_timeline, forecast, preview, planet_history, valid_targets, scout, battle_log, slot_map, is_active, market, metric_trend, query (raw entity read/list/filter)",
             other
         ))],
     }

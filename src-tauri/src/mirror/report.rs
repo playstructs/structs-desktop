@@ -246,6 +246,56 @@ pub async fn intel(client: &crate::mcp::cosmos_client::CosmosClient, args: &Valu
     }
 }
 
+/// `structs_intel {query:"preview", args:{action, args}}`; with no action,
+/// the mirror's prediction accuracy so far.
+pub fn preview_intel(args: &Value) -> String {
+    let Some(action) = args.get("action").and_then(|a| a.as_str()) else {
+        let acc = crate::mirror::preview::accuracy();
+        if acc.is_empty() {
+            return "Mirror accuracy: no landed predictions checked yet (each is checked ~150 s after it lands).".into();
+        }
+        let mut out = String::from("Mirror accuracy (predicted effects vs the chain after landing):\n");
+        for (kind, t) in &acc {
+            let total = t.effects_matched + t.effects_mismatched;
+            let pct = if total > 0 { 100.0 * t.effects_matched as f64 / total as f64 } else { 100.0 };
+            out.push_str(&format!(
+                "  {kind}: {} checked, {}/{} effects matched ({pct:.1}%), {} refused by the chain after the mirror allowed them\n",
+                t.checked, t.effects_matched, total, t.refused_after_allowed
+            ));
+            for m in t.last_mismatches.iter().rev().take(3) {
+                out.push_str(&format!("      {m}\n"));
+            }
+        }
+        return out;
+    };
+    let empty = Value::Object(Default::default());
+    let payload = args.get("args").unwrap_or(&empty);
+    let Some(m) = crate::mirror::preview::Move::parse(action, payload) else {
+        return format!("preview: '{action}' is not an action the mirror models (mine, refine, build complete, activate, deactivate, struct move, fleet move)");
+    };
+    let Some(p) = crate::mirror::preview::preview_now(&m) else {
+        return "preview: no snapshot yet, or the action's struct or fleet is not in it".into();
+    };
+    let mut out = format!("Preview of {} at execution height ≥ {}", m.kind(), p.exec);
+    if let Some(w) = &p.world {
+        out.push_str(&format!(" · world {} {}", w.source, if w.coherent { format!("at {}", w.height) } else { format!("{}–{}", w.min_height, w.height) }));
+    }
+    out.push('\n');
+    match &p.result {
+        Ok(a) => {
+            out.push_str("  the chain would accept it, with these effects:\n");
+            for e in &a.effects {
+                out.push_str(&format!("    {}\n", serde_json::to_string(e).unwrap_or_default()));
+            }
+            if !a.unmodelled.is_empty() {
+                out.push_str(&format!("  not modelled: {}\n", a.unmodelled.join("; ")));
+            }
+        }
+        Err(r) => out.push_str(&format!("  the chain would refuse it: {} — {}\n", r.rule, r.detail)),
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
