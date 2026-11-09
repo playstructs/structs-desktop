@@ -526,16 +526,16 @@ async fn scan(
                         // them still refining their stored pile — and agreed
                         // with the snapshot 9,098 times out of 9,098, for 41
                         // explores. (A first cut re-derived "due" from the
-                        // snapshot's stored-ore field, which nothing had
-                        // checked; it signed no explores at all while the
-                        // mirror counted five ready.) The live read still
-                        // confirms right before the sign.
-                        // A mined-out player the mirror does NOT call ready
-                        // is still looked at live, but at most once per
-                        // EXPLORE_RECHECK_MS: the mirror's "still refining"
-                        // rests on a stored-ore figure nothing has measured
-                        // yet, so it may delay an explore, never strand one.
-                        if !explore_live_check_due(pid.as_str(), explore_ready, crate::hasher::types::now_millis()) {
+                        // snapshot's stored-ore field in this scan and
+                        // signed no explores at all while the mirror counted
+                        // five ready.) The live read still confirms right
+                        // before the sign, and `explore_ready` in
+                        // verify.live_reads counts a ready the chain refuses.
+                        // 0.1.506 also re-checked every held-back player live
+                        // each 5 min: 8,295 checks over 42 min, 100% agreement
+                        // with the snapshot, and the launch sweep of ~1,014
+                        // held-back players found none due — dropped.
+                        if !explore_ready {
                             return;
                         }
                         let Ok(live_player) = crate::mcp::verify::player_view_live(&client, &pid).await else { return };
@@ -553,7 +553,9 @@ async fn scan(
                         // ore because its cycle looked "stale", and the leftover ore then
                         // blocked the explore. With refines completing, the ore drains to 0
                         // and the worker moves on.)
-                        if explore_due(planet_ore, live_player.stored_ore, caps.explore_when_drained_only) {
+                        let due = explore_due(planet_ore, live_player.stored_ore, caps.explore_when_drained_only);
+                        crate::mcp::verify::note_explore_ready(due);
+                        if due {
                             let res = crate::mcp::tx_retry::sign_with_retry(
                                 &app,
                                 idx,
@@ -617,50 +619,15 @@ async fn scan(
     }
 }
 
-/// How often a mined-out player the mirror does not count explore-ready is
-/// still checked live — the bound on how long a stale "still refining" can
-/// hold an explore back.
-const EXPLORE_RECHECK_MS: f64 = 5.0 * 60.0 * 1000.0;
-
-/// Player → when its explore was last checked live.
-static EXPLORE_CHECKED: std::sync::LazyLock<dashmap::DashMap<String, f64>> =
-    std::sync::LazyLock::new(dashmap::DashMap::new);
-
-/// Check this mined-out player's explore live now? Always when the mirror
-/// says it is ready; otherwise once per [`EXPLORE_RECHECK_MS`]. Records the
-/// check when it says yes.
-fn explore_live_check_due(pid: &str, mirror_ready: bool, now_ms: f64) -> bool {
-    if !mirror_ready {
-        if let Some(at) = EXPLORE_CHECKED.get(pid) {
-            if now_ms - *at < EXPLORE_RECHECK_MS {
-                return false;
-            }
-        }
-    }
-    EXPLORE_CHECKED.insert(pid.to_string(), now_ms);
-    true
-}
-
 /// May this player explore now? The planet must be out of ore; a worker
 /// (`drained_only`) must also have refined its stored pile to nothing. Pure —
-/// asked of the snapshot first, then of the chain right before the sign.
+/// asked of the chain right before the sign.
 fn explore_due(planet_ore: f64, stored_ore: f64, drained_only: bool) -> bool {
     planet_ore <= 0.0 && (!drained_only || stored_ore <= 0.0)
 }
 
 #[cfg(test)]
 mod tests {
-    #[test]
-    fn a_player_the_mirror_holds_back_is_still_checked_now_and_then() {
-        use super::{explore_live_check_due, EXPLORE_RECHECK_MS};
-        let t = 1_000_000.0;
-        assert!(explore_live_check_due("1-990001", false, t), "first sight: check");
-        assert!(!explore_live_check_due("1-990001", false, t + 1_000.0), "then not every scan");
-        assert!(explore_live_check_due("1-990001", true, t + 2_000.0), "mirror says ready: always");
-        assert!(!explore_live_check_due("1-990001", false, t + 2_000.0 + EXPLORE_RECHECK_MS - 1.0));
-        assert!(explore_live_check_due("1-990001", false, t + 2_000.0 + EXPLORE_RECHECK_MS), "the bound");
-    }
-
     #[test]
     fn explore_is_due_only_on_a_drained_planet_and_pile() {
         use super::explore_due;

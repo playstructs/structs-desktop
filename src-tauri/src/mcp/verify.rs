@@ -115,6 +115,12 @@ fn peek<R>(f: impl FnOnce(&Snapshot) -> Option<R>) -> Option<R> {
     perception::with_snapshot(f).flatten()
 }
 
+/// The mirror called this player explore-ready; did the chain agree when
+/// the explore was confirmed live? Disagreement = a ready the chain refused.
+pub(crate) fn note_explore_ready(live_due: bool) {
+    note_agreement("explore_ready", Some(true), &live_due);
+}
+
 fn note_agreement<T: PartialEq>(kind: &'static str, belief: Option<T>, live: &T) {
     let e = AGREEMENT.entry(kind).or_default();
     e.reads.fetch_add(1, Ordering::Relaxed);
