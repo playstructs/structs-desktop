@@ -517,6 +517,21 @@ impl Snapshot {
         self.sattr(sid, S_STATUS)
     }
 
+    /// Protected struct index → how many live defenders are registered on
+    /// it. Kept current by `struct_defense_add/remove` frames; one pass over
+    /// the struct table, so build it once per scan, not per question.
+    pub fn defender_counts(&self) -> HashMap<u64, usize> {
+        let mut out = HashMap::new();
+        for (sid, a) in &self.struct_attrs {
+            let protected = a[S_PROTECTED];
+            if protected == 0 || a[S_STATUS] & status::DESTROYED != 0 || !self.structs.contains_key(sid) {
+                continue;
+            }
+            *out.entry(protected).or_insert(0) += 1;
+        }
+        out
+    }
+
     /// Snapshot age in ms.
     pub fn age_ms(&self) -> f64 {
         crate::hasher::types::now_millis() - self.taken_ms
@@ -1843,6 +1858,12 @@ pub fn ore_of(oid: &str) -> Option<u64> {
     with_snapshot(|s| s.grid_attr(oid, "ore")).flatten()
 }
 
+/// [`Snapshot::defender_counts`] of the current snapshot; `None` before one
+/// is installed.
+pub fn defender_counts() -> Option<HashMap<u64, usize>> {
+    with_snapshot(|s| s.defender_counts())
+}
+
 /// A completion we signed landed: the chain restarted that planet's clock at
 /// the inclusion block. Record it NOW rather than waiting for the next sweep
 /// — with the clock frames not reaching us from production, the two-minute
@@ -2682,6 +2703,22 @@ mod tests {
         assert_eq!(e["Struct"]["operatingAmbit"], "air");
         assert_eq!(e["Struct"]["slot"], "2");
         assert_eq!(s.apply("struct_move", "structs.planet.2-223.1-194", &mv), Applied::NoChange);
+    }
+
+    #[test]
+    fn defender_counts_follow_the_defense_frames() {
+        let mut s = galaxy();
+        assert_eq!(s.defender_counts().get(&2297), None);
+        let add = json!({"block_height":2436001,"defender_struct_id":"5-2184","planet_id":"2-223","protected_struct_id":"5-2297"});
+        s.apply("struct_defense_add", "structs.planet.2-223.1-194", &add);
+        assert_eq!(s.defender_counts().get(&2297), Some(&1));
+        // A destroyed defender no longer counts.
+        s.struct_attrs.get_mut("5-2184").unwrap()[S_STATUS] |= status::DESTROYED;
+        assert_eq!(s.defender_counts().get(&2297), None);
+        s.struct_attrs.get_mut("5-2184").unwrap()[S_STATUS] &= !status::DESTROYED;
+        let rm = json!({"block_height":2436002,"defender_struct_id":"5-2184","planet_id":"2-223","protected_struct_id":"5-2297"});
+        s.apply("struct_defense_remove", "structs.planet.2-223.1-194", &rm);
+        assert_eq!(s.defender_counts().get(&2297), None);
     }
 
     #[test]

@@ -18,8 +18,43 @@ static LCD_REQ_WINDOW: std::sync::Mutex<(u64, u64, u64)> = std::sync::Mutex::new
 /// names the caller's path rather than a total. Kept small: this minute and
 /// the previous one.
 type PathCounts = std::collections::HashMap<String, u64>;
-static LCD_PATHS: std::sync::LazyLock<std::sync::Mutex<(u64, PathCounts, PathCounts)>> =
-    std::sync::LazyLock::new(|| std::sync::Mutex::new((0, PathCounts::new(), PathCounts::new())));
+
+/// Requests per route over this minute and the previous one. Shared by the
+/// LCD and Guild API clients so both answer "which route" the same way.
+pub(crate) struct PathTally(std::sync::Mutex<(u64, PathCounts, PathCounts)>);
+
+impl PathTally {
+    pub(crate) fn new() -> Self {
+        Self(std::sync::Mutex::new((0, PathCounts::new(), PathCounts::new())))
+    }
+
+    pub(crate) fn note(&self, url: &str) {
+        let minute = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() / 60)
+            .unwrap_or(0);
+        let key = lcd_path_key(url);
+        let mut g = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        if g.0 != minute {
+            let cur = std::mem::take(&mut g.1);
+            g.2 = if g.0 + 1 == minute { cur } else { PathCounts::new() };
+            g.0 = minute;
+        }
+        *g.1.entry(key).or_insert(0) += 1;
+    }
+
+    /// Top routes by count over the last full minute (this minute while the
+    /// first one is still open).
+    pub(crate) fn top(&self, n: usize) -> Value {
+        let g = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        let src = if g.2.is_empty() { &g.1 } else { &g.2 };
+        let mut v: Vec<(&String, &u64)> = src.iter().collect();
+        v.sort_by(|a, b| b.1.cmp(a.1).then_with(|| a.0.cmp(b.0)));
+        Value::Array(v.into_iter().take(n).map(|(k, c)| serde_json::json!({ "path": k, "count": c })).collect())
+    }
+}
+
+static LCD_PATHS: std::sync::LazyLock<PathTally> = std::sync::LazyLock::new(PathTally::new);
 
 fn lcd_path_key(url: &str) -> String {
     let path = url.split('?').next().unwrap_or(url);
@@ -31,28 +66,13 @@ fn lcd_path_key(url: &str) -> String {
 }
 
 fn note_lcd_path(url: &str) {
-    let minute = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() / 60)
-        .unwrap_or(0);
-    let key = lcd_path_key(url);
-    let mut g = LCD_PATHS.lock().unwrap_or_else(|e| e.into_inner());
-    if g.0 != minute {
-        let cur = std::mem::take(&mut g.1);
-        g.2 = if g.0 + 1 == minute { cur } else { PathCounts::new() };
-        g.0 = minute;
-    }
-    *g.1.entry(key).or_insert(0) += 1;
+    LCD_PATHS.note(url);
 }
 
 /// Top LCD routes by request count over the last full minute (falls back to
 /// this minute while the first one is still open).
 pub fn lcd_top_paths(n: usize) -> Value {
-    let g = LCD_PATHS.lock().unwrap_or_else(|e| e.into_inner());
-    let src = if g.2.is_empty() { &g.1 } else { &g.2 };
-    let mut v: Vec<(&String, &u64)> = src.iter().collect();
-    v.sort_by(|a, b| b.1.cmp(a.1));
-    Value::Array(v.into_iter().take(n).map(|(k, c)| serde_json::json!({ "path": k, "count": c })).collect())
+    LCD_PATHS.top(n)
 }
 
 // ── Who reads players from the chain? ───────────────────────────────────
@@ -669,6 +689,18 @@ const LCD_MAX_PAGES_PER_WALK: usize = 200;
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn a_tally_counts_routes_with_ids_folded() {
+        let t = PathTally::new();
+        t.note("http://crew.oh.energy/api/struct-defender/protected/5-123?page=1");
+        t.note("http://crew.oh.energy/api/struct-defender/protected/5-9");
+        t.note("http://crew.oh.energy/api/planet-activity/planet/2-7/event/41");
+        let top = t.top(8);
+        assert_eq!(top[0]["path"], "api/struct-defender/protected/{id}");
+        assert_eq!(top[0]["count"], 2);
+        assert_eq!(top[1]["path"], "api/planet-activity/planet/{id}/event/{id}");
+    }
 
     /// Shape mirrors a live LCD page: `value` is a STRING, and the page is a
     /// slice of the whole permission store, so it carries other players' rows.

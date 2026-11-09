@@ -711,6 +711,7 @@ pub fn health_snapshot() -> Value {
             "total": crate::mcp::guild_api::request_stats().0,
             "this_minute": crate::mcp::guild_api::request_stats().1,
             "last_minute": crate::mcp::guild_api::request_stats().2,
+            "top_paths": crate::mcp::guild_api::top_paths(8),
         },
         // …and on the shared public LCD, plus which source the pre-sign
         // verify reads use and how often the guild path fell back.

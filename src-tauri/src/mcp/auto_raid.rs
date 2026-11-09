@@ -612,12 +612,17 @@ async fn scan(
 
     // ── Phase B: evaluate + score. ──
     let client_c = client.clone();
+    // Defender counts come from the GRASS-fed snapshot, built once per scan.
+    // This was one guild `/struct-defender/protected` read per candidate
+    // with a Command Ship — ~200 a minute, fetched before any gate.
+    let defenders = std::sync::Arc::new(crate::mcp::perception::defender_counts());
     let mut board: Vec<Candidate> = crate::mcp::loop_util::map_concurrent(
         batch,
         crate::mcp::capacity::reads_fanout(),
         move |(pid, guild)| {
             let client = client_c.clone();
-            async move { evaluate(&client, &pid, &guild).await }
+            let defenders = defenders.clone();
+            async move { evaluate(&client, &pid, &guild, defenders.as_ref().as_ref()).await }
         },
     )
     .await
@@ -874,7 +879,12 @@ fn planet_is_raidable(planet: &serde_json::Value) -> bool {
         .map_or(true, |s| s.is_empty() || s == "active")
 }
 
-async fn evaluate(client: &CosmosClient, player_id: &crate::mcp::types::PlayerId, guild_id: &str) -> Option<Candidate> {
+async fn evaluate(
+    client: &CosmosClient,
+    player_id: &crate::mcp::types::PlayerId,
+    guild_id: &str,
+    defenders: Option<&std::collections::HashMap<u64, usize>>,
+) -> Option<Candidate> {
     use crate::mcp::types::EntityView;
     let pl = client.entity("player", player_id.as_str()).await.ok()?;
     let p = pl.get("Player")?;
@@ -977,14 +987,18 @@ async fn evaluate(client: &CosmosClient, player_id: &crate::mcp::types::PlayerId
     let vulnerable = !reasons.is_empty();
 
     // Defenders registered on the Command Ship — what a siege would have to strip.
-    let defenders_on_cmd = match &command_struct {
-        Some(cs) => client
+    let defenders_on_cmd = match (&command_struct, defenders) {
+        (Some(cs), Some(counts)) => crate::mcp::types::StructId::parse(cs)
+            .map(|s| counts.get(&s.index()).copied().unwrap_or(0))
+            .unwrap_or(0),
+        // No snapshot installed yet: ask the guild, as before.
+        (Some(cs), None) => client
             .guild
             .struct_defender_by_protected(cs, 1)
             .await
             .map(|p| p.items.len())
             .unwrap_or(0),
-        None => 0,
+        (None, _) => 0,
     };
 
     Some(Candidate {

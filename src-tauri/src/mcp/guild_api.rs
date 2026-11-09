@@ -60,7 +60,7 @@ async fn send_get(url: &str) -> Result<reqwest::Response, String> {
     if resp.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
         if let Some(secs) = retry_after_secs(&resp).filter(|s| *s <= MAX_INLINE_RETRY_AFTER_SECS) {
             tokio::time::sleep(std::time::Duration::from_secs(secs.max(1))).await;
-            note_request();
+            note_request(url);
             return send().await;
         }
     }
@@ -76,7 +76,18 @@ use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 static REQ_TOTAL: AtomicU64 = AtomicU64::new(0);
 static REQ_WINDOW: std::sync::Mutex<(u64, u64, u64)> = std::sync::Mutex::new((0, 0, 0)); // (minute, current, previous)
 
-fn note_request() {
+/// Per-route counts (ids replaced by `{id}`), like the LCD's, so "which
+/// guild route is the load" is a lookup in `structs_system status`.
+static GUILD_PATHS: std::sync::LazyLock<crate::mcp::cosmos_client::PathTally> =
+    std::sync::LazyLock::new(crate::mcp::cosmos_client::PathTally::new);
+
+/// Top Guild API routes by count over the last full minute.
+pub fn top_paths(n: usize) -> serde_json::Value {
+    GUILD_PATHS.top(n)
+}
+
+fn note_request(url: &str) {
+    GUILD_PATHS.note(url);
     REQ_TOTAL.fetch_add(1, AtomicOrdering::Relaxed);
     let minute = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -316,7 +327,7 @@ impl GuildApiClient {
     /// (`/api/auth/login` answers `success` + `errors`, no `data`).
     pub(crate) async fn post_public(&self, path: &str, body: &Value) -> Result<Value, String> {
         let url = self.build_url(path);
-        note_request();
+        note_request(&url);
         let resp = http()
             .post(&url)
             .json(body)
@@ -354,8 +365,8 @@ impl GuildApiClient {
     }
 
     async fn get_once(&self, path: &str) -> Result<Value, String> {
-        note_request();
         let url = self.build_url(path);
+        note_request(&url);
         let resp = send_get(&url).await?;
 
         let status = resp.status();
@@ -780,8 +791,8 @@ impl GuildApiClient {
     }
 
     async fn get_envelope_once(&self, path: &str) -> Result<Value, String> {
-        note_request();
         let url = self.build_url(path);
+        note_request(&url);
         let resp = send_get(&url).await?;
         let status = resp.status();
         let body = resp
@@ -1639,8 +1650,8 @@ impl GuildApiClient {
     /// GET returning both `data` and the envelope's `total` (present only
     /// when the caller asked for `include_total=1`).
     async fn get_with_total(&self, path: &str) -> Result<(Value, Option<u64>), String> {
-        note_request();
         let url = self.build_url(path);
+        note_request(&url);
         let resp = send_get(&url).await?;
         let status = resp.status();
         let body = resp
