@@ -42,7 +42,7 @@
       if (!names.length) note(list, 'No cards installed.');
       names.forEach(function (n) {
         var row = H.el('div', 'sui-result-row');
-        row.appendChild(H.el('span', 'sui-text-body', n));
+        row.appendChild(H.el('span', 'sui-text-primary', n));
         row.appendChild(btn('Open', function () { T.setParams(ctx.id, { card: n }); }));
         row.appendChild(btn('Remove', function () { invoke('terminal_card_remove', { name: n }).then(paint); }));
         list.appendChild(row);

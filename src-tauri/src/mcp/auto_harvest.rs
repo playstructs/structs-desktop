@@ -133,6 +133,8 @@ pub struct Plan {
     pub next_due: Option<u64>,
     /// Mined-out owners with no ore left to refine: they can explore now.
     pub explore_ready: usize,
+    /// Who those are — the only players whose explore is checked live.
+    pub explore_ready_owners: std::collections::HashSet<String>,
 }
 
 /// Whether a pick is already being worked: a task for the struct is queued or
@@ -202,7 +204,8 @@ pub fn plan(forecasts: &[crate::mirror::forecast::Forecast], may_refine: impl Fn
             }
         }
     }
-    out.explore_ready = out.mined_out.iter().filter(|o| !still_refining.contains(o.as_str())).count();
+    out.explore_ready_owners = out.mined_out.iter().filter(|o| !still_refining.contains(o.as_str())).cloned().collect();
+    out.explore_ready = out.explore_ready_owners.len();
     out
 }
 
@@ -405,6 +408,7 @@ async fn scan(
                 }
                 run.players.fetch_add(1, Ordering::Relaxed);
                 let mined_out = plan.mined_out.contains(pid.as_str());
+                let explore_ready = plan.explore_ready_owners.contains(pid.as_str());
                 for pick in plan.picks.get(pid.as_str()).into_iter().flatten() {
                     let sid = &pick.struct_id;
                     if already_queued(&registry, pick) {
@@ -515,20 +519,24 @@ async fn scan(
                         // and 59 explores a day were signed against the planet the
                         // player had already left.
                         //
-                        // But only once the SNAPSHOT says the explore is due.
-                        // On 2026-11-08 this pair of live reads ran ~960 times a
+                        // But only once the MIRROR says the explore is due:
+                        // mined out with nothing left to refine. On
+                        // 2026-11-08 this pair of live reads ran ~960 times a
                         // minute — every mined-out worker, every scan, most of
                         // them still refining their stored pile — and agreed
                         // with the snapshot 9,098 times out of 9,098, for 41
-                        // explores. The snapshot decides whether to ask; the
-                        // live read still confirms right before the sign.
-                        {
-                            let Ok(seen) = crate::mcp::verify::player_view(&client, &pid).await else { return };
-                            let Some(seen_planet) = seen.planet_id.clone() else { return };
-                            let seen_ore = crate::mcp::verify::planet_ore(&client, &seen_planet).await.unwrap_or(1.0);
-                            if !explore_due(seen_ore, seen.stored_ore, caps.explore_when_drained_only) {
-                                return;
-                            }
+                        // explores. (A first cut re-derived "due" from the
+                        // snapshot's stored-ore field, which nothing had
+                        // checked; it signed no explores at all while the
+                        // mirror counted five ready.) The live read still
+                        // confirms right before the sign.
+                        // A mined-out player the mirror does NOT call ready
+                        // is still looked at live, but at most once per
+                        // EXPLORE_RECHECK_MS: the mirror's "still refining"
+                        // rests on a stored-ore figure nothing has measured
+                        // yet, so it may delay an explore, never strand one.
+                        if !explore_live_check_due(pid.as_str(), explore_ready, crate::hasher::types::now_millis()) {
+                            return;
                         }
                         let Ok(live_player) = crate::mcp::verify::player_view_live(&client, &pid).await else { return };
                         let Some(planet_id) = live_player.planet_id.clone() else {
@@ -609,6 +617,30 @@ async fn scan(
     }
 }
 
+/// How often a mined-out player the mirror does not count explore-ready is
+/// still checked live — the bound on how long a stale "still refining" can
+/// hold an explore back.
+const EXPLORE_RECHECK_MS: f64 = 5.0 * 60.0 * 1000.0;
+
+/// Player → when its explore was last checked live.
+static EXPLORE_CHECKED: std::sync::LazyLock<dashmap::DashMap<String, f64>> =
+    std::sync::LazyLock::new(dashmap::DashMap::new);
+
+/// Check this mined-out player's explore live now? Always when the mirror
+/// says it is ready; otherwise once per [`EXPLORE_RECHECK_MS`]. Records the
+/// check when it says yes.
+fn explore_live_check_due(pid: &str, mirror_ready: bool, now_ms: f64) -> bool {
+    if !mirror_ready {
+        if let Some(at) = EXPLORE_CHECKED.get(pid) {
+            if now_ms - *at < EXPLORE_RECHECK_MS {
+                return false;
+            }
+        }
+    }
+    EXPLORE_CHECKED.insert(pid.to_string(), now_ms);
+    true
+}
+
 /// May this player explore now? The planet must be out of ore; a worker
 /// (`drained_only`) must also have refined its stored pile to nothing. Pure —
 /// asked of the snapshot first, then of the chain right before the sign.
@@ -618,6 +650,17 @@ fn explore_due(planet_ore: f64, stored_ore: f64, drained_only: bool) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_player_the_mirror_holds_back_is_still_checked_now_and_then() {
+        use super::{explore_live_check_due, EXPLORE_RECHECK_MS};
+        let t = 1_000_000.0;
+        assert!(explore_live_check_due("1-990001", false, t), "first sight: check");
+        assert!(!explore_live_check_due("1-990001", false, t + 1_000.0), "then not every scan");
+        assert!(explore_live_check_due("1-990001", true, t + 2_000.0), "mirror says ready: always");
+        assert!(!explore_live_check_due("1-990001", false, t + 2_000.0 + EXPLORE_RECHECK_MS - 1.0));
+        assert!(explore_live_check_due("1-990001", false, t + 2_000.0 + EXPLORE_RECHECK_MS), "the bound");
+    }
+
     #[test]
     fn explore_is_due_only_on_a_drained_planet_and_pile() {
         use super::explore_due;
@@ -756,5 +799,8 @@ mod tests {
         assert_eq!(p.next_due, Some(200), "the earliest waiting work (5-6's default 200)");
         assert_eq!(p.mined_out.len(), 2);
         assert_eq!(p.explore_ready, 1);
+        // The set the scan checks live is exactly the drained one.
+        assert!(p.explore_ready_owners.contains("1-3"));
+        assert!(!p.explore_ready_owners.contains("1-4"), "still refining: no live read");
     }
 }

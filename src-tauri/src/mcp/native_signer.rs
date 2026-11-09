@@ -78,6 +78,8 @@ static KEY_SOURCE: RwLock<&'static str> = RwLock::new("none");
 static LAST_ERROR: Mutex<Option<String>> = Mutex::new(None);
 static SIGNS_OK: AtomicU64 = AtomicU64::new(0);
 static SIGNS_FAILED: AtomicU64 = AtomicU64::new(0);
+/// Broadcasts re-sent after the request itself failed. Telemetry.
+static BROADCAST_RESENDS: AtomicU64 = AtomicU64::new(0);
 static SEQ_RESETS: AtomicU64 = AtomicU64::new(0);
 static FALLBACKS: AtomicU64 = AtomicU64::new(0);
 static LAST_FALLBACK_LOG_MS: AtomicU64 = AtomicU64::new(0);
@@ -266,6 +268,7 @@ pub fn health() -> Value {
         "signs_ok": SIGNS_OK.load(Ordering::Relaxed),
         "signs_failed": SIGNS_FAILED.load(Ordering::Relaxed),
         "sequence_resets": SEQ_RESETS.load(Ordering::Relaxed),
+        "broadcast_resends": BROADCAST_RESENDS.load(Ordering::Relaxed),
         "fallbacks_to_webview": FALLBACKS.load(Ordering::Relaxed),
         "unsettled_async": unsettled_len(),
         "last_error": LAST_ERROR.lock().unwrap().clone(),
@@ -389,7 +392,56 @@ struct Broadcast {
     codespace: String,
 }
 
+/// Times one signed tx is sent when the REQUEST itself fails, and the waits
+/// between. On 2026-11-08 229 completions (5%) died in ~20 ms with "error
+/// sending request" — a pooled connection the node had already closed —
+/// first attempt, never retried, each one a solved proof thrown away.
+/// Re-sending the same bytes is safe: the chain includes a tx at most once.
+const BROADCAST_SEND_TRIES: usize = 3;
+const BROADCAST_RETRY_MS: [u64; 2] = [250, 1_000];
+/// The SDK's "tx already exists in cache": the mempool already holds these
+/// exact bytes, i.e. an earlier send we never heard back from got through.
+const CODE_TX_IN_MEMPOOL: i64 = 19;
+
+enum SendError {
+    /// The request never completed — safe to send the same bytes again.
+    Send(String),
+    /// The node answered; its answer stands.
+    Answered(String),
+}
+
 async fn broadcast(base: &str, tx_bytes: &[u8]) -> Result<Broadcast, String> {
+    let mut last = String::new();
+    for attempt in 0..BROADCAST_SEND_TRIES {
+        if attempt > 0 {
+            tokio::time::sleep(Duration::from_millis(BROADCAST_RETRY_MS[attempt - 1])).await;
+            BROADCAST_RESENDS.fetch_add(1, Ordering::Relaxed);
+        }
+        match broadcast_once(base, tx_bytes).await {
+            Ok(b) => return Ok(accept_resent(b, attempt > 0, tx_bytes)),
+            Err(SendError::Answered(e)) => return Err(e),
+            Err(SendError::Send(e)) => last = e,
+        }
+    }
+    Err(last)
+}
+
+/// On a RE-send, "already in the mempool" means the first send landed in the
+/// mempool after all: that is an acceptance, with the hash of these bytes.
+fn accept_resent(b: Broadcast, resent: bool, tx_bytes: &[u8]) -> Broadcast {
+    if resent && b.code == CODE_TX_IN_MEMPOOL {
+        use sha2::Digest;
+        return Broadcast {
+            code: 0,
+            hash: hex::encode_upper(sha2::Sha256::digest(tx_bytes)),
+            raw_log: String::new(),
+            codespace: String::new(),
+        };
+    }
+    b
+}
+
+async fn broadcast_once(base: &str, tx_bytes: &[u8]) -> Result<Broadcast, SendError> {
     let body = json!({
         "tx_bytes": base64::engine::general_purpose::STANDARD.encode(tx_bytes),
         "mode": "BROADCAST_MODE_SYNC",
@@ -400,13 +452,13 @@ async fn broadcast(base: &str, tx_bytes: &[u8]) -> Result<Broadcast, String> {
         .json(&body)
         .send()
         .await
-        .map_err(|e| format!("broadcast HTTP error: {e}"))?;
+        .map_err(|e| SendError::Send(format!("broadcast HTTP error: {e}")))?;
     let status = resp.status();
-    let text = resp.text().await.map_err(|e| format!("broadcast read error: {e}"))?;
-    let v: Value = serde_json::from_str(&text).map_err(|_| format!("broadcast returned {status}: {text}"))?;
-    let r = v
-        .get("tx_response")
-        .ok_or_else(|| format!("broadcast returned {status}: {}", v.get("message").and_then(|m| m.as_str()).unwrap_or(&text)))?;
+    let text = resp.text().await.map_err(|e| SendError::Send(format!("broadcast read error: {e}")))?;
+    let v: Value = serde_json::from_str(&text).map_err(|_| SendError::Answered(format!("broadcast returned {status}: {text}")))?;
+    let r = v.get("tx_response").ok_or_else(|| {
+        SendError::Answered(format!("broadcast returned {status}: {}", v.get("message").and_then(|m| m.as_str()).unwrap_or(&text)))
+    })?;
     Ok(Broadcast {
         code: r.get("code").and_then(|c| c.as_i64()).unwrap_or(-1),
         hash: r.get("txhash").and_then(|h| h.as_str()).unwrap_or("").to_string(),
@@ -686,6 +738,22 @@ pub async fn sign(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A re-send the mempool already holds is the first send's acceptance,
+    /// under the hash of the bytes; a first send's code 19 is not ours to
+    /// reinterpret, and any other answer stands.
+    #[test]
+    fn a_resent_tx_already_in_the_mempool_was_accepted() {
+        let b = |code: i64| Broadcast { code, hash: String::new(), raw_log: "tx already exists in cache".into(), codespace: "sdk".into() };
+        let bytes = b"signed tx bytes";
+        let ok = accept_resent(b(19), true, bytes);
+        assert_eq!(ok.code, 0);
+        use sha2::Digest;
+        assert_eq!(ok.hash, hex::encode_upper(sha2::Sha256::digest(bytes)));
+        assert_eq!(ok.hash.len(), 64);
+        assert_eq!(accept_resent(b(19), false, bytes).code, 19, "first send: the node's answer stands");
+        assert_eq!(accept_resent(b(2022), true, bytes).code, 2022, "a real rejection stands");
+    }
 
     #[test]
     fn one_blocks_results_are_read_by_hash() {

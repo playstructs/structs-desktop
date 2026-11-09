@@ -320,6 +320,7 @@ mod tests {
     #[test]
     fn pop_prefers_easiest_ripe_and_skips_unripe() {
         let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _head = crate::game_state::HEAD_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let registry = Arc::new(TaskRegistry::new());
         drain_pending();
         task(&registry, "t-easy", 10_000); // difficulty 1
@@ -344,6 +345,7 @@ mod tests {
     #[test]
     fn pop_refreshes_the_checkpoint_it_judges_ripeness_from() {
         let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _head = crate::game_state::HEAD_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let registry = Arc::new(TaskRegistry::new());
         drain_pending();
         let h = task(&registry, "5-77", 100_000);
@@ -362,6 +364,7 @@ mod tests {
     #[test]
     fn pop_prunes_cancelled_and_superseded() {
         let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _head = crate::game_state::HEAD_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let registry = Arc::new(TaskRegistry::new());
         drain_pending();
         let cancelled = task(&registry, "t-cancel", 10_000);

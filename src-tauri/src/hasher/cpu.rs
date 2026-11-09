@@ -8,10 +8,38 @@ use crate::hasher::difficulty::{
 };
 use crate::hasher::types::{now_millis, TaskHandle};
 
-/// Run the CPU hasher on a rayon thread pool.
+/// ONE pool for every CPU task. Each task used to build its own
+/// `num_cpus - 1`-thread pool, so N concurrent CPU tasks ran N × 19 threads
+/// on a 20-core machine, all contending for the same cores and allocator.
+/// Tasks sharing this pool queue behind each other instead, and each one
+/// finishes sooner.
+static CPU_POOL: std::sync::LazyLock<rayon::ThreadPool> = std::sync::LazyLock::new(|| {
+    rayon::ThreadPoolBuilder::new()
+        .num_threads(cpu_threads())
+        .thread_name(|i| format!("structs-cpu-hash-{i}"))
+        .build()
+        .expect("failed to build rayon pool")
+});
+
+fn cpu_threads() -> usize {
+    num_cpus::get().saturating_sub(1).max(1)
+}
+
+/// `prefix + decimal(nonce) + postfix` into `buf`, reusing its allocation.
+/// The hot loop ran `format!` per nonce — an allocation and a free for every
+/// hash, on every thread.
+pub(crate) fn write_message(buf: &mut Vec<u8>, prefix: &str, nonce: u64, postfix: &str) {
+    use std::io::Write;
+    buf.clear();
+    buf.extend_from_slice(prefix.as_bytes());
+    let _ = write!(buf, "{nonce}");
+    buf.extend_from_slice(postfix.as_bytes());
+}
+
+/// Run the CPU hasher on the shared rayon pool.
 /// Emits Tauri events for progress and completion.
 pub fn run_cpu_hash(handle: Arc<TaskHandle>, app_handle: tauri::AppHandle) {
-    let num_threads = num_cpus::get().saturating_sub(1).max(1);
+    let num_threads = cpu_threads();
     let prefix = handle.params.prefix.clone();
     let postfix = handle.params.postfix.clone();
     let block_start = handle.params.block_start;
@@ -115,12 +143,7 @@ pub fn run_cpu_hash(handle: Arc<TaskHandle>, app_handle: tauri::AppHandle) {
     // Start nonce: JS does ++nonce_current before first use
     let start_nonce = initial_nonce + 1;
 
-    let pool = rayon::ThreadPoolBuilder::new()
-        .num_threads(num_threads)
-        .build()
-        .expect("failed to build rayon pool");
-
-    pool.scope(|s| {
+    CPU_POOL.scope(|s| {
         for thread_id in 0..num_threads {
             let handle = handle.clone();
             let app_handle = app_handle.clone();
@@ -141,6 +164,7 @@ pub fn run_cpu_hash(handle: Arc<TaskHandle>, app_handle: tauri::AppHandle) {
                 // miss a checkpoint entirely.
                 let mut next_checkpoint: u64 = CHECKPOINT_COMMIT;
                 let mut next_recalc: u64 = DIFFICULTY_RECALCULATE;
+                let mut buf: Vec<u8> = Vec::with_capacity(prefix.len() + postfix.len() + 20);
                 let mut difficulty = {
                     let now_ms = now_millis();
                     let (age, _) = {
@@ -161,8 +185,8 @@ pub fn run_cpu_hash(handle: Arc<TaskHandle>, app_handle: tauri::AppHandle) {
                     }
 
                     // Build message: prefix + nonce_as_decimal + postfix
-                    let message = format!("{}{}{}", prefix, nonce, postfix);
-                    let hash_result = Sha256::digest(message.as_bytes());
+                    write_message(&mut buf, &prefix, nonce, &postfix);
+                    let hash_result = Sha256::digest(&buf);
                     let hash_bytes: [u8; 32] = hash_result.into();
 
                     _local_iterations += 1;
@@ -184,7 +208,7 @@ pub fn run_cpu_hash(handle: Arc<TaskHandle>, app_handle: tauri::AppHandle) {
                                     initial_iterations + global_iters;
                                 progress.iterations_since_last_start = global_iters;
                                 progress.result_exists = true;
-                                progress.result_message = Some(message);
+                                progress.result_message = Some(String::from_utf8_lossy(&buf).into_owned());
                                 progress.result_nonce =
                                     Some(format!("{}{}", nonce, postfix));
                                 progress.result_hash = Some(hash_hex);
@@ -300,4 +324,20 @@ fn emit_complete(app_handle: &tauri::AppHandle, handle: &TaskHandle, _pid: &str)
     crate::hasher::maybe_complete_virtual(app_handle, &snapshot);
     crate::hasher::maybe_report_borrowed(app_handle, &snapshot);
     crate::hasher::maybe_complete_for_crew(app_handle, &snapshot);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::write_message;
+
+    /// The reused buffer must be byte-for-byte the old `format!` message,
+    /// including when a shorter nonce follows a longer one.
+    #[test]
+    fn the_reused_buffer_is_the_formatted_message() {
+        let mut buf = Vec::new();
+        for (prefix, nonce, postfix) in [("5-1@3497000", 1234567890u64, "x"), ("p", 7, ""), ("", 0, "tail"), ("5-613861", u64::MAX, "@9")] {
+            write_message(&mut buf, prefix, nonce, postfix);
+            assert_eq!(buf, format!("{prefix}{nonce}{postfix}").into_bytes());
+        }
+    }
 }

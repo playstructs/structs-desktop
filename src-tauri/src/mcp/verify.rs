@@ -517,9 +517,14 @@ pub async fn player_view(client: &CosmosClient, pid: &PlayerId) -> Result<Player
 /// snapshot may have already been moved off of.
 pub async fn player_view_live(client: &CosmosClient, pid: &PlayerId) -> Result<PlayerView, String> {
     let belief = peek(|s| s.player_row(pid.as_str()).map(|p| str_field(p, "planetId").map(String::from)));
+    // Is the stored pile empty? The explore gate turns on exactly this, and
+    // a gate built on the snapshot's copy signed no explores at all — so it
+    // is measured before anything trusts it again.
+    let drained_belief = peek(|s| s.grid_attr(pid.as_str(), "ore").map(|o| o == 0));
     let live = player_view_read(client, pid).await;
     if let Ok(l) = &live {
         note_agreement("player_planet", belief, &l.planet_id.as_ref().map(|x| x.to_string()));
+        note_agreement("player_drained", drained_belief, &(l.stored_ore <= 0.0));
     }
     live
 }

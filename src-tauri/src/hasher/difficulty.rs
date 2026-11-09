@@ -303,6 +303,7 @@ mod tests {
 
     #[test]
     fn refresh_checkpoint_only_moves_forward() {
+        let _head = crate::game_state::HEAD_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         // Live height unavailable in tests (GAME_STATE is 0) → keep the anchor.
         let (cp, cpt) = refresh_checkpoint(500, 1000.0, 9999.0);
         assert_eq!((cp, cpt), (500, 1000.0));

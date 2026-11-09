@@ -324,7 +324,12 @@ mod tests {
     #[test]
     fn bundle_reads_the_app_support_dir_where_the_configs_are() {
         let dir = bundle_source_dir().expect("a config dir");
-        assert!(dir.ends_with("structs-app"), "{}", dir.display());
+        // The folder the configs are IN — under test, config_store's isolated
+        // `structs-app-tests-<uuid>` stand-in for Application Support/structs-app.
+        let manifest = crate::mcp::config_store::config_path("manifest.json").unwrap();
+        assert_eq!(manifest.parent(), Some(dir.as_path()));
+        let name = dir.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        assert!(name.starts_with("structs-app"), "{}", dir.display());
         // The regression: the parent of "structs-app/" is Application Support.
         assert!(!dir.ends_with("Application Support"));
     }

@@ -6303,20 +6303,23 @@ mod tests {
             Some("left".to_string())
         );
         assert_eq!(
-            render(member(Some(("join", "JPEG")), "leave", "", "@mod:h", "@1-61:h")),
-            Some("was removed".to_string())
+            render(member(Some(("join", "")), "leave", "", "@mod:h", "@1-96161:h")),
+            Some("removed 1-96161".to_string()),
+            "a removal is told from the moderator's side and names who was removed"
         );
 
         // An unban is `ban → leave` performed by a moderator — which the
         // "somebody else did this" test would call a removal, the opposite of
         // what happened, if it were checked first.
         assert_eq!(
-            render(member(Some(("ban", "")), "leave", "", "@mod:h", "@1-61:h")),
-            Some("was unbanned".to_string())
+            // A subject no other test puts in the global directory, so the
+            // name is the player id whatever runs alongside.
+            render(member(Some(("ban", "")), "leave", "", "@mod:h", "@1-96161:h")),
+            Some("unbanned 1-96161".to_string())
         );
         assert_eq!(
-            render(member(Some(("join", "")), "ban", "", "@mod:h", "@1-61:h")),
-            Some("was banned".to_string())
+            render(member(Some(("join", "")), "ban", "", "@mod:h", "@1-96161:h")),
+            Some("banned 1-96161".to_string())
         );
     }
 
@@ -6867,7 +6870,7 @@ mod tests {
         });
         let m = render_event(&ev, &gs, "!r:h", "@me:h").unwrap();
         assert_eq!(m.reply_to.as_deref(), Some("$q1"));
-        assert_eq!(m.reply_sender.as_deref(), Some("@1-61:h"));
+        assert_eq!(m.reply_sender.as_deref(), Some("JPEG"), "the quote names its author as a row would, never a raw Matrix id");
         assert_eq!(m.reply_excerpt.as_deref(), Some("take 2-15361"));
         // …and the quote is NOT left in the message itself.
         assert_eq!(m.body, "agreed");

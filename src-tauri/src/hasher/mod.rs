@@ -17,7 +17,14 @@ static GPU_AVAILABLE: AtomicBool = AtomicBool::new(false);
 static GPU_DEVICE: OnceLock<Arc<wgpu::Device>> = OnceLock::new();
 static GPU_QUEUE: OnceLock<Arc<wgpu::Queue>> = OnceLock::new();
 static GPU_INFO: OnceLock<gpu::GpuInfo> = OnceLock::new();
-static GPU_INIT_DONE: AtomicBool = AtomicBool::new(false);
+/// GPU init runs exactly once, and every caller WAITS for it. It used to be
+/// an AtomicBool set to "done" before the device existed, so a pool worker
+/// asking during the seconds of init read "done, unavailable" and ground its
+/// task on the CPU — 19 threads per task on this 20-core machine. On
+/// 2026-11-08 that happened at every launch, and one launch with ~3 CPU tasks
+/// (57 hashing threads allocating a String per nonce) aborted 30 s later on a
+/// malloc guard-corruption check inside `run_cpu_hash`.
+static GPU_INIT: std::sync::Once = std::sync::Once::new();
 
 // ── Runtime hashing config (agent-controllable via the structs_hash tool) ──
 /// Master on/off for the hashing system. When false, no new tasks start.
@@ -818,35 +825,22 @@ mod anchor_tests {
 }
 
 pub fn ensure_gpu_init() -> bool {
-    if GPU_INIT_DONE.load(std::sync::atomic::Ordering::Relaxed) {
-        return GPU_AVAILABLE.load(std::sync::atomic::Ordering::Relaxed);
-    }
-
-    // Only one thread initializes
-    if GPU_INIT_DONE
-        .compare_exchange(
-            false,
-            true,
-            std::sync::atomic::Ordering::SeqCst,
-            std::sync::atomic::Ordering::Relaxed,
-        )
-        .is_ok()
-    {
-        match gpu::try_init_gpu() {
-            Some((device, queue, info)) => {
-                let _ = GPU_DEVICE.set(Arc::new(device));
-                let _ = GPU_QUEUE.set(Arc::new(queue));
-                let _ = GPU_INFO.set(info);
-                GPU_AVAILABLE.store(true, std::sync::atomic::Ordering::SeqCst);
-                eprintln!("[Structs Hasher] GPU available — will use GPU for hashing");
-            }
-            None => {
-                eprintln!("[Structs Hasher] No GPU available — using CPU only");
-            }
+    // A panic inside init must not poison the Once — every later caller
+    // (each pool worker, outside its catch_unwind) would panic too. A
+    // panicking driver is "no GPU", as it was before.
+    GPU_INIT.call_once(|| match std::panic::catch_unwind(gpu::try_init_gpu).ok().flatten() {
+        Some((device, queue, info)) => {
+            let _ = GPU_DEVICE.set(Arc::new(device));
+            let _ = GPU_QUEUE.set(Arc::new(queue));
+            let _ = GPU_INFO.set(info);
+            GPU_AVAILABLE.store(true, std::sync::atomic::Ordering::SeqCst);
+            eprintln!("[Structs Hasher] GPU available — will use GPU for hashing");
         }
-    }
-
-    GPU_AVAILABLE.load(std::sync::atomic::Ordering::Relaxed)
+        None => {
+            eprintln!("[Structs Hasher] No GPU available — using CPU only");
+        }
+    });
+    GPU_AVAILABLE.load(std::sync::atomic::Ordering::SeqCst)
 }
 
 #[tauri::command]

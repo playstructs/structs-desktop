@@ -762,6 +762,11 @@ pub async fn conn_log(msg: String) -> Result<(), String> {
     Ok(())
 }
 
+/// Tests that move the process-global head, or that assume it is 0 (the
+/// hasher's ripeness tests), hold this so they never interleave.
+#[cfg(test)]
+pub static HEAD_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[cfg(test)]
 mod head_tests {
     use super::*;
@@ -770,6 +775,7 @@ mod head_tests {
     /// webview's ~10 s copy can only lag it (`sync_game_state` keeps the max).
     #[test]
     fn heartbeat_advances_the_head_and_never_rewinds_it() {
+        let _head = HEAD_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let before = GAME_STATE.read().unwrap().current_block_height;
         let target = before.max(1) + 1_000_000;
         note_block(target);
@@ -778,5 +784,7 @@ mod head_tests {
         assert_eq!(GAME_STATE.read().unwrap().current_block_height, target, "an older height is ignored");
         note_block(0);
         assert_eq!(GAME_STATE.read().unwrap().current_block_height, target, "a zero (no height) is ignored");
+        // Put the head back: other tests judge ripeness against it.
+        GAME_STATE.write().unwrap().current_block_height = before;
     }
 }

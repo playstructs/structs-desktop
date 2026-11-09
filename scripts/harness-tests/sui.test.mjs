@@ -194,6 +194,9 @@ const BUDGET = {
   // Comms: the model is pure data and the cards build with tokens only.
   'board-terminal-chart.js': [0, 0],
   'board-terminal-ops.js': [0, 0],
+  // Installed (third-party) cards: the manager rows are SUI; the card itself
+  // runs sandboxed in its own frame and is not ours to audit.
+  'board-terminal-external.js': [0, 0],
   // The Onboarding card: hairlines, the HUD's display-face metrics (the
   // Sounds card's) and the one-wide container breakpoint; columns are in ch,
   // bars and swatches on the spacing scale.

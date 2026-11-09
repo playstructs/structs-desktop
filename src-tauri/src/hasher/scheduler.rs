@@ -112,8 +112,13 @@ pub fn admit(difficulty: u64, is_cancelled: &dyn Fn() -> bool) -> Option<Permit>
 mod tests {
     use super::*;
 
+    /// Each test below takes EVERY slot. Two of them in parallel each got some
+    /// and waited forever for the rest — a test-run hang, not a product bug.
+    static SLOTS: Mutex<()> = Mutex::new(());
+
     #[test]
     fn easiest_is_admitted_first() {
+        let _slots = SLOTS.lock().unwrap_or_else(|e| e.into_inner());
         // Fill all slots so the next admits must queue and order by difficulty.
         let max = crate::hasher::max_concurrent().max(1);
         let never_cancel = || false;
@@ -143,6 +148,7 @@ mod tests {
 
     #[test]
     fn cancelled_while_waiting_returns_none() {
+        let _slots = SLOTS.lock().unwrap_or_else(|e| e.into_inner());
         let max = crate::hasher::max_concurrent().max(1);
         let mut held = Vec::new();
         for _ in 0..max {
