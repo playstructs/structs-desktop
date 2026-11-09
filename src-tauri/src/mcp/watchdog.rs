@@ -327,7 +327,11 @@ fn detect(app: &tauri::AppHandle, now: f64) -> Vec<Finding> {
         }
 
         if enabled && !sync_stalled && !stat.running {
-            let baseline = stat.last_finished_ms.max(app_start);
+            // A need-gated loop the scheduler is deliberately idling is
+            // alive: on 0.1.508 auto_harvest waited for its next due height
+            // and logged 106 false "overdue" warnings in 5 h. A scheduler
+            // that stops ticking stops skipping too, so a real stall still shows.
+            let baseline = stat.last_finished_ms.max(app_start).max(crate::mcp::schedule::last_skip_ms(name));
             if now - baseline > OVERDUE_FACTOR * interval_ms {
                 let mins = ((now - baseline) / 60_000.0) as u64;
                 findings.push(Finding {

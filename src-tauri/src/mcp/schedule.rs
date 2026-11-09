@@ -70,6 +70,9 @@ pub struct LoopState {
     pub runs: u64,
     /// Scheduled runs skipped because nothing was due.
     pub skipped_idle: u64,
+    /// When the scheduler last chose to skip it — a deliberate idle, which
+    /// the watchdog counts as a live loop rather than an overdue one.
+    pub last_skip_ms: f64,
     /// Why the last run was let through.
     pub last_reason: Option<&'static str>,
 }
@@ -200,6 +203,11 @@ pub fn mark_dirty() {
     }
 }
 
+/// When the scheduler last skipped `name` because nothing was due (0 = never).
+pub fn last_skip_ms(name: &str) -> f64 {
+    STATE.lock().ok().and_then(|m| m.get(name).map(|s| s.last_skip_ms)).unwrap_or(0.0)
+}
+
 /// Should a need-gated loop run now? `None` = skip; otherwise the reason.
 /// Pure.
 pub fn reason_to_run(st: Option<&LoopState>, tip: u64, now_ms: f64) -> Option<&'static str> {
@@ -236,6 +244,7 @@ fn decide(name: &'static str) -> bool {
         (Some(_), None) => true,
         (None, Some(st)) => {
             st.skipped_idle += 1;
+            st.last_skip_ms = now_millis();
             false
         }
         (None, None) => true,

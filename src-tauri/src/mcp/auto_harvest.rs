@@ -135,6 +135,10 @@ pub struct Plan {
     pub explore_ready: usize,
     /// Who those are — the only players whose explore is checked live.
     pub explore_ready_owners: std::collections::HashSet<String>,
+    /// Owners with an Ore Refinery standing (any refine forecast). A worker
+    /// without one can never drain its pile, so the drained-only explore
+    /// rule does not apply to it.
+    pub has_refinery: std::collections::HashSet<String>,
 }
 
 impl Plan {
@@ -171,6 +175,9 @@ pub fn plan(forecasts: &[crate::mirror::forecast::Forecast], may_refine: impl Fn
     // Owners whose refinery still has ore to work through: not explore-ready.
     let mut still_refining: std::collections::HashSet<&str> = std::collections::HashSet::new();
     for f in forecasts {
+        if f.kind == Kind::Refine {
+            out.has_refinery.insert(f.owner.clone());
+        }
         let kind = match f.kind {
             Kind::Mine => TaskType::Mine,
             Kind::Refine if may_refine(&f.owner) => TaskType::Refine,
@@ -350,8 +357,10 @@ async fn scan(
     // snapshot's stored ore agreed with the chain on every read it was
     // measured against (`player_drained`), so it decides here; unknown
     // still goes to the live read.
+    let has_refinery = plan.has_refinery.clone();
     plan.hold_back_unrefined(|owner| {
         refiners.contains(owner)
+            && has_refinery.contains(owner)
             && crate::mcp::perception::with_snapshot(|s| s.grid_attr(owner, "ore")).flatten().is_some_and(|o| o > 0)
     });
     // Tell the scheduler when this loop next has work: the first waiting
@@ -571,7 +580,13 @@ async fn scan(
                         // ore because its cycle looked "stale", and the leftover ore then
                         // blocked the explore. With refines completing, the ore drains to 0
                         // and the worker moves on.)
-                        let due = explore_due(planet_ore, live_player.stored_ore, caps.explore_when_drained_only);
+                        // A worker with no refinery can never drain its pile (on
+                        // 0.1.508, 1-2154..1-2158: all four land slots hold an
+                        // extractor and bunkers), and stored ore carries over an
+                        // explore — so for it, mined out is enough. Still
+                        // vplayers only: the primary never reaches this branch.
+                        let drained_only = caps.explore_when_drained_only && plan.has_refinery.contains(pid.as_str());
+                        let due = explore_due(planet_ore, live_player.stored_ore, drained_only);
                         crate::mcp::verify::note_explore_ready(due);
                         if due {
                             let res = crate::mcp::tx_retry::sign_with_retry(
@@ -802,5 +817,21 @@ mod tests {
         p.hold_back_unrefined(|o| o == "1-1");
         assert_eq!(p.explore_ready, 1);
         assert!(p.explore_ready_owners.contains("1-2"));
+    }
+
+    #[test]
+    fn has_refinery_counts_every_refinery_even_for_bait() {
+        use crate::mirror::forecast::{Kind, Status};
+        let f = vec![
+            fc(Kind::Mine, "5-1", "1-1", Status::Blocked, vec![blocked("empty")]),
+            fc(Kind::Refine, "5-2", "1-1", Status::Blocked, vec![blocked("ore")]),
+            fc(Kind::Mine, "5-3", "1-2", Status::Blocked, vec![blocked("empty")]),
+        ];
+        let p = plan(&f, |_| false);
+        assert!(p.has_refinery.contains("1-1"), "a refinery stands even when the owner may not refine");
+        assert!(!p.has_refinery.contains("1-2"), "no refinery: mined out is enough to explore");
+        // The live rule then: drained-only applies to 1-1, not to 1-2.
+        assert!(!super::explore_due(0.0, 5.0, p.has_refinery.contains("1-1")));
+        assert!(super::explore_due(0.0, 5.0, p.has_refinery.contains("1-2")));
     }
 }
