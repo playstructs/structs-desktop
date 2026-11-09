@@ -137,6 +137,14 @@ pub struct Plan {
     pub explore_ready_owners: std::collections::HashSet<String>,
 }
 
+impl Plan {
+    /// Drop explore-ready owners that still hold ore they must refine first.
+    pub fn hold_back_unrefined(&mut self, holds_ore: impl Fn(&str) -> bool) {
+        self.explore_ready_owners.retain(|o| !holds_ore(o));
+        self.explore_ready = self.explore_ready_owners.len();
+    }
+}
+
 /// Whether a pick is already being worked: a task for the struct is queued or
 /// grinding (completed ones linger in the registry — those may re-issue), or
 /// a proof for this exact cycle is solved and waiting to be signed (the
@@ -335,7 +343,17 @@ async fn scan(
         .filter(|(_, _, caps)| cfg.refine && caps.refines)
         .map(|(p, _, _)| p.as_str().to_string())
         .collect();
-    let plan = plan(&now.forecasts, |owner| refiners.contains(owner));
+    let mut plan = plan(&now.forecasts, |owner| refiners.contains(owner));
+    // A worker with no refinery has no refine forecast, so `plan` cannot
+    // see its pile: on 0.1.507 five such workers sat "ready" every scan, kept
+    // this loop waking each tick, and were refused live 25 of 25 times. The
+    // snapshot's stored ore agreed with the chain on every read it was
+    // measured against (`player_drained`), so it decides here; unknown
+    // still goes to the live read.
+    plan.hold_back_unrefined(|owner| {
+        refiners.contains(owner)
+            && crate::mcp::perception::with_snapshot(|s| s.grid_attr(owner, "ore")).flatten().is_some_and(|o| o > 0)
+    });
     // Tell the scheduler when this loop next has work: the first waiting
     // rig's ripening height, and how many players can explore now.
     crate::mcp::schedule::report(
@@ -769,5 +787,20 @@ mod tests {
         // The set the scan checks live is exactly the drained one.
         assert!(p.explore_ready_owners.contains("1-3"));
         assert!(!p.explore_ready_owners.contains("1-4"), "still refining: no live read");
+    }
+
+    #[test]
+    fn a_worker_without_a_refinery_holding_ore_is_not_ready() {
+        use crate::mirror::forecast::{Kind, Status};
+        // Both mined out, neither has a refine forecast (no refinery).
+        let f = vec![
+            fc(Kind::Mine, "5-1", "1-1", Status::Blocked, vec![blocked("empty")]),
+            fc(Kind::Mine, "5-2", "1-2", Status::Blocked, vec![blocked("empty")]),
+        ];
+        let mut p = plan(&f, |_| true);
+        assert_eq!(p.explore_ready, 2, "plan alone cannot see the pile");
+        p.hold_back_unrefined(|o| o == "1-1");
+        assert_eq!(p.explore_ready, 1);
+        assert!(p.explore_ready_owners.contains("1-2"));
     }
 }
