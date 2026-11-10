@@ -17,8 +17,8 @@
 .ob-hud .ob-tile .fstat-l2 { order: 2; }
 /* Filters, then the page beside its rail. */
 .ob-controls { align-items: center; }
-#board-layout .ob-controls .sui-checkbox-container.has-label label { margin-left: calc(var(--form-input-height-total) + var(--spacing-md)); }
-.ob-status { margin-left: auto; display: inline-flex; align-items: center; gap: var(--spacing-sm); text-decoration: none; color: var(--text-body); }
+#board-layout .ob .sui-checkbox-container.has-label label { margin-left: calc(var(--form-input-height-total) + var(--spacing-md)); }
+.ob-status { margin-left: auto; display: inline-flex; align-items: center; gap: var(--spacing-md); text-decoration: none; color: var(--text-body); }
 .ob-status.is-bad { color: var(--text-warning); }
 .ob-status.is-bad .ob-src-mark { background: var(--text-warning); }
 .ob-shell { display: flex; align-items: stretch; gap: var(--spacing-xl); }
@@ -143,6 +143,9 @@
 .ob-dot.is-done { background: var(--border-focus-friendly-dark); }
 .ob-more { display: grid; grid-template-columns: repeat(auto-fit, minmax(14ch, 1fr)); gap: var(--spacing-sm) var(--spacing-md); padding: var(--spacing-sm) var(--spacing-xs); background: var(--surface-default); border-bottom: 1px solid var(--border-subtle); }
 .ob-fact { display: flex; flex-direction: column; min-width: 0; }
+
+/* Exclusions: the switch, the add row, then the rules. */
+.ob-ex-off { color: var(--text-warning); }
 
 /* Health: what needs a look, then the sources that do not. */
 .ob-issues { display: flex; flex-direction: column; gap: var(--spacing-sm); }

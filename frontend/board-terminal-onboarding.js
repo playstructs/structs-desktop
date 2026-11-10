@@ -27,7 +27,8 @@
   var NAV = [['Growth', [['overview', 'Overview'], ['trends', 'Trends'], ['daily', 'Daily']]],
     ['Onboarding', [['signup', 'Signup'], ['tutorial', 'Tutorial'], ['runs', 'Runs'], ['timing', 'Timing']]],
     ['Players', [['players', 'Players'], ['retention', 'Retention'], ['recent', 'Recent']]],
-    ['Network', [['guilds', 'Guilds'], ['health', 'Health']]]];
+    ['Network', [['guilds', 'Guilds'], ['health', 'Health']]],
+    ['Settings', [['exclusions', 'Exclusions']]]];
   /* The tutorial's phases, in play order; a step belongs to the first prefix it starts with. */
   var PHASES = [['signup', 'Signup'], ['orientation', 'Offer'], ['tutorial.intro', 'Intro'], ['tutorial.raid', 'Raid'], ['tutorial.rebuild', 'Rebuild'],
     ['tutorial.defend', 'Defend'], ['tutorial.first_attack', 'First attack'], ['tutorial.bomber', 'Bomber'], ['tutorial.free_play', 'Free play'],
@@ -1144,6 +1145,16 @@
     return box;
   }
 
+  // ── Exclusions: the guilds' own list, kept in their databases ──
+  function viewExclusions(d, ctx, set) {
+    var box = H.el('div', 'ob-view');
+    var on = !!(d.filters || {}).include_excluded;
+    var sw = H.checkbox(on, 'Include excluded players', function (v) { set({ excl: v ? '1' : '' }); });
+    sw.classList.add('ob-ex-switch');
+    box.appendChild(sw);
+    return box;
+  }
+
   // ── Loading ──
   // A read answers at once with whatever the background crawls have so far, so
   // an empty page means "not read yet" while they run and "nothing" after.
@@ -1224,20 +1235,22 @@
       a.appendChild(H.el('span', 'ob-src-mark'));
       a.appendChild(H.el('span', null, int(issues) + (issues === 1 ? ' issue' : ' issues')));
     }
+    if ((d.filters || {}).include_excluded) a.appendChild(H.el('span', 'ob-ex-off', 'Excluded players included'));
     if (c.running) a.appendChild(H.el('i', H.iconClass('icon-in-progress', 'sui-icon-sm')));
     a.appendChild(H.el('span', 'ob-sub', c.running ? 'Reading…' : c.finished_ms ? 'Read ' + H.ago(c.finished_ms) + ' ago' : ''));
     return a;
   }
   function argsOf(p) {
     var a = { idleHours: Number(p.idle) || 24, activeDays: Number(p.active) || 7,
-      filters: { interface: p.iface || null, guild: p.guild || null, activity: p.activity || null, replicants: p.reps === '1', compare: p.compare || null } };
+      filters: { interface: p.iface || null, guild: p.guild || null, activity: p.activity || null, replicants: p.reps === '1', compare: p.compare || null,
+        include_excluded: p.excl === '1' } };
     if (p.version) a.version = p.version;
     return a;
   }
 
   // ── The card ──
   var DRAW = { overview: viewOverview, signup: viewSignup, tutorial: viewTutorial, runs: viewRuns, players: viewPlayers, retention: viewRetention,
-    timing: viewTiming, daily: viewDaily, trends: viewTrends, guilds: viewGuilds, recent: viewRecent, health: viewHealth };
+    timing: viewTiming, daily: viewDaily, trends: viewTrends, guilds: viewGuilds, recent: viewRecent, health: viewHealth, exclusions: viewExclusions };
   T.register('onboarding', {
     label: 'Telemetry', describe: function (p) { return 'Telemetry' + (p && p.version ? ' · ' + p.version : ''); },
     cadenceMs: 30000, defaultWidth: 3,
@@ -1259,7 +1272,7 @@
         var shell = H.el('div', 'ob-shell'), main = H.el('div', 'ob-main');
         shell.appendChild(rail(st.view, pick));
         if (CRAWLED[st.view] && reading(d) && !hasData(d)) main.appendChild(H.stateBlock('loading', progress(d)));
-        else main.appendChild((DRAW[st.view] || viewOverview)(d));
+        else main.appendChild((DRAW[st.view] || viewOverview)(d, ctx, set));
         shell.appendChild(main);
         wrap.appendChild(shell);
         host.appendChild(wrap);

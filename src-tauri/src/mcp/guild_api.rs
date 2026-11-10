@@ -1344,47 +1344,51 @@ impl GuildApiClient {
     }
     /// Per-step reached / skipped / dropped for one phase (`signup`, `tutorial`),
     /// optionally for one interface (`interface_name`).
-    pub async fn onboarding_funnel(&self, content_version: &str, phase: &str, idle_hours: u32, interface: Option<&str>) -> Result<Value, String> {
+    pub async fn onboarding_funnel(&self, content_version: &str, phase: &str, idle_hours: u32, interface: Option<&str>, all: bool) -> Result<Value, String> {
         self.get(&format!(
-            "/api/onboarding/funnel/{}/{}?idle_hours={idle_hours}{}",
+            "/api/onboarding/funnel/{}/{}?idle_hours={idle_hours}&{}{}",
             query_esc(content_version),
             query_esc(phase),
+            include_excluded(all),
             interface.map(|i| format!("&interface_name={}", query_esc(i))).unwrap_or_default()
         ))
         .await
     }
     /// `{offered, completed, declined, left_during_tutorial, in_progress}`.
-    pub async fn onboarding_tutorial_outcome(&self, content_version: &str, idle_hours: u32, interface: Option<&str>) -> Result<Value, String> {
+    pub async fn onboarding_tutorial_outcome(&self, content_version: &str, idle_hours: u32, interface: Option<&str>, all: bool) -> Result<Value, String> {
         self.get(&format!(
-            "/api/onboarding/tutorial/outcome/{}?idle_hours={idle_hours}{}",
+            "/api/onboarding/tutorial/outcome/{}?idle_hours={idle_hours}&{}{}",
             query_esc(content_version),
+            include_excluded(all),
             interface.map(|i| format!("&interface_name={}", query_esc(i))).unwrap_or_default()
         ))
         .await
     }
     /// Unique players by outcome, a design's first runs and replays together.
     /// One row; `player_type` is `new` or `existing`.
-    pub async fn onboarding_tutorial_players(&self, content_version: &str, idle_hours: u32, interface: Option<&str>, player_type: Option<&str>) -> Result<Value, String> {
+    pub async fn onboarding_tutorial_players(&self, content_version: &str, idle_hours: u32, interface: Option<&str>, player_type: Option<&str>, all: bool) -> Result<Value, String> {
         self.get(&format!(
-            "/api/onboarding/tutorial/players/{}?idle_hours={idle_hours}{}{}",
+            "/api/onboarding/tutorial/players/{}?idle_hours={idle_hours}&{}{}{}",
             query_esc(content_version),
+            include_excluded(all),
             interface.map(|i| format!("&interface_name={}", query_esc(i))).unwrap_or_default(),
             player_type.map(|t| format!("&player_type={}", query_esc(t))).unwrap_or_default()
         ))
         .await
     }
     /// How far unique players got, per tutorial step.
-    pub async fn onboarding_tutorial_player_steps(&self, content_version: &str, interface: Option<&str>) -> Result<Value, String> {
+    pub async fn onboarding_tutorial_player_steps(&self, content_version: &str, interface: Option<&str>, all: bool) -> Result<Value, String> {
         self.get(&format!(
-            "/api/onboarding/tutorial/players/{}/steps{}",
+            "/api/onboarding/tutorial/players/{}/steps?{}{}",
             query_esc(content_version),
-            interface.map(|i| format!("?interface_name={}", query_esc(i))).unwrap_or_default()
+            include_excluded(all),
+            interface.map(|i| format!("&interface_name={}", query_esc(i))).unwrap_or_default()
         ))
         .await
     }
     /// One page of a design's tutorial runs, its replays included, newest first.
-    pub async fn onboarding_tutorial_runs(&self, content_version: &str, idle_hours: u32, page: u32) -> Result<Value, String> {
-        self.get(&format!("/api/onboarding/tutorial/runs/{}?idle_hours={idle_hours}&page={page}", query_esc(content_version))).await
+    pub async fn onboarding_tutorial_runs(&self, content_version: &str, idle_hours: u32, page: u32, all: bool) -> Result<Value, String> {
+        self.get(&format!("/api/onboarding/tutorial/runs/{}?idle_hours={idle_hours}&page={page}&{}", query_esc(content_version), include_excluded(all))).await
     }
     /// Every event of each session that carries this player's id: the signup
     /// and any later tutorial run, so read it by `session_id`.
@@ -1749,6 +1753,12 @@ where
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn include_excluded_sends_the_literal_the_server_accepts() {
+        assert_eq!(super::include_excluded(false), "include_excluded=0");
+        assert_eq!(super::include_excluded(true), "include_excluded=1");
+    }
+
     use super::*;
     use serde_json::json;
 
@@ -1871,6 +1881,13 @@ mod tests {
 /// returning the wrong players rather than failing. Every byte outside the
 /// unreserved set goes through, so this is safe for names, ids and addresses
 /// alike.
+/// The onboarding reports leave out the guild's excluded players (managed in
+/// its database) unless asked for everyone. Always sent, as the literal `0`
+/// or `1` the server accepts, so the population never depends on its default.
+fn include_excluded(all: bool) -> &'static str {
+    if all { "include_excluded=1" } else { "include_excluded=0" }
+}
+
 fn query_esc(s: &str) -> String {
     s.bytes()
         .map(|b| match b {

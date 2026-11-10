@@ -35,6 +35,13 @@
 //! is folded here from the run rows rather than read from
 //! `/tutorial/runs/{v}/comparison`: its medians cannot be summed across guilds.
 //!
+//! Each guild leaves its excluded players (test accounts, kept in its own
+//! database by id or username pattern) out of the aggregate, players and runs
+//! reads unless `filters.include_excluded` asks for everyone; every read of one
+//! card sends the same choice, and the caches key on it. `/player/{id}` and
+//! the chain tables are never filtered, so the sample, lifecycle and cohorts
+//! count everyone either way.
+//!
 //! `recorded_at` is the SERVER's insert time and the client batches steps
 //! that land within 2 s of each other, so a dwell is accurate to a couple of
 //! seconds and a batch of quick steps reads as 0 s each.
@@ -323,7 +330,8 @@ struct GuildAggregate {
     error: Option<String>,
 }
 
-type AggregateKey = (String, String, u32, Option<String>);
+/// (guild, version, idle hours, interface, excluded players included)
+type AggregateKey = (String, String, u32, Option<String>, bool);
 static AGGREGATES: LazyLock<Mutex<HashMap<AggregateKey, (Instant, GuildAggregate)>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
@@ -542,11 +550,12 @@ pub fn merge_player_steps(per_guild: &[&Vec<Value>]) -> Vec<Value> {
         .collect()
 }
 
-type RunsKey = (String, String, u32);
+/// (guild, version, idle hours, excluded players included)
+type RunsKey = (String, String, u32, bool);
 static RUNS: LazyLock<Mutex<HashMap<RunsKey, (Instant, GuildRuns)>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
 
-async fn guild_runs(guild: &str, api: &str, version: &str, idle_hours: u32, fresh: bool) -> GuildRuns {
-    let key = (guild.to_string(), version.to_string(), idle_hours);
+async fn guild_runs(guild: &str, api: &str, version: &str, idle_hours: u32, all: bool, fresh: bool) -> GuildRuns {
+    let key = (guild.to_string(), version.to_string(), idle_hours, all);
     if !fresh {
         if let Some((at, r)) = RUNS.lock().unwrap_or_else(|p| p.into_inner()).get(&key) {
             if at.elapsed() < AGGREGATE_TTL {
@@ -557,7 +566,7 @@ async fn guild_runs(guild: &str, api: &str, version: &str, idle_hours: u32, fres
     let c = client_for(api);
     let mut out = GuildRuns::default();
     for page in 1..=RUNS_MAX_PAGES {
-        match c.onboarding_tutorial_runs(version, idle_hours, page).await {
+        match c.onboarding_tutorial_runs(version, idle_hours, page, all).await {
             Ok(Value::Array(rows)) => {
                 out.read = true;
                 out.runs.extend(rows.iter().filter_map(|r| run_from_row(guild, r)));
@@ -580,8 +589,8 @@ async fn guild_runs(guild: &str, api: &str, version: &str, idle_hours: u32, fres
     out
 }
 
-async fn guild_aggregate(guild: &str, api: &str, version: &str, idle_hours: u32, interface: Option<&str>, fresh: bool) -> GuildAggregate {
-    let key = (guild.to_string(), version.to_string(), idle_hours, interface.map(String::from));
+async fn guild_aggregate(guild: &str, api: &str, version: &str, idle_hours: u32, interface: Option<&str>, all: bool, fresh: bool) -> GuildAggregate {
+    let key = (guild.to_string(), version.to_string(), idle_hours, interface.map(String::from), all);
     if !fresh {
         if let Some((at, a)) = AGGREGATES.lock().unwrap_or_else(|p| p.into_inner()).get(&key) {
             if at.elapsed() < AGGREGATE_TTL {
@@ -591,12 +600,12 @@ async fn guild_aggregate(guild: &str, api: &str, version: &str, idle_hours: u32,
     }
     let c = client_for(api);
     let (signup, tutorial, outcome, players, new_players, player_steps) = tokio::join!(
-        c.onboarding_funnel(version, PHASES[0], idle_hours, interface),
-        c.onboarding_funnel(version, PHASES[1], idle_hours, interface),
-        c.onboarding_tutorial_outcome(version, idle_hours, interface),
-        c.onboarding_tutorial_players(version, idle_hours, interface, None),
-        c.onboarding_tutorial_players(version, idle_hours, interface, Some("new")),
-        c.onboarding_tutorial_player_steps(version, interface),
+        c.onboarding_funnel(version, PHASES[0], idle_hours, interface, all),
+        c.onboarding_funnel(version, PHASES[1], idle_hours, interface, all),
+        c.onboarding_tutorial_outcome(version, idle_hours, interface, all),
+        c.onboarding_tutorial_players(version, idle_hours, interface, None, all),
+        c.onboarding_tutorial_players(version, idle_hours, interface, Some("new"), all),
+        c.onboarding_tutorial_player_steps(version, interface, all),
     );
     let mut a = GuildAggregate { funnels: BTreeMap::new(), outcome: Value::Null, players: Value::Null, new_players: Value::Null, player_steps: Vec::new(), error: None };
     for (phase, r) in [(PHASES[0], signup), (PHASES[1], tutorial)] {
@@ -1048,6 +1057,10 @@ pub struct Filters {
     /// `interface` | `guild` | `activity` | `replicant` | `version`
     #[serde(default)]
     pub compare: Option<String>,
+    /// Ask the guilds' reports for their excluded players too
+    /// (`include_excluded=1`); left out when unset.
+    #[serde(default)]
+    pub include_excluded: Option<bool>,
 }
 
 /// The interface of a player with no onboarding telemetry: signed up before
@@ -1289,6 +1302,7 @@ pub async fn terminal_onboarding(
     let idle_hours = idle_hours.filter(|h| (1..=24 * 30).contains(h)).unwrap_or(DEFAULT_IDLE_HOURS);
     let active_days = active_days.filter(|d| (1..=365).contains(d)).unwrap_or(DEFAULT_ACTIVE_DAYS);
     let filters = filters.unwrap_or_default();
+    let all = filters.include_excluded == Some(true);
     let (entries, mut versions, catalogs) = directory(fresh).await?;
     let now = now_ms();
     let cutoff = now - active_days as i64 * 86_400_000;
@@ -1314,7 +1328,7 @@ pub async fn terminal_onboarding(
         vec![version.clone()]
     };
     let guild_reads = futures_util::future::join_all(entries.iter().filter_map(|e| e.guild_api.as_deref().map(|api| (e, api))).flat_map(|(e, api)| {
-        compared_versions.iter().map(move |v| async move { ((e.id.clone(), v.clone()), guild_runs(&e.id, api, v, idle_hours, fresh).await) })
+        compared_versions.iter().map(move |v| async move { ((e.id.clone(), v.clone()), guild_runs(&e.id, api, v, idle_hours, all, fresh).await) })
     }))
     .await;
     let runs_of: HashMap<(String, String), GuildRuns> = guild_reads.into_iter().collect();
@@ -1363,7 +1377,7 @@ pub async fn terminal_onboarding(
     let combos: Vec<Combo> = combos.into_iter().collect();
     let api_of: HashMap<&str, &str> = with_api.iter().map(|e| (e.id.as_str(), e.guild_api.as_deref().unwrap_or_default())).collect();
     let aggs = futures_util::future::join_all(combos.iter().map(|(g, v, i)| {
-        guild_aggregate(g, api_of.get(g.as_str()).copied().unwrap_or_default(), v, idle_hours, i.as_deref(), fresh)
+        guild_aggregate(g, api_of.get(g.as_str()).copied().unwrap_or_default(), v, idle_hours, i.as_deref(), all, fresh)
     }))
     .await;
     let agg: HashMap<Combo, GuildAggregate> = combos.into_iter().zip(aggs).collect();
@@ -1587,7 +1601,8 @@ pub async fn terminal_onboarding(
         "active_days": active_days,
         "generated_ms": now,
         "filters": { "interface": clean(&filters.interface), "guild": clean(&filters.guild), "activity": clean(&filters.activity),
-                     "replicants": filters.replicants == Some(true), "compare": clean(&filters.compare) },
+                     "replicants": filters.replicants == Some(true), "compare": clean(&filters.compare),
+                     "include_excluded": all },
         "options": { "interfaces": interfaces, "guilds": guild_labels.iter().map(|(id, l)| json!({ "id": id, "label": l })).collect::<Vec<_>>() },
         "segments": out_segs,
         "guilds": guilds,

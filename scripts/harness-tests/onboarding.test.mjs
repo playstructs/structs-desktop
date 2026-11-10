@@ -71,7 +71,7 @@ if (host) {
   check('OVERVIEW: the lifecycle buckets are all there', ['today', 'week', 'month', 'gone', 'never'].every((k) => host.querySelector('.ob-key[data-life="' + k + '"]')));
   check('OVERVIEW: the path runs from signup to finished', text(host.querySelector('.ob-path .ob-row[data-path="Started signup"]')).endsWith('2,140') && text(host.querySelector('.ob-path .ob-row[data-path="Finished"]')).endsWith('402'));
   check('OVERVIEW: week one leaves out cohorts with nothing to show, and a small one is a count', !host.querySelector('.ob-week[data-week="W43"]') && /^3 of 12/.test(text(host.querySelector('.ob-week[data-week="W41"]'))) && /^50%/.test(text(host.querySelector('.ob-week[data-week="W40"]'))));
-  check('pages are grouped in a rail, with the status beside the filters', [...host.querySelectorAll('.ob-rail-head')].map(text).join('|') === 'Growth|Onboarding|Players|Network' && host.querySelectorAll('.ob-rail .sui-screen-nav-item').length === 12);
+  check('pages are grouped in a rail, with the status beside the filters', [...host.querySelectorAll('.ob-rail-head')].map(text).join('|') === 'Growth|Onboarding|Players|Network|Settings' && host.querySelectorAll('.ob-rail .sui-screen-nav-item').length === 13);
   check('one read, asked with the default windows and no filter', calls().length >= 1 && calls()[0].args.idleHours === 24 && calls()[0].args.activeDays === 7 && !calls()[0].args.filters.compare, JSON.stringify(calls()[0] || null));
   check('humans only by default', calls()[0].args.filters.replicants === false, JSON.stringify(calls()[0].args.filters));
   check('four filter controls, the windows, and the version', host.querySelectorAll('.ob-controls select').length === 7);
@@ -187,6 +187,20 @@ if (host) {
   host.querySelector('.ob-pill[data-outcome="all"]').click();
   check('…and All brings it back', host.querySelectorAll('.ob-recent .ob-row[data-player]').length === 3);
 
+  // ── Exclusions ──
+  go('Exclusions');
+  const exSw = () => host.querySelector('.ob-ex-switch input');
+  check('EXCLUSIONS is one switch, off: the guilds leave their excluded players out', exSw() && !exSw().checked && host.querySelectorAll('.ob-main input').length === 1);
+  check('…and every read says so', calls().at(-1).args.filters.include_excluded === false);
+  exSw().checked = true; exSw().dispatchEvent(new w.Event('change'));
+  const incl = await until(() => calls().find((c) => c.args.filters.include_excluded === true));
+  check('the switch is a param and re-reads with everyone', !!incl);
+  await until(() => exSw() && exSw().checked);
+  check('…and every page says excluded players are in', /Excluded players included/.test(text(host.querySelector('.ob-status'))));
+  exSw().checked = false; exSw().dispatchEvent(new w.Event('change'));
+  await until(() => calls().at(-1).args.filters.include_excluded === false && exSw() && !exSw().checked);
+  check('…and back off', !/Excluded players included/.test(text(host.querySelector('.ob-status'))));
+
   // ── Compare ──
   const sel = () => [...host.querySelectorAll('.ob-controls select')];
   sel()[3].value = 'activity'; sel()[3].dispatchEvent(new w.Event('change'));
@@ -228,7 +242,7 @@ if (host) {
 
   // ── A population the servers cannot count ──
   sel()[3].value = ''; sel()[3].dispatchEvent(new w.Event('change'));
-  await until(() => calls().filter((c) => !c.args.filters.compare).length > 1);
+  await until(() => !calls().at(-1).args.filters.compare);
   sel()[2].value = 'active'; sel()[2].dispatchEvent(new w.Event('change'));
   await until(() => calls().find((c) => c.args.filters.activity === 'active'));
   go('Overview');
@@ -286,6 +300,9 @@ delete w.__HARNESS_OB_COLD__;
 
 // ── Wiring ──
 check('the command is registered with Tauri', /onboarding::terminal_onboarding/.test(read('src-tauri/src/main.rs')));
+check('every onboarding report sends include_excluded, and the caches key on it',
+  (read('src-tauri/src/mcp/guild_api.rs').match(/include_excluded\(all\)/g) || []).length === 5 &&
+  /type AggregateKey = \([^;]*bool\);/.test(read('src-tauri/src/mcp/onboarding.rs')) && /type RunsKey = \([^;]*bool\);/.test(read('src-tauri/src/mcp/onboarding.rs')));
 check('and reachable from the web board, filters and all', /"terminal_onboarding"/.test(read('src-tauri/src/mcp/web_board.rs')) && /body\.get\("filters"\)/.test(read('src-tauri/src/mcp/web_board.rs')));
 check('the desktop build reports its own interface, guarded against upstream drift',
   /ONBOARDING_INTERFACE_NAME = 'structs-desktop'/.test(read('scripts/apply-patches.sh')) && /verify_patched [^\n]*OnboardingTelemetry\.js/.test(read('scripts/apply-patches.sh')));

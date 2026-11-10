@@ -684,7 +684,7 @@ cat > "$FIX" <<'EOF'
         : [seg('all', 'All', 1)];
       var r = {
         version: 'tutorial-4', versions: ['tutorial-4', 'tutorial-3'], idle_hours: (a && a.idleHours) || 24, active_days: (a && a.activeDays) || 7, generated_ms: now,
-        filters: { interface: f.interface || null, guild: f.guild || null, activity: f.activity || null, replicants: !!f.replicants, compare: f.compare || null },
+        filters: { interface: f.interface || null, guild: f.guild || null, activity: f.activity || null, replicants: !!f.replicants, compare: f.compare || null, include_excluded: !!f.include_excluded },
         options: { interfaces: ['structs-desktop', 'structs-webapp', 'none'], guilds: [{ id: '0-1', label: 'OH' }, { id: '0-2', label: 'ONE' }, { id: '0-5', label: 'SN.C' }] },
         segments: segs,
         guilds: [
