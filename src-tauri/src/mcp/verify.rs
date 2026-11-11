@@ -87,7 +87,18 @@ static LAST_FAILOVER_LOG_MS: AtomicU64 = AtomicU64::new(0);
 /// The snapshot answers verification while younger than this. A refresh is
 /// due every `REFRESH_EVERY_MS`; two and a half missed refreshes means the
 /// bulk source is down and the per-entity reads should carry the load.
-const SNAPSHOT_TRUST_MS: f64 = 2.5 * perception::REFRESH_EVERY_MS;
+/// The window at the base cadence (what a test without a live feed sees).
+#[cfg(test)]
+const SNAPSHOT_TRUST_MS: f64 = SNAPSHOT_TRUST_INTERVALS * perception::REFRESH_EVERY_MS;
+const SNAPSHOT_TRUST_INTERVALS: f64 = 2.5;
+
+/// Trusted while within two and a half of the snapshot's OWN refresh
+/// intervals: a snapshot held for an hour behind an unbroken GRASS stream is
+/// on schedule, not overdue, and the moment the stream breaks its interval
+/// (and with it this window) drops back to the base cadence.
+fn snapshot_trusted(s: &Snapshot) -> bool {
+    s.age_ms() <= SNAPSHOT_TRUST_INTERVALS * perception::refresh_interval_ms(s)
+}
 /// The ore clocks answer while the hot refresh is younger than this.
 const HOT_TRUST_MS: f64 = 2.5 * perception::HOT_REFRESH_EVERY_MS;
 
@@ -159,7 +170,7 @@ pub fn health() -> Value {
         "guild_reads": GUILD_READS.load(Ordering::Relaxed),
         "lcd_reads": LCD_READS.load(Ordering::Relaxed),
         "failovers_to_lcd": FAILOVERS.load(Ordering::Relaxed),
-        "snapshot_trusted": perception::with_snapshot(|s| s.age_ms() <= SNAPSHOT_TRUST_MS).unwrap_or(false),
+        "snapshot_trusted": perception::with_snapshot(snapshot_trusted).unwrap_or(false),
         "ore_clocks_trusted": clocks_hot(),
     })
 }
@@ -187,7 +198,7 @@ fn snap<R>(f: impl FnOnce(&Snapshot) -> Option<R>) -> Option<R> {
     if source() == VerifySource::Lcd {
         return None;
     }
-    let r = perception::with_snapshot(|s| if s.age_ms() <= SNAPSHOT_TRUST_MS { f(s) } else { None }).flatten();
+    let r = perception::with_snapshot(|s| if snapshot_trusted(s) { f(s) } else { None }).flatten();
     if r.is_some() {
         SNAPSHOT_HITS.fetch_add(1, Ordering::Relaxed);
     }
@@ -204,7 +215,7 @@ fn clocks_hot() -> bool {
     // not need.)
     perception::hot_age_ms().is_some_and(|a| a <= HOT_TRUST_MS)
         || (crate::mcp::grass_native::authoritative()
-            && perception::with_snapshot(|s| s.age_ms() <= SNAPSHOT_TRUST_MS).unwrap_or(false))
+            && perception::with_snapshot(snapshot_trusted).unwrap_or(false))
 }
 
 /// Run the guild read; on error fall back to the LCD read. Both futures are

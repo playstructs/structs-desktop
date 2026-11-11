@@ -85,6 +85,11 @@ static MSGS_MINUTE: AtomicU64 = AtomicU64::new(0);
 static MSGS_LAST_MINUTE: AtomicU64 = AtomicU64::new(0);
 static MINUTE_INDEX: AtomicU64 = AtomicU64::new(0);
 static RECONNECTS: AtomicU64 = AtomicU64::new(0);
+/// When the stream last BROKE: a disconnect, or a message arriving after a
+/// silence longer than the authoritative window. Frames may have been lost
+/// across a break, so anything patched by this stream alone is only known
+/// complete since then. 0 = never observed carrying.
+static LAST_BREAK_MS: AtomicU64 = AtomicU64::new(0);
 static SLOW_CONSUMER: AtomicU64 = AtomicU64::new(0);
 static WEBVIEW_SUPPRESSED: AtomicU64 = AtomicU64::new(0);
 static CONNECTED_URL: LazyLock<Mutex<String>> = LazyLock::new(|| Mutex::new(String::new()));
@@ -122,8 +127,22 @@ pub fn note_webview_suppressed() {
     WEBVIEW_SUPPRESSED.fetch_add(1, Ordering::Relaxed);
 }
 
+/// See [`LAST_BREAK_MS`].
+pub fn last_break_ms() -> u64 {
+    LAST_BREAK_MS.load(Ordering::Relaxed)
+}
+
+fn note_break() {
+    LAST_BREAK_MS.store(now_ms(), Ordering::Relaxed);
+}
+
 fn count_message() {
     let now = now_ms();
+    if now.saturating_sub(LAST_MSG_MS.load(Ordering::Relaxed)) > AUTHORITATIVE_WINDOW_MS {
+        // First message ever, or the first after a silence: whatever the
+        // galaxy did in between never reached us.
+        LAST_BREAK_MS.store(now, Ordering::Relaxed);
+    }
     LAST_MSG_MS.store(now, Ordering::Relaxed);
     MSGS_TOTAL.fetch_add(1, Ordering::Relaxed);
     let minute = now / 60_000;
@@ -331,6 +350,7 @@ async fn supervise(app: tauri::AppHandle) {
         }
         CONNECTED.store(false, Ordering::Relaxed);
         RECONNECTS.fetch_add(1, Ordering::Relaxed);
+        note_break();
     }
 }
 
@@ -352,6 +372,7 @@ async fn run_connection(app: &tauri::AppHandle, url: &str) -> Result<(), String>
                 async_nats::Event::Disconnected => {
                     CONNECTED.store(false, Ordering::Relaxed);
                     RECONNECTS.fetch_add(1, Ordering::Relaxed);
+                    note_break();
                     tlog("grass", Sev::Warn, "native GRASS: client disconnected — reconnecting");
                 }
                 async_nats::Event::SlowConsumer(n) => {

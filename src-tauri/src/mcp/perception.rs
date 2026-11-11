@@ -1074,6 +1074,7 @@ impl Snapshot {
             "rejected_rows": self.rejected_rows,
             "pinned": self.pinned,
             "replay_gap": self.replay_gap,
+            "refresh_every_s": (refresh_interval_ms(self) / 1000.0) as u64,
             "pending_new_structs": self.pending_new.len(),
             "fed_by": fed_by(),
             "hot_age_s": hot_age_ms().map(|a| (a / 1000.0) as u64),
@@ -1315,6 +1316,39 @@ pub fn summary() -> Value {
 /// pruned rows) to one interval.
 pub const REFRESH_EVERY_MS: f64 = 10.0 * 60_000.0;
 
+/// The cadence while the native GRASS stream has carried every frame since
+/// the snapshot was taken. A full walk re-downloads the whole galaxy
+/// (measured 2026-11-10: ~660 MB of JSON per refresh, ~95 GB a day at the
+/// base cadence), and with an unbroken feed it only re-learns what the
+/// stream does not carry — planet defence counts and pruned rows — so those
+/// are the fields that may now be up to this old.
+pub const REFRESH_STRETCHED_MS: f64 = 60.0 * 60_000.0;
+
+/// The refresh rule, pure so it is testable. The long interval needs all of:
+/// the stream authoritative right now, no break in it since the snapshot's
+/// fetch began (a break is lost frames the snapshot cannot know about), and
+/// a refresh that replayed every frame it queued. Anything else falls back
+/// to the base cadence, which makes a stretched snapshot due at once.
+pub(crate) fn refresh_interval_for(feed_authoritative: bool, feed_break_ms: f64, taken_ms: f64, replay_gap: u64) -> f64 {
+    if feed_authoritative && feed_break_ms < taken_ms && replay_gap == 0 {
+        REFRESH_STRETCHED_MS
+    } else {
+        REFRESH_EVERY_MS
+    }
+}
+
+/// How often `s` is due to be replaced, as things stand now. Every age
+/// guard (scan freshness, pre-sign trust) scales from this, so a snapshot
+/// that is deliberately kept longer is not mistaken for a missed refresh.
+pub fn refresh_interval_ms(s: &Snapshot) -> f64 {
+    refresh_interval_for(
+        crate::mcp::grass_native::authoritative(),
+        crate::mcp::grass_native::last_break_ms() as f64,
+        s.taken_ms,
+        s.replay_gap,
+    )
+}
+
 /// Kick a background refresh if the snapshot is missing or older than
 /// [`REFRESH_EVERY_MS`] and none is in flight. Non-blocking: the caller's scan
 /// proceeds on whatever is current (or the chain, via the loop_util shims).
@@ -1341,7 +1375,7 @@ pub fn maybe_refresh(client: &CosmosClient) {
         return;
     }
     let now = crate::hasher::types::now_millis();
-    let due = with_snapshot(|s| now - s.taken_ms >= REFRESH_EVERY_MS).unwrap_or(true);
+    let due = with_snapshot(|s| now - s.taken_ms >= refresh_interval_ms(s)).unwrap_or(true);
     if !due {
         return;
     }
@@ -2797,6 +2831,28 @@ mod tests {
         assert_eq!(to_u64(Some(&json!(2935000))), 2_935_000);
         assert_eq!(to_u64(Some(&json!(null))), 0);
         assert_eq!(to_u64(None), 0);
+    }
+}
+
+#[cfg(test)]
+mod refresh_interval_tests {
+    use super::*;
+
+    #[test]
+    fn the_long_interval_needs_an_unbroken_authoritative_feed_and_a_complete_replay() {
+        let taken = 1_000_000.0;
+        assert_eq!(refresh_interval_for(true, taken - 1.0, taken, 0), REFRESH_STRETCHED_MS);
+        assert_eq!(refresh_interval_for(false, taken - 1.0, taken, 0), REFRESH_EVERY_MS, "feed not authoritative now");
+        assert_eq!(refresh_interval_for(true, taken + 5_000.0, taken, 0), REFRESH_EVERY_MS, "feed broke after the fetch began");
+        assert_eq!(refresh_interval_for(true, taken, taken, 0), REFRESH_EVERY_MS, "a break AT the fetch start counts");
+        assert_eq!(refresh_interval_for(true, taken - 1.0, taken, 3), REFRESH_EVERY_MS, "the refresh dropped frames");
+    }
+
+    #[test]
+    fn a_snapshot_with_no_live_feed_keeps_the_base_cadence() {
+        // No native stream in a unit test: nothing may stretch.
+        let snap = Snapshot::from_pages(&[], &[], &[], &[], &[], &[], &[]);
+        assert_eq!(refresh_interval_ms(&snap), REFRESH_EVERY_MS);
     }
 }
 

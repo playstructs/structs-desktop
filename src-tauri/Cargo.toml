@@ -19,7 +19,11 @@ anyhow = "1"
 # instead of always taking the argmax (see mcp/variance.rs). Already present in
 # Cargo.lock transitively via wgpu/uuid/reqwest, so this adds no new download.
 rand = "0.8"
-reqwest = { version = "0.12", features = ["json", "cookies"] }
+# gzip: the Guild API and the LCD both compress on request (measured 7.5× on
+# an LCD struct page). Without the feature reqwest sends no Accept-Encoding
+# and every bulk walk — the 10-minute galaxy snapshot above all — crosses the
+# wire as raw JSON.
+reqwest = { version = "0.12", features = ["json", "cookies", "gzip"] }
 tokio = { version = "1", features = ["full"] }
 # Update awareness: compare app version to latest GitHub release, open releases page
 semver = "1"

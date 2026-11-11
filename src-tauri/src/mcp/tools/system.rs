@@ -348,7 +348,7 @@ pub async fn execute(params: SystemParams) -> Vec<Content> {
                 "snapshot": snapshot,
                 "pending_new_structs": crate::mcp::perception::with_snapshot(|s| s.pending_new_structs())
                     .unwrap_or_default(),
-                "note": "auto_build/harvest/defend scan from this snapshot when it is fresh (<20 min, GRASS frame <2 min) and re-verify from the chain before every sign; `logs` severity notice shows `perception drift` lines. Refreshes every 10 min from any loop scan.",
+                "note": "auto_build/harvest/defend scan from this snapshot when it is fresh (under two refresh intervals old, GRASS frame <2 min) and re-verify from the chain before every sign; `logs` severity notice shows `perception drift` lines. Refreshes every 10 min from any loop scan, or every 60 min while the native GRASS stream has been unbroken since the snapshot was taken (`refresh_every_s`).",
             }))
         }
 

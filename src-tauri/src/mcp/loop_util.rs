@@ -246,9 +246,15 @@ pub fn invalidate_all_player_structs() {
 // against them behaves exactly as before until a snapshot exists, and never
 // scans from a stale one.
 
-/// A snapshot older than this is not scanned from, whatever GRASS says: the
-/// refresh cadence is ~10 min, so this is "two missed refreshes".
-pub const PERCEPTION_MAX_AGE_MS: f64 = 20.0 * 60_000.0;
+/// A snapshot older than this is not scanned from, whatever GRASS says:
+/// "two missed refreshes" at the base cadence. A snapshot on the stretched
+/// cadence gets two of ITS intervals — see [`perception_max_age_ms`].
+pub const PERCEPTION_MAX_AGE_MS: f64 = 2.0 * crate::mcp::perception::REFRESH_EVERY_MS;
+
+/// Two missed refreshes, at whatever cadence the snapshot is on.
+pub fn perception_max_age_ms(refresh_interval_ms: f64) -> f64 {
+    2.0 * refresh_interval_ms
+}
 /// If no GRASS frame has ARRIVED for this long (block heartbeats count; a
 /// quiet galaxy is not a dead feed), the feed is presumed dead (the
 /// signing-bridge-death tell is exactly a decaying grass stream) and the
@@ -264,12 +270,12 @@ pub enum ReadSource {
 }
 
 /// The freshness rule, pure so it is testable: a snapshot is scannable when
-/// it is younger than [`PERCEPTION_MAX_AGE_MS`] AND the GRASS feed is alive —
+/// it is younger than `max_age_ms` AND the GRASS feed is alive —
 /// either a frame landed within [`PERCEPTION_MAX_EVENT_GAP_MS`] or the
 /// snapshot itself is younger than that gap (a quiet galaxy right after a
 /// refresh is fine; a quiet feed an hour later is not).
-pub fn perception_is_fresh(age_ms: f64, last_event_age_ms: Option<f64>) -> bool {
-    if age_ms < 0.0 || age_ms >= PERCEPTION_MAX_AGE_MS {
+pub fn perception_is_fresh(age_ms: f64, last_event_age_ms: Option<f64>, max_age_ms: f64) -> bool {
+    if age_ms < 0.0 || age_ms >= max_age_ms {
         return false;
     }
     match last_event_age_ms {
@@ -339,7 +345,7 @@ fn perception_usable_now() -> bool {
         // changed". See Snapshot::last_frame_ms for the lull that taught us.
         let last = s.last_frame_ms.max(s.last_event_ms);
         let gap = if last > 0.0 { Some(now - last) } else { None };
-        perception_is_fresh(now - s.taken_ms, gap)
+        perception_is_fresh(now - s.taken_ms, gap, perception_max_age_ms(crate::mcp::perception::refresh_interval_ms(s)))
     })
     .unwrap_or(false)
 }
@@ -920,25 +926,35 @@ mod perception_shim_tests {
 
     #[test]
     fn a_young_snapshot_with_a_live_feed_is_fresh() {
-        assert!(perception_is_fresh(60_000.0, Some(5_000.0)));
+        assert!(perception_is_fresh(60_000.0, Some(5_000.0), PERCEPTION_MAX_AGE_MS));
     }
 
     #[test]
     fn a_young_snapshot_with_no_frames_yet_is_fresh_until_the_gap_elapses() {
-        assert!(perception_is_fresh(30_000.0, None));
-        assert!(!perception_is_fresh(PERCEPTION_MAX_EVENT_GAP_MS + 1.0, None), "quiet feed, snapshot past the gap");
+        assert!(perception_is_fresh(30_000.0, None, PERCEPTION_MAX_AGE_MS));
+        assert!(!perception_is_fresh(PERCEPTION_MAX_EVENT_GAP_MS + 1.0, None, PERCEPTION_MAX_AGE_MS), "quiet feed, snapshot past the gap");
     }
 
     #[test]
     fn a_dead_feed_makes_any_snapshot_stale() {
-        assert!(!perception_is_fresh(60_000.0, Some(PERCEPTION_MAX_EVENT_GAP_MS)));
-        assert!(!perception_is_fresh(60_000.0, Some(3_600_000.0)));
+        assert!(!perception_is_fresh(60_000.0, Some(PERCEPTION_MAX_EVENT_GAP_MS), PERCEPTION_MAX_AGE_MS));
+        assert!(!perception_is_fresh(60_000.0, Some(3_600_000.0), PERCEPTION_MAX_AGE_MS));
     }
 
     #[test]
     fn an_old_snapshot_is_stale_even_with_a_live_feed() {
-        assert!(!perception_is_fresh(PERCEPTION_MAX_AGE_MS, Some(1_000.0)));
-        assert!(!perception_is_fresh(-1.0, Some(1_000.0)), "clock skew never counts as fresh");
+        assert!(!perception_is_fresh(PERCEPTION_MAX_AGE_MS, Some(1_000.0), PERCEPTION_MAX_AGE_MS));
+        assert!(!perception_is_fresh(-1.0, Some(1_000.0), PERCEPTION_MAX_AGE_MS), "clock skew never counts as fresh");
+    }
+
+    #[test]
+    fn a_stretched_snapshot_is_scannable_past_the_base_limit_but_still_needs_a_live_feed() {
+        let stretched = perception_max_age_ms(crate::mcp::perception::REFRESH_STRETCHED_MS);
+        let age = 45.0 * 60_000.0;
+        assert!(!perception_is_fresh(age, Some(1_000.0), PERCEPTION_MAX_AGE_MS), "base cadence: 45 min is two missed refreshes");
+        assert!(perception_is_fresh(age, Some(1_000.0), stretched), "stretched cadence: 45 min is on schedule");
+        assert!(!perception_is_fresh(age, Some(PERCEPTION_MAX_EVENT_GAP_MS), stretched), "a dead feed still stales it");
+        assert!(!perception_is_fresh(stretched, Some(1_000.0), stretched));
     }
 }
 
