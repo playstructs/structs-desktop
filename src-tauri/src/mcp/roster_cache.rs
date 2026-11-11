@@ -276,6 +276,8 @@ fn maybe_heal_name(app: &tauri::AppHandle, index: u32, pid: &str, chain_name: Op
 const PROGRESS_EVERY: usize = 10;
 /// Background loop cadence while the board window exists.
 const BG_REFRESH_MS: u64 = 5 * 60_000;
+/// Background refresher tick: the snapshot-sourced sweep's cadence.
+const BG_TICK_MS: u64 = 60_000;
 
 /// Parse one LCD player-entity response into a row. Pure — unit-tested.
 fn parse_row(
@@ -549,6 +551,127 @@ where
     Ok(all)
 }
 
+/// Chain name + portrait per guild member: `/api/guild/{id}/roster`, one
+/// request. Neither field is in the snapshot's player list (the guild's
+/// `list/all` omits them); `player_consensus` frames carry both and win over
+/// this when present.
+async fn fetch_meta(
+    client: &CosmosClient,
+    guild_id: &str,
+) -> Result<HashMap<String, (Option<String>, Option<String>)>, String> {
+    let v = client.guild.guild_roster(guild_id).await?;
+    let rows = v.as_array().ok_or("guild roster: expected a list")?;
+    Ok(rows
+        .iter()
+        .map(|r| {
+            let get = |k: &str| r.get(k).and_then(|v| v.as_str()).filter(|s| !s.is_empty()).map(String::from);
+            (
+                r.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                (get("username"), get("pfp_client_render_attributes")),
+            )
+        })
+        .collect())
+}
+
+type Meta = HashMap<String, (Option<String>, Option<String>)>;
+
+/// The guild roster's names/portraits, re-read at most hourly for the
+/// snapshot-sourced sweep (the stream patches them in between).
+static META: LazyLock<RwLock<(Meta, f64)>> = LazyLock::new(|| RwLock::new((HashMap::new(), 0.0)));
+const META_EVERY_MS: f64 = 60.0 * 60_000.0;
+
+async fn meta_cached(client: &CosmosClient, guild_id: &str) -> Meta {
+    let fresh = META.read().map(|m| m.1 > 0.0 && now_millis() - m.1 < META_EVERY_MS).unwrap_or(false);
+    if !fresh {
+        if let Ok(m) = fetch_meta(client, guild_id).await {
+            if let Ok(mut g) = META.write() {
+                *g = (m, now_millis());
+            }
+        }
+    }
+    META.read().map(|m| m.0.clone()).unwrap_or_default()
+}
+
+/// Whether a sweep can be built locally: a usable GRASS-fed snapshot and an
+/// Alpha base in the ledger. When true a sweep costs no balance or grid
+/// reads at all, so it can run on a short cadence with no window open.
+pub fn snapshot_path_ready() -> bool {
+    crate::mcp::loop_util::perception_usable_now() && crate::mcp::ledger::is_ready()
+}
+
+/// Every roster input from the GRASS-fed snapshot and the ledger — the same
+/// maps `bulk_prefetch` reads from the guild API, with no balance, grid,
+/// player or clock reads. Names and portraits: the stream's
+/// `player_consensus` fields, else the hourly guild roster read.
+async fn snapshot_prefetch(
+    client: &CosmosClient,
+    guild_id: &str,
+    targets: &[(String, Option<u32>, String, String)],
+) -> Option<BulkData> {
+    if !snapshot_path_ready() {
+        return None;
+    }
+    let roster_meta = meta_cached(client, guild_id).await;
+    let mut bulk = crate::mcp::perception::with_snapshot(|s| snapshot_maps(s, targets, &roster_meta))?;
+    for pid in bulk.players.keys() {
+        let bal = crate::mcp::ledger::balance(pid)?;
+        bulk.alpha.insert(pid.clone(), bal as f64);
+    }
+    Some(bulk)
+}
+
+/// The snapshot half of [`snapshot_prefetch`]. Pure over its inputs.
+fn snapshot_maps(
+    s: &crate::mcp::perception::Snapshot,
+    targets: &[(String, Option<u32>, String, String)],
+    roster_meta: &Meta,
+) -> BulkData {
+    let mut b = BulkData {
+        players: HashMap::new(),
+        alpha: HashMap::new(),
+        ore: HashMap::new(),
+        load: HashMap::new(),
+        capacity: HashMap::new(),
+        structs_load: HashMap::new(),
+        last_action: HashMap::new(),
+        planet_ore: HashMap::new(),
+        mine_anchor: HashMap::new(),
+        refine_anchor: HashMap::new(),
+        meta: HashMap::new(),
+    };
+    for (pid, ..) in targets {
+        let Some(row) = s.player_row(pid) else { continue };
+        let opt = |k: &str| row.get(k).and_then(|v| v.as_str()).filter(|s| !s.is_empty()).map(String::from);
+        let planet = opt("planetId");
+        b.players.insert(pid.clone(), (planet.clone(), opt("fleetId")));
+        let g = |n: &str| s.grid_attr(pid, n).unwrap_or(0);
+        b.ore.insert(pid.clone(), g("ore") as f64);
+        b.load.insert(pid.clone(), g("load") as f64);
+        b.capacity.insert(pid.clone(), g("capacity") as f64);
+        b.structs_load.insert(pid.clone(), g("structsLoad") as f64);
+        b.last_action.insert(pid.clone(), g("lastAction"));
+        if let Some(pl) = planet {
+            if let Some(o) = s.grid_attr(&pl, "ore") {
+                b.planet_ore.insert(pl.clone(), o as f64);
+            }
+            if let Some(c) = s.planet_attr(&pl, "blockStartOreMine") {
+                b.mine_anchor.insert(pl.clone(), c);
+            }
+            if let Some(c) = s.planet_attr(&pl, "blockStartOreRefine") {
+                b.refine_anchor.insert(pl.clone(), c);
+            }
+        }
+        // Stream fields first; the hourly roster read fills what the stream
+        // has not mentioned yet. Absent from both = unknown, and `bulk_apply`
+        // never self-heals an unknown portrait or name.
+        let (r_name, r_pfp) = roster_meta.get(pid).cloned().unwrap_or((None, None));
+        if roster_meta.contains_key(pid) || row.get("username").is_some() {
+            b.meta.insert(pid.clone(), (opt("username").or(r_name), opt("pfpClientRenderAttributes").or(r_pfp)));
+        }
+    }
+    b
+}
+
 async fn bulk_prefetch(client: &CosmosClient, guild_id: &str) -> Option<BulkData> {
     use std::collections::HashMap;
     let g = &client.guild;
@@ -634,31 +757,7 @@ async fn bulk_prefetch(client: &CosmosClient, guild_id: &str) -> Option<BulkData
     };
     let mine_anchor = anchor_map("blockStartOreMine").await;
     let refine_anchor = anchor_map("blockStartOreRefine").await;
-    let meta: HashMap<String, (Option<String>, Option<String>)> = client
-        .guild
-        .guild_roster(guild_id)
-        .await
-        .map(|v| {
-            v.as_array()
-                .map(|rows| {
-                    rows.iter()
-                        .map(|r| {
-                            let get = |k: &str| {
-                                r.get(k)
-                                    .and_then(|v| v.as_str())
-                                    .filter(|s| !s.is_empty())
-                                    .map(String::from)
-                            };
-                            (
-                                r.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-                                (get("username"), get("pfp_client_render_attributes")),
-                            )
-                        })
-                        .collect()
-                })
-                .unwrap_or_default()
-        })
-        .unwrap_or_default();
+    let meta = fetch_meta(client, guild_id).await.unwrap_or_default();
 
     Some(BulkData {
         players,
@@ -742,7 +841,9 @@ fn bulk_apply(
         // The self-heals ride the bulk sweep exactly as they rode the legacy
         // one: managed vplayers only, never the primary, and only when the
         // bulk read actually saw the player.
-        if row.err.is_none() && row.index.is_some() && row.role != "primary" {
+        // An unknown portrait/name (neither the stream nor the roster read has
+        // mentioned this player yet) is not an EMPTY one — never heal it.
+        if row.err.is_none() && row.index.is_some() && row.role != "primary" && bulk.meta.contains_key(pid) {
             if row.pfp_attrs.as_deref().map_or(true, |s| s.trim().is_empty()) {
                 heal_missing_pfp(app.clone(), index.unwrap_or(0), row.role.clone(), pid.clone());
             }
@@ -808,6 +909,32 @@ async fn run_sweep_inner(app: &tauri::AppHandle) {
             .unwrap_or_default();
         if !guild_id.is_empty() {
             let t0 = now_millis();
+            // GRASS-fed first: the snapshot already holds every grid value,
+            // player row and ore clock this sweep needs, and the ledger the
+            // balances — no reads beyond the hourly names/portraits.
+            if let Some(bulk) = snapshot_prefetch(&client, &guild_id, &targets).await {
+                bulk_apply(app, &bulk, &targets, current_block);
+                crate::mcp::telemetry::tlog_kv(
+                    "roster",
+                    crate::mcp::telemetry::Sev::Debug,
+                    "snapshot sweep",
+                    serde_json::json!({
+                        "ms": (now_millis() - t0).round(),
+                        "players": total,
+                        "known": bulk.players.len(),
+                    }),
+                );
+                let mut st = ROSTER.write().unwrap_or_else(|e| e.into_inner());
+                st.refreshed_at_ms = now_millis();
+                drop(st);
+                crate::mcp::web_board::emit_board(
+                    app,
+                    "board-roster-updated",
+                    &serde_json::json!({ "players": total }),
+                );
+                return;
+            }
+            crate::mcp::ledger::maybe_rebase(&client);
             if let Some(bulk) = bulk_prefetch(&client, &guild_id).await {
                 bulk_apply(app, &bulk, &targets, current_block);
                 crate::mcp::telemetry::tlog_kv(
@@ -951,20 +1078,30 @@ async fn run_sweep_inner(app: &tauri::AppHandle) {
     st.refreshed_at_ms = now_millis();
 }
 
-/// Start the background refresher (idempotent). Called on first window open:
-/// every 5 minutes, if the board window still exists and the app is focused
-/// enough to care, refresh. Own task — deliberately NOT the game sync tick,
-/// which fires every 10s regardless of whether anyone is looking.
+/// Start the background refresher (idempotent). Started by the first window
+/// open AND by `auto_sweep` — the sweep reads these rows, so the roster must
+/// not depend on anyone having Team Ops open (2026-11-11: twelve hours with
+/// no Alpha swept because that window was closed).
+///
+/// Every minute: keep the ledger's Alpha base current, and rebuild the rows
+/// from the snapshot when that path is ready (local, no reads). The guild
+/// API sweep — the fallback when it is not — keeps its old 5-minute,
+/// window-open cadence.
 pub fn ensure_background_refresh(app: tauri::AppHandle) {
     if BG_LOOP_STARTED.set(()).is_err() {
         return;
     }
     tauri::async_runtime::spawn(async move {
+        let client = CosmosClient::new();
+        crate::mcp::ledger::maybe_rebase(&client);
         loop {
-            tokio::time::sleep(std::time::Duration::from_millis(BG_REFRESH_MS)).await;
+            tokio::time::sleep(std::time::Duration::from_millis(BG_TICK_MS)).await;
+            crate::mcp::ledger::maybe_rebase(&client);
             use tauri::Manager;
-            if app.get_webview_window("board").is_some() {
-                trigger_sweep(app.clone(), BG_REFRESH_MS as f64 / 2.0);
+            if snapshot_path_ready() {
+                trigger_sweep(app.clone(), BG_TICK_MS as f64 - 5_000.0);
+            } else if app.get_webview_window("board").is_some() {
+                trigger_sweep(app.clone(), BG_REFRESH_MS as f64);
             }
         }
     });
@@ -974,6 +1111,54 @@ pub fn ensure_background_refresh(app: tauri::AppHandle) {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// The snapshot path fills every map the guild bulk read used to, from
+    /// the GRASS-fed store: grid values, the player's planet and fleet, the
+    /// planet's buried ore and both ore clocks. A player neither the stream
+    /// nor the roster read has described gets NO meta entry, so `bulk_apply`
+    /// cannot mistake an unknown portrait for an empty one and re-sign it.
+    #[test]
+    fn snapshot_maps_read_the_store_and_leave_unknown_meta_unknown() {
+        use crate::mcp::perception::Snapshot;
+        let snap = Snapshot::from_pages(
+            &[],
+            &[],
+            &[json!({"attributeId": "12-2-9", "value": "3500"}), json!({"attributeId": "13-2-9", "value": "3400"})],
+            &[
+                json!({"attributeId": "0-1-7", "value": "12"}),
+                json!({"attributeId": "4-1-7", "value": "2310000"}),
+                json!({"attributeId": "11-1-7", "value": "990"}),
+                json!({"attributeId": "0-2-9", "value": "3"}),
+            ],
+            &[
+                json!({"id": "1-7", "planetId": "2-9", "fleetId": "9-7", "username": "Worker7"}),
+                json!({"id": "1-8", "planetId": "", "fleetId": "9-8"}),
+            ],
+            &[json!({"id": "2-9"})],
+            &[],
+        );
+        let targets = vec![
+            ("1-7".to_string(), Some(7), "w7".to_string(), "productive".to_string()),
+            ("1-8".to_string(), Some(8), "w8".to_string(), "productive".to_string()),
+            ("1-404".to_string(), Some(9), "gone".to_string(), "productive".to_string()),
+        ];
+        let b = snapshot_maps(&snap, &targets, &HashMap::new());
+        assert_eq!(b.players.get("1-7"), Some(&(Some("2-9".to_string()), Some("9-7".to_string()))));
+        assert_eq!(b.ore.get("1-7"), Some(&12.0));
+        assert_eq!(b.structs_load.get("1-7"), Some(&2_310_000.0));
+        assert_eq!(b.last_action.get("1-7"), Some(&990));
+        assert_eq!(b.planet_ore.get("2-9"), Some(&3.0));
+        assert_eq!(b.mine_anchor.get("2-9"), Some(&3500));
+        assert_eq!(b.refine_anchor.get("2-9"), Some(&3400));
+        assert_eq!(b.meta.get("1-7"), Some(&(Some("Worker7".to_string()), None)), "the stream named it");
+        assert!(!b.meta.contains_key("1-8"), "nobody has described 1-8 yet: unknown, not empty");
+        assert!(!b.players.contains_key("1-404"), "not in the snapshot: the row is stamped, not invented");
+
+        let mut roster = HashMap::new();
+        roster.insert("1-8".to_string(), (Some("Worker8".to_string()), Some("{}".to_string())));
+        let b = snapshot_maps(&snap, &targets, &roster);
+        assert_eq!(b.meta.get("1-8"), Some(&(Some("Worker8".to_string()), Some("{}".to_string()))));
+    }
 
     #[test]
     fn bulk_apply_builds_rows_from_maps() {

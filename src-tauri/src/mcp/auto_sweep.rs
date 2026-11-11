@@ -177,6 +177,14 @@ async fn scan(app: &tauri::AppHandle, cfg: &AutoSweepConfig, run: &LoopRun) {
         }
     };
 
+    // The rows below come from the roster, and the roster no longer waits
+    // for the Team Ops window: start its refresher here (idempotent) and ask
+    // for a sweep when the rows predate this launch.
+    crate::mcp::roster_cache::ensure_background_refresh(app.clone());
+    if crate::mcp::roster_cache::refreshed_at_ms() < crate::mcp::watchdog::app_start_ms() {
+        crate::mcp::roster_cache::trigger_sweep(app.clone(), 0.0);
+    }
+
     let rows = crate::mcp::roster_cache::all_rows();
     if rows.is_empty() {
         run.blocked("roster cache is empty — nothing to sweep from yet");

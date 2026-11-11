@@ -390,11 +390,24 @@ async fn scan(
     // Only picks this scan can actually start: one already queued or solved
     // is skipped below anyway, and proving it cost two RPC queries per pick
     // per scan (4,612 a minute with 2,306 refines queued on 2026-11-08).
+    //
+    // Behind an unbroken GRASS stream only one pick in PROOF_SAMPLE_EVERY is
+    // proven (see verify::proof_sampling_allowed); the rest hash on the
+    // snapshot's word and skip the re-verify below entirely.
+    let sampling = crate::mcp::verify::proof_sampling_allowed();
+    let mut trusted: std::collections::HashSet<String> = std::collections::HashSet::new();
     let facts: Vec<crate::mirror::verify::Fact> = plan
         .picks
         .values()
         .flatten()
         .filter(|p| !already_queued(&registry, p))
+        .filter(|p| {
+            if sampling && !crate::mcp::verify::take_proof_sample() {
+                trusted.insert(p.struct_id.clone());
+                return false;
+            }
+            true
+        })
         .flat_map(|p| {
             use crate::mirror::verify::{Fact, Store};
             let clock = if p.kind == crate::mcp::types::TaskType::Mine { "blockStartOreMine" } else { "blockStartOreRefine" };
@@ -406,6 +419,7 @@ async fn scan(
         .collect();
     let proven = Arc::new(crate::mirror::verify::prove_for("auto_harvest", &facts).await);
     let plan = Arc::new(plan);
+    let trusted = Arc::new(trusted);
 
     // Fan out the per-player body with bounded concurrency so every player is
     // scanned in the same wave (≤ MAX_CONCURRENT_PLAYERS in flight) instead of
@@ -426,6 +440,7 @@ async fn scan(
             let run = run_c.clone();
             let plan = plan.clone();
             let proven = proven.clone();
+            let trusted = trusted.clone();
             async move {
                 // Stand down while this player is answering a raid: charge is
                 // one action per block and the response needs it. Deferral
@@ -449,52 +464,60 @@ async fn scan(
                     // now: one planet read + one struct read per ISSUED task.
                     // Both fold back into the snapshot. A disagreement is
                     // logged: it measures how far perception drifts.
-                    use crate::mirror::verify::Store;
-                    let clock = if pick.kind == crate::mcp::types::TaskType::Mine { "blockStartOreMine" } else { "blockStartOreRefine" };
-                    let proven_status = proven.as_ref().as_ref().and_then(|b| b.get(Store::Struct, "status", sid));
-                    let proven_clock = proven.as_ref().as_ref().and_then(|b| b.get(Store::Planet, clock, &pick.planet));
-                    let (online, destroyed) = match proven_status {
-                        Some(st) => (
-                            st & crate::mcp::perception::status::ONLINE != 0,
-                            st & crate::mcp::perception::status::DESTROYED != 0,
-                        ),
-                        None => {
-                            let Ok(sid_t) = crate::mcp::types::StructId::parse(sid) else { continue };
-                            let Ok(live_struct) = crate::mcp::verify::struct_state(&client, &sid_t).await else { continue };
-                            (live_struct.online, live_struct.destroyed)
-                        }
-                    };
-                    if !online || destroyed {
-                        crate::mcp::telemetry::tlog(
-                            "auto_harvest",
-                            crate::mcp::telemetry::Sev::Notice,
-                            format!("perception drift: {sid} forecast online, chain says not — skipped"),
-                        );
-                        continue;
-                    }
-                    let live_anchor = match proven_clock {
-                        Some(c) => crate::mcp::types::Block::new(c),
-                        None => {
-                            let Ok(planet_t) = crate::mcp::types::PlanetId::parse(&pick.planet) else { continue };
-                            let Ok(a) = crate::mcp::verify::ore_anchor(&client, &planet_t, pick.kind).await else { continue };
-                            a
-                        }
-                    };
-                    let mut anchor = pick.anchor;
-                    if live_anchor.get() != anchor {
-                        crate::mcp::telemetry::tlog(
-                            "auto_harvest",
-                            crate::mcp::telemetry::Sev::Notice,
-                            format!("perception drift: {sid} {} anchor {anchor} forecast vs {} on chain", pick.kind, live_anchor.get()),
-                        );
-                        anchor = live_anchor.get();
-                        let exec = crate::mirror::rules::earliest_execution(now.tip);
-                        let ripe = anchor != 0
-                            && crate::mirror::rules::ready_height(anchor, pick.range, opts.target).is_some_and(|h| h <= exec);
-                        if !ripe || crate::hasher::completion_in_flight(sid) == Some(anchor) {
+                    let anchor = if trusted.contains(sid.as_str()) {
+                        crate::mcp::verify::note_proof_skipped();
+                        pick.anchor
+                    } else {
+                        use crate::mirror::verify::Store;
+                        let clock = if pick.kind == crate::mcp::types::TaskType::Mine { "blockStartOreMine" } else { "blockStartOreRefine" };
+                        let proven_status = proven.as_ref().as_ref().and_then(|b| b.get(Store::Struct, "status", sid));
+                        let proven_clock = proven.as_ref().as_ref().and_then(|b| b.get(Store::Planet, clock, &pick.planet));
+                        let (online, destroyed) = match proven_status {
+                            Some(st) => (
+                                st & crate::mcp::perception::status::ONLINE != 0,
+                                st & crate::mcp::perception::status::DESTROYED != 0,
+                            ),
+                            None => {
+                                let Ok(sid_t) = crate::mcp::types::StructId::parse(sid) else { continue };
+                                let Ok(live_struct) = crate::mcp::verify::struct_state(&client, &sid_t).await else { continue };
+                                (live_struct.online, live_struct.destroyed)
+                            }
+                        };
+                        crate::mcp::verify::note_presign("presign_rig_online", true, online && !destroyed);
+                        if !online || destroyed {
+                            crate::mcp::telemetry::tlog(
+                                "auto_harvest",
+                                crate::mcp::telemetry::Sev::Notice,
+                                format!("perception drift: {sid} forecast online, chain says not — skipped"),
+                            );
                             continue;
                         }
-                    }
+                        let live_anchor = match proven_clock {
+                            Some(c) => crate::mcp::types::Block::new(c),
+                            None => {
+                                let Ok(planet_t) = crate::mcp::types::PlanetId::parse(&pick.planet) else { continue };
+                                let Ok(a) = crate::mcp::verify::ore_anchor(&client, &planet_t, pick.kind).await else { continue };
+                                a
+                            }
+                        };
+                        let mut anchor = pick.anchor;
+                        crate::mcp::verify::note_presign("presign_ore_clock", anchor, live_anchor.get());
+                        if live_anchor.get() != anchor {
+                            crate::mcp::telemetry::tlog(
+                                "auto_harvest",
+                                crate::mcp::telemetry::Sev::Notice,
+                                format!("perception drift: {sid} {} anchor {anchor} forecast vs {} on chain", pick.kind, live_anchor.get()),
+                            );
+                            anchor = live_anchor.get();
+                            let exec = crate::mirror::rules::earliest_execution(now.tip);
+                            let ripe = anchor != 0
+                                && crate::mirror::rules::ready_height(anchor, pick.range, opts.target).is_some_and(|h| h <= exec);
+                            if !ripe || crate::hasher::completion_in_flight(sid) == Some(anchor) {
+                                continue;
+                            }
+                        }
+                        anchor
+                    };
                     let params = TaskParams::for_ore(sid, pick.kind.as_str(), anchor, pick.range);
                     if crate::hasher::start_hash_task_core(params, app.clone(), &registry).is_ok() {
                         if let Some(idx) = idx_opt {

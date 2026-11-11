@@ -681,6 +681,12 @@ pub fn maybe_complete_virtual(app_handle: &AppHandle, snap: &TaskStateSnapshot) 
                     format!("{task_type} completion REJECTED for {object_id} (vplayer {index}): stale anchor {solved_anchor} — forcing a clock refresh: {e}"),
                 );
                 crate::mcp::perception::request_hot_refresh(&crate::mcp::cosmos_client::CosmosClient::new());
+                // A rejected ore/build anchor is a disagreement the proof
+                // sampler may not have seen (the pick hashed unproven): put
+                // every pick back on a full proof for the next hour.
+                if task_type != crate::mcp::types::TaskType::Raid {
+                    crate::mcp::verify::note_presign_rejected();
+                }
             }
             Err(e) => {
                 // Surface failures loudly: a completion that never lands leaves

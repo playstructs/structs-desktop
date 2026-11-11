@@ -802,9 +802,34 @@ async fn scan(
         Some(now) => (build_plan(&now.forecasts), now.tip),
         None => (Default::default(), current_block),
     };
+    // Prove only picks this scan can actually start — not one already
+    // hashing or already known built (each skipped below anyway) — and, behind
+    // an unbroken GRASS stream, only one in PROOF_SAMPLE_EVERY of those (see
+    // verify::proof_sampling_allowed); the rest hash on the snapshot's word.
+    let sampling = crate::mcp::verify::proof_sampling_allowed();
+    let mut trusted: HashSet<String> = HashSet::new();
     let facts: Vec<crate::mirror::verify::Fact> = plan
         .values()
         .flatten()
+        .filter(|p| {
+            if BUILT_CACHE.lock().unwrap().contains(&p.struct_id) {
+                return false;
+            }
+            let busy = registry
+                .tasks
+                .get(&p.struct_id)
+                .is_some_and(|t| matches!(t.snapshot().status.as_str(), "running" | "waiting" | "starting"));
+            // A completion signed in the last two minutes: the snapshot may
+            // not show it built yet, and a second proof would be refused.
+            if busy || crate::hasher::completion_in_flight(&p.struct_id) == Some(p.anchor) {
+                return false;
+            }
+            if sampling && !crate::mcp::verify::take_proof_sample() {
+                trusted.insert(p.struct_id.clone());
+                return false;
+            }
+            true
+        })
         .flat_map(|p| {
             use crate::mirror::verify::{Fact, Store};
             [
@@ -815,6 +840,7 @@ async fn scan(
         .collect();
     let proven = std::sync::Arc::new(crate::mirror::verify::prove_for("auto_build", &facts).await);
     let plan = std::sync::Arc::new(plan);
+    let trusted = std::sync::Arc::new(trusted);
     crate::mcp::loop_util::for_each_player_concurrent(
         targets,
         crate::mcp::capacity::reads_fanout(),
@@ -827,6 +853,7 @@ async fn scan(
             let run = run_c.clone();
             let plan = plan.clone();
             let proven = proven.clone();
+            let trusted = trusted.clone();
             async move {
                 // Stand down while this player is answering a raid: charge is
                 // one action per block and the response needs it. Deferral
@@ -864,47 +891,58 @@ async fn scan(
                             continue;
                         }
                     }
+                    if crate::hasher::completion_in_flight(&sid) == Some(pick.anchor) {
+                        continue;
+                    }
                     // ── CHAIN RE-VERIFY before committing GPU work. ── The
                     // forecast ran on the snapshot; the build clock is the
                     // proof anchor, so read it from the chain once per ISSUED
                     // completion (not once per struct per scan).
-                    use crate::mirror::verify::Store;
-                    let Ok(sid_t) = crate::mcp::types::StructId::parse(&sid) else { continue };
-                    let proven_status = proven.as_ref().as_ref().and_then(|b| b.get(Store::Struct, "status", &sid));
-                    let proven_clock = proven.as_ref().as_ref().and_then(|b| b.get(Store::Struct, "blockStartBuild", &sid));
-                    let (built, destroyed) = match proven_status {
-                        Some(st) => (st & crate::mcp::perception::status::BUILT != 0, st & crate::mcp::perception::status::DESTROYED != 0),
-                        None => {
-                            let Ok(live) = crate::mcp::verify::struct_state(&client, &sid_t).await else { continue };
-                            (live.built, live.destroyed)
-                        }
-                    };
-                    if built || destroyed {
-                        BUILT_CACHE.lock().unwrap().insert(sid.clone());
-                        continue;
-                    }
-                    let live_anchor = match proven_clock {
-                        Some(c) => crate::mcp::types::Block::new(c),
-                        None => {
-                            let Ok(a) = crate::mcp::verify::build_anchor(&client, &sid_t).await else { continue };
-                            a
-                        }
-                    };
-                    let mut anchor = pick.anchor;
-                    if live_anchor.get() != anchor {
-                        crate::mcp::telemetry::tlog(
-                            "auto_build",
-                            crate::mcp::telemetry::Sev::Notice,
-                            format!("perception drift: {sid} build anchor {anchor} forecast vs {} on chain", live_anchor.get()),
-                        );
-                        anchor = live_anchor.get();
-                        let exec = crate::mirror::rules::earliest_execution(tip);
-                        let ripe = anchor != 0
-                            && crate::mirror::rules::ready_height(anchor, pick.range, complete_difficulty).is_some_and(|h| h <= exec);
-                        if !ripe {
+                    let anchor = if trusted.contains(&sid) {
+                        crate::mcp::verify::note_proof_skipped();
+                        pick.anchor
+                    } else {
+                        use crate::mirror::verify::Store;
+                        let Ok(sid_t) = crate::mcp::types::StructId::parse(&sid) else { continue };
+                        let proven_status = proven.as_ref().as_ref().and_then(|b| b.get(Store::Struct, "status", &sid));
+                        let proven_clock = proven.as_ref().as_ref().and_then(|b| b.get(Store::Struct, "blockStartBuild", &sid));
+                        let (built, destroyed) = match proven_status {
+                            Some(st) => (st & crate::mcp::perception::status::BUILT != 0, st & crate::mcp::perception::status::DESTROYED != 0),
+                            None => {
+                                let Ok(live) = crate::mcp::verify::struct_state(&client, &sid_t).await else { continue };
+                                (live.built, live.destroyed)
+                            }
+                        };
+                        crate::mcp::verify::note_presign("presign_build_pending", false, built || destroyed);
+                        if built || destroyed {
+                            BUILT_CACHE.lock().unwrap().insert(sid.clone());
                             continue;
                         }
-                    }
+                        let live_anchor = match proven_clock {
+                            Some(c) => crate::mcp::types::Block::new(c),
+                            None => {
+                                let Ok(a) = crate::mcp::verify::build_anchor(&client, &sid_t).await else { continue };
+                                a
+                            }
+                        };
+                        let mut anchor = pick.anchor;
+                        crate::mcp::verify::note_presign("presign_build_clock", anchor, live_anchor.get());
+                        if live_anchor.get() != anchor {
+                            crate::mcp::telemetry::tlog(
+                                "auto_build",
+                                crate::mcp::telemetry::Sev::Notice,
+                                format!("perception drift: {sid} build anchor {anchor} forecast vs {} on chain", live_anchor.get()),
+                            );
+                            anchor = live_anchor.get();
+                            let exec = crate::mirror::rules::earliest_execution(tip);
+                            let ripe = anchor != 0
+                                && crate::mirror::rules::ready_height(anchor, pick.range, complete_difficulty).is_some_and(|h| h <= exec);
+                            if !ripe {
+                                continue;
+                            }
+                        }
+                        anchor
+                    };
                     let params = TaskParams::for_ore(&sid, "BUILD", anchor, pick.range);
                     if crate::hasher::start_hash_task_core(params, app.clone(), &registry).is_ok() {
                         if let Some(idx) = idx_opt {

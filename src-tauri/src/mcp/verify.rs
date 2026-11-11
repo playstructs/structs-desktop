@@ -162,9 +162,101 @@ pub fn agreement() -> Value {
     Value::Object(out)
 }
 
+// ── Pre-hash proof sampling ──────────────────────────────────────────────────
+//
+// Before the GPU starts a mine / refine / build completion, the loop proves
+// the two facts that decide whether the proof can land — the struct's status
+// and the clock it is anchored to — against a header the light client
+// verified: one abci_query each. That was ~59,000 chain reads in 48 hours
+// (8,236 in the busiest hour) with ZERO harvest disagreements, because both
+// fields stream (struct_status, struct_block_ore_*_start / build start).
+//
+// So while the stream has been unbroken since the snapshot was taken, only
+// one pick in PROOF_SAMPLE_EVERY is proven — enough to keep measuring
+// agreement — and the rest hash on the snapshot's word. Any break, any replay
+// gap, an untrusted snapshot, or a single disagreement in the last hour puts
+// every pick back on a full proof. The worst case of a wrong belief is one
+// wasted GPU solve: the chain rejects the completion, nothing is lost.
+
+pub const PROOF_SAMPLE_EVERY: u64 = 20;
+const FULL_PROOFS_AFTER_DRIFT_MS: f64 = 60.0 * 60_000.0;
+static LAST_DRIFT_MS: AtomicU64 = AtomicU64::new(0);
+static SAMPLE_SEQ: AtomicU64 = AtomicU64::new(0);
+static PROOFS_SKIPPED: AtomicU64 = AtomicU64::new(0);
+
+/// The sampling rule. Pure.
+pub(crate) fn proof_sampling_rule(
+    feed_authoritative: bool,
+    feed_break_ms: f64,
+    snapshot_taken_ms: f64,
+    replay_gap: u64,
+    snapshot_trusted: bool,
+    last_drift_ms: f64,
+    now_ms: f64,
+) -> bool {
+    feed_authoritative
+        && feed_break_ms < snapshot_taken_ms
+        && replay_gap == 0
+        && snapshot_trusted
+        && (last_drift_ms == 0.0 || now_ms - last_drift_ms > FULL_PROOFS_AFTER_DRIFT_MS)
+}
+
+/// Whether this scan may sample its pre-hash proofs instead of proving all.
+pub(crate) fn proof_sampling_allowed() -> bool {
+    perception::with_snapshot(|s| {
+        proof_sampling_rule(
+            crate::mcp::grass_native::authoritative(),
+            crate::mcp::grass_native::last_break_ms() as f64,
+            s.taken_ms,
+            s.replay_gap,
+            snapshot_trusted(s),
+            LAST_DRIFT_MS.load(Ordering::Relaxed) as f64,
+            crate::hasher::types::now_millis(),
+        )
+    })
+    .unwrap_or(false)
+}
+
+/// One pick's turn: true for one pick in [`PROOF_SAMPLE_EVERY`].
+pub(crate) fn take_proof_sample() -> bool {
+    SAMPLE_SEQ.fetch_add(1, Ordering::Relaxed) % PROOF_SAMPLE_EVERY == 0
+}
+
+/// A pick that hashed on the snapshot's word, unproven.
+pub(crate) fn note_proof_skipped() {
+    PROOFS_SKIPPED.fetch_add(1, Ordering::Relaxed);
+}
+
+/// A proven pre-hash fact against what the snapshot believed. A disagreement
+/// puts every pick back on a full proof for the next hour.
+pub(crate) fn note_presign<T: PartialEq>(kind: &'static str, belief: T, live: T) {
+    if belief != live {
+        LAST_DRIFT_MS.store(crate::hasher::types::now_millis() as u64, Ordering::Relaxed);
+    }
+    note_agreement(kind, Some(belief), &live);
+}
+
+/// The chain rejected a completion's anchor ("work failure"): the snapshot
+/// was wrong about a clock. Same consequence as a proven disagreement.
+pub(crate) fn note_presign_rejected() {
+    LAST_DRIFT_MS.store(crate::hasher::types::now_millis() as u64, Ordering::Relaxed);
+    note_agreement("presign_rejected", Some(true), &false);
+}
+
+fn proof_sampling_json() -> Value {
+    let last = LAST_DRIFT_MS.load(Ordering::Relaxed);
+    serde_json::json!({
+        "sampling": proof_sampling_allowed(),
+        "every": PROOF_SAMPLE_EVERY,
+        "skipped": PROOFS_SKIPPED.load(Ordering::Relaxed),
+        "last_drift_age_s": if last > 0 { Some(((crate::hasher::types::now_millis() - last as f64) / 1000.0).round()) } else { None },
+    })
+}
+
 pub fn health() -> Value {
     serde_json::json!({
         "live_reads": agreement(),
+        "presign_proofs": proof_sampling_json(),
         "source": source().name(),
         "snapshot_hits": SNAPSHOT_HITS.load(Ordering::Relaxed),
         "guild_reads": GUILD_READS.load(Ordering::Relaxed),
@@ -779,6 +871,19 @@ pub async fn solved_anchor_live(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn proofs_are_sampled_only_behind_an_unbroken_stream_with_no_recent_drift() {
+        let h = 60.0 * 60_000.0;
+        let ok = |auth, brk, gap, trusted, drift, now| proof_sampling_rule(auth, brk, 1_000.0, gap, trusted, drift, now);
+        assert!(ok(true, 0.0, 0, true, 0.0, 2_000.0));
+        assert!(!ok(false, 0.0, 0, true, 0.0, 2_000.0), "stream not the source of record");
+        assert!(!ok(true, 1_500.0, 0, true, 0.0, 2_000.0), "a break since the snapshot was taken");
+        assert!(!ok(true, 0.0, 3, true, 0.0, 2_000.0), "frames lost during the refresh");
+        assert!(!ok(true, 0.0, 0, false, 0.0, 2_000.0), "snapshot past its trust window");
+        assert!(!ok(true, 0.0, 0, true, 2_000.0, 2_000.0 + h - 1.0), "a disagreement within the hour");
+        assert!(ok(true, 0.0, 0, true, 2_000.0, 2_000.0 + h + 1.0));
+    }
     use serde_json::json;
 
     #[test]

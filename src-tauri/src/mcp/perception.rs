@@ -27,13 +27,21 @@
 //!   * RE-VERIFY the specific entity from the LCD before any sign
 //!     (one read per ACTION instead of one per struct per scan).
 //!
-//! Known GRASS blind spots (measured, not assumed): the planet ore clocks
-//! (`blockStartOreMine/Refine`) never stream — `struct_block_ore_*_start` has
-//! not fired once in 111k recorded frames — and a NEW struct's row (type,
-//! location, slot) is only announced by `struct_block_build_start`, which
-//! carries just the id. Both are covered by the periodic full refresh and the
-//! pre-sign re-verify; `pending_new_structs()` exposes the ids that need an
-//! entity read sooner.
+//! What the stream covers (re-measured 2026-11-11 over 48 h): every grid
+//! attribute on any object (absolute values), struct status / health / build
+//! clock / defense / move, the planet shield, the planet ore clocks
+//! (`struct_block_ore_*_start` now fire — one per `mined`, one per pair of
+//! `refined` frames; the 2026-09 "never streams" measurement is history), the
+//! raid clock, fleet arrive / depart with the fleet's status, and the whole
+//! player row (`player_consensus`). Balances stream as ledger deltas and are
+//! kept by `mcp/ledger.rs`, not here.
+//!
+//! Remaining blind spots: a NEW struct's row (type, location, slot) is only
+//! announced by `struct_block_build_start`, which carries just the id —
+//! `pending_new_structs()` exposes the ids that need an entity read — and the
+//! planet's derived quantities (defensive-cannon / jamming / mining-active
+//! counts) are never streamed. Both are covered by the periodic full refresh
+//! and the pre-sign re-verify.
 //!
 //! Attribute enums below were derived EMPIRICALLY (each `{n}-{type}-{index}`
 //! record compared to the entity JSON key order and live values) — the chain's
@@ -123,6 +131,26 @@ const P_SHIELD: usize = 0;
 const P_RAID: usize = 10;
 const P_MINE: usize = 12;
 const P_REFINE: usize = 13;
+const P_MINING_ACTIVE: usize = 14;
+const P_REFINING_ACTIVE: usize = 15;
+
+/// Whether a struct type mines and/or refines (`oreMiningDifficulty` /
+/// `oreRefiningDifficulty` > 0 in the catalogue) — the two kinds whose
+/// online state the chain counts on the planet (`StructCache.GoOnline`).
+fn rig_role(type_id: &str) -> (bool, bool) {
+    #[cfg(test)]
+    if let Some(r) = TEST_RIG_ROLES.read().ok().and_then(|m| m.get(type_id).copied()) {
+        return r;
+    }
+    let Ok(id) = type_id.parse::<u64>() else { return (false, false) };
+    crate::game_state::GAME_STATE
+        .read()
+        .ok()
+        .and_then(|gs| gs.struct_types.values().find(|t| t.id == id).map(|t| (t.ore_mining_difficulty > 0, t.ore_refining_difficulty > 0)))
+        .unwrap_or((false, false))
+}
+#[cfg(test)]
+static TEST_RIG_ROLES: LazyLock<RwLock<HashMap<String, (bool, bool)>>> = LazyLock::new(|| RwLock::new(HashMap::new()));
 
 /// Bulk page size: v0.22 clamps every Structs-module page to 1000 rows (a
 /// larger request is silently served 1000), so ask for exactly that.
@@ -336,6 +364,9 @@ pub(crate) mod frame {
     pub struct FleetArrive {
         #[serde(default)]
         pub fleet_id: String,
+        /// `onStation` / `away` — the fleet row's own `status`.
+        #[serde(default)]
+        pub fleet_status: Option<String>,
     }
     /// A grid-store delta. `value_p` is the precise base-unit value; `value`
     /// is a floored display figure (structsLoad 2935 vs 2935000). Never mix.
@@ -371,6 +402,44 @@ pub fn parse_attribute_id(id: &str) -> Option<(usize, String)> {
         return None;
     }
     Some((a.attr as usize, a.object.to_string()))
+}
+
+/// Set a fleet row's `status` from a frame that carries one. Returns whether
+/// it changed.
+fn set_fleet_status(fl: &mut Map<String, Value>, status: Option<&str>) -> bool {
+    let Some(st) = status.filter(|s| !s.is_empty()) else { return false };
+    if fl.get("status").and_then(|v| v.as_str()) == Some(st) {
+        return false;
+    }
+    fl.insert("status".into(), Value::String(st.to_string()));
+    true
+}
+
+/// Fold a `player_consensus` frame (guild snake_case row) into a snapshot
+/// player row (camelCase, as `adapt_row` builds it). Only the row's own
+/// fields; frame envelope keys (`seq`, `time`, `subject`, `category`) stay
+/// out. `guild_rank` is a string in the list rows and a number in the
+/// frame — kept a string so the two sources agree.
+pub(crate) fn merge_player_row(row: &mut Value, frame: &Map<String, Value>) -> Applied {
+    const FIELDS: [&str; 12] = [
+        "id", "index", "creator", "primary_address", "guild_id", "guild_rank", "planet_id",
+        "fleet_id", "substation_id", "username", "pfp_client_render_attributes", "updated_at",
+    ];
+    let Some(out) = row.as_object_mut() else { return Applied::Ignored };
+    let mut changed = false;
+    for k in FIELDS {
+        let Some(v) = frame.get(k) else { continue };
+        let v = match (k, v) {
+            ("guild_rank", Value::Number(n)) => Value::String(n.to_string()),
+            _ => v.clone(),
+        };
+        let key = snake_to_camel(k);
+        if out.get(&key) != Some(&v) {
+            out.insert(key, v);
+            changed = true;
+        }
+    }
+    if changed { Applied::Changed } else { Applied::NoChange }
 }
 
 /// `"2026-09-02T17:34:41.606433+00:00"` → unix seconds. Only the
@@ -501,6 +570,25 @@ impl Snapshot {
             }
         }
         s
+    }
+
+    /// A rig on a planet went online (`up`) or offline: move that planet's
+    /// `oreMiningActiveQuantity` / `oreRefiningActiveQuantity` by one.
+    fn count_rig_online(&mut self, sid: &str, up: bool) {
+        let Some(row) = self.structs.get(sid) else { return };
+        if row.location_type != "planet" || !self.planets.contains_key(&row.location_id) {
+            return;
+        }
+        let (mines, refines) = rig_role(&row.type_id);
+        let planet = row.location_id.clone();
+        for (yes, idx) in [(mines, P_MINING_ACTIVE), (refines, P_REFINING_ACTIVE)] {
+            if !yes {
+                continue;
+            }
+            let held = self.planet_attrs.get(&planet).map(|a| a[idx]).unwrap_or(0);
+            let next = if up { held + 1 } else { held.saturating_sub(1) };
+            Self::set(&mut self.planet_attrs, &planet, idx, next);
+        }
     }
 
     /// The ingest edge refused too many rows to trust this snapshot.
@@ -851,6 +939,14 @@ impl Snapshot {
                     if new & status::BUILT != 0 && was & status::BUILT == 0 {
                         Self::set(&mut self.struct_attrs, &sid, S_BUILD, 0);
                     }
+                    // The planet's active-rig counts are never streamed, but
+                    // they move exactly when a rig's ONLINE bit does — the
+                    // chain's GoOnline/GoOffline (mirrored in
+                    // mirror::transition). Destruction clears the bit too.
+                    // A replayed frame has was == new and changes nothing.
+                    if (was ^ new) & status::ONLINE != 0 {
+                        self.count_rig_online(&sid, new & status::ONLINE != 0);
+                    }
                     r
                 }
                 "struct_health" => {
@@ -905,12 +1001,11 @@ impl Snapshot {
                     let f = parsed!(frame::Shield);
                     Self::set(&mut self.planet_attrs, &f.planet_id, P_SHIELD, f.planetary_shield.unwrap_or(0))
                 }
-                // The planet ore clocks. `structs.planet_activity` records these
-                // (`{block, planet_id}`, ~10k rows/day) and the local stack's
-                // notify trigger emits them; the production stream delivered
-                // none in 111k recorded frames, so the work-view hot refresh
-                // stays as the backstop. When they do arrive, they are the
-                // freshest source there is.
+                // The planet ore clocks (`{block, planet_id}`). Absent from the
+                // production stream until autumn 2026; they now arrive one per
+                // mine and one per refine, and are the freshest source there
+                // is. The LCD clock sweep (`maybe_hot_refresh`) runs only while
+                // the native stream is not the source of record.
                 "struct_block_ore_mine_start" | "struct_block_ore_refine_start" => {
                     let f = parsed!(frame::Clock);
                     if f.planet_id.is_empty() {
@@ -965,6 +1060,7 @@ impl Snapshot {
                             fl.insert("locationId".into(), Value::String(planet_s.clone()));
                             changed = true;
                         }
+                        changed |= set_fleet_status(fl, f.fleet_status.as_deref());
                     }
                     if let Some(owner) = subj.player.as_ref().filter(|o| o.index() == fleet.index()) {
                         if let Some(obj) = self.players.get_mut(&owner.to_string()).and_then(|v| v.as_object_mut()) {
@@ -990,10 +1086,31 @@ impl Snapshot {
                     match self.fleets.get_mut(&fleet.to_string()).and_then(|v| v.as_object_mut()) {
                         Some(fl) if fl.get("locationId").and_then(|v| v.as_str()) == Some(planet_s.as_str()) => {
                             fl.insert("locationId".into(), Value::String(String::new()));
+                            set_fleet_status(fl, f.fleet_status.as_deref());
                             Applied::Changed
                         }
                         _ => Applied::Ignored,
                     }
+                }
+                // The whole player row, in the guild's own shape (the same
+                // shape the snapshot's player list was built from), streamed
+                // whenever the chain changes the player: an explore, a guild
+                // move, a rename, a portrait — and a brand-new player, which
+                // until now stayed unknown to the snapshot (and cost a chain
+                // read per scan) until the next full refresh. Merge, never
+                // replace: fields the frame does not carry keep their value.
+                "player_consensus" => {
+                    let Some(obj) = detail.as_object() else { return Applied::Ignored };
+                    let Some(pid) = obj.get("id").and_then(|v| v.as_str()).filter(|s| crate::mcp::types::PlayerId::parse(s).is_ok()) else {
+                        return Applied::Ignored;
+                    };
+                    if let Some(ts) = obj.get("updated_at").and_then(|v| v.as_str()).and_then(iso_to_unix) {
+                        if self.taken_unix_s > 0.0 && ts + 2.0 < self.taken_unix_s {
+                            self.events_skipped_stale += 1;
+                            return Applied::Stale;
+                        }
+                    }
+                    merge_player_row(self.players.entry(pid.to_string()).or_insert_with(|| Value::Object(Map::new())), obj)
                 }
                 _ => Applied::Ignored,
             }
@@ -1260,7 +1377,7 @@ pub(crate) fn fill_slots_in_row(row: &mut Value, map: &Value) {
 }
 
 /// Fold a just-read PLANET entity into the live snapshot: its attributes
-/// (the ore clocks — GRASS never streams them) and grid. Call after a
+/// (the ore clocks, in case a frame was missed) and grid. Call after a
 /// pre-sign planet read so the next scan stops re-nominating a struct whose
 /// planet clock already moved (measured: a dozen false candidates per scan,
 /// each costing two chain reads, until the next 10-minute refresh).
@@ -1664,8 +1781,10 @@ async fn guild_pages(client: &CosmosClient, t0: f64) -> Result<Snapshot, String>
 
 // ── Hot refresh: the ore and build clocks, from the work view ────────────────
 //
-// `blockStartOreMine/Refine` never stream (measured: zero frames in 111k),
-// and a proof solved against a moved clock is a proof the chain rejects. The
+// `blockStartOreMine/Refine` did not stream until autumn 2026 (zero frames
+// in 111k at the time), and a proof solved against a moved clock is a proof
+// the chain rejects. They stream now; this sweep is the backstop for when
+// the native stream is down (see `maybe_hot_refresh`). The
 // planet-attribute BY-TYPE route cannot serve them either: the indexer has
 // written every ore-clock row since 2026-08-24 with a NULL `attribute_type`
 // (its index→name table stops at 10), so `type/blockStartOreMine` answers
@@ -3007,6 +3126,90 @@ mod guild_ingest_tests {
         // A fleet the store has never seen is nothing to move.
         let r = snap.apply("fleet_arrive", "structs.planet.2-21740.1-61", &json!({"fleet_id": "9-777", "block_height": 2_613_417}));
         assert_eq!(r, Applied::Ignored);
+    }
+
+    /// `player_consensus` is the whole guild player row. It moves a player
+    /// that explored (even when the fleet frame was missed), carries the name
+    /// and portrait the list rows lack, and introduces a brand-new player the
+    /// snapshot would otherwise read from the chain on every scan.
+    #[test]
+    fn a_player_consensus_frame_merges_the_row_and_adds_new_players() {
+        let mut snap = Snapshot::from_pages(
+            &[], &[], &[], &[],
+            &[json!({"id": "1-3253", "planetId": "2-7043", "fleetId": "9-3253", "guildRank": "101", "createdAt": "x"})],
+            &[], &[],
+        );
+        let frame = json!({"id": "1-3253", "index": 3253, "planet_id": "2-81043", "fleet_id": "9-3253",
+            "guild_id": "0-1", "guild_rank": 101, "username": "Peggy-Hamilton",
+            "pfp_client_render_attributes": "{\"head\":29}", "seq": 7,
+            "updated_at": "2026-11-11T14:25:21.333816+00:00"});
+        assert_eq!(snap.apply("player_consensus", "structs.player.0-1.1-3253", &frame), Applied::Changed);
+        let row = &snap.players["1-3253"];
+        assert_eq!(row["planetId"], "2-81043");
+        assert_eq!(row["username"], "Peggy-Hamilton");
+        assert_eq!(row["guildRank"], "101", "kept a string, like the list rows");
+        assert_eq!(row["createdAt"], "x", "fields the frame lacks are kept");
+        assert!(row.get("seq").is_none(), "envelope keys stay out");
+        assert_eq!(snap.apply("player_consensus", "structs.player.0-1.1-3253", &frame), Applied::NoChange);
+
+        let fresh = json!({"id": "1-99999", "planet_id": "", "fleet_id": "9-99999", "updated_at": "2026-11-11T14:25:21+00:00"});
+        assert_eq!(snap.apply("player_consensus", "structs.player.0-1.1-99999", &fresh), Applied::Changed);
+        assert_eq!(snap.players["1-99999"]["fleetId"], "9-99999");
+        assert!(snap.player_row("1-99999").is_some(), "a new player is known without a chain read");
+
+        // Older than the snapshot's own pages: the pages already say better.
+        snap.taken_unix_s = 2_000_000_000.0;
+        let old = json!({"id": "1-3253", "planet_id": "2-1", "updated_at": "2026-11-11T14:25:21+00:00"});
+        assert_eq!(snap.apply("player_consensus", "structs.player.0-1.1-3253", &old), Applied::Stale);
+        assert_eq!(snap.players["1-3253"]["planetId"], "2-81043");
+        // Not a player id: refused.
+        assert_eq!(snap.apply("player_consensus", "structs.player.0-1.x", &json!({"id": "x"})), Applied::Ignored);
+    }
+
+    /// `oreRefiningActiveQuantity` never streams; the mirror flagged every
+    /// refinery that came online ("RefiningActive not shown after landing").
+    /// The ONLINE bit does stream, and the chain moves the count with it.
+    #[test]
+    fn a_rig_going_online_or_offline_moves_the_planets_active_count() {
+        TEST_RIG_ROLES.write().unwrap().insert("9014".into(), (true, false));
+        TEST_RIG_ROLES.write().unwrap().insert("9015".into(), (false, true));
+        let mut snap = Snapshot::from_pages(
+            &[
+                json!({"id": "5-1", "type": 9014, "owner": "1-1", "locationType": "planet", "locationId": "2-1", "operatingAmbit": "land", "slot": 0}),
+                json!({"id": "5-2", "type": 9015, "owner": "1-1", "locationType": "planet", "locationId": "2-1", "operatingAmbit": "land", "slot": 1}),
+                json!({"id": "5-3", "type": 9001, "owner": "1-1", "locationType": "fleet", "locationId": "9-1", "operatingAmbit": "land", "slot": 0}),
+            ],
+            &[json!({"attributeId": "1-5-1", "value": "3"}), json!({"attributeId": "1-5-2", "value": "3"})],
+            &[], &[], &[json!({"id": "1-1"})], &[json!({"id": "2-1"})], &[],
+        );
+        let st = |snap: &mut Snapshot, sid: &str, status: u64, h: u64| {
+            snap.apply("struct_status", "structs.planet.2-1.1-1", &json!({"struct_id": sid, "status": status, "block_height": h}))
+        };
+        st(&mut snap, "5-2", 7, 10);
+        assert_eq!(snap.planet_attr("2-1", "oreRefiningActiveQuantity"), Some(1));
+        assert_eq!(snap.planet_attr("2-1", "oreMiningActiveQuantity"), Some(0));
+        st(&mut snap, "5-2", 7, 11);
+        assert_eq!(snap.planet_attr("2-1", "oreRefiningActiveQuantity"), Some(1), "a replay counts once");
+        st(&mut snap, "5-1", 7, 12);
+        assert_eq!(snap.planet_attr("2-1", "oreMiningActiveQuantity"), Some(1));
+        st(&mut snap, "5-1", 35, 13);
+        assert_eq!(snap.planet_attr("2-1", "oreMiningActiveQuantity"), Some(0), "destroyed = offline");
+        st(&mut snap, "5-3", 7, 14);
+        assert_eq!(snap.planet_attr("2-1", "oreMiningActiveQuantity"), Some(0), "a fleet struct is not a planet rig");
+    }
+
+    #[test]
+    fn fleet_frames_carry_the_fleet_status() {
+        let mut snap = Snapshot::from_pages(
+            &[], &[], &[], &[], &[], &[],
+            &[json!({"id": "9-194", "locationType": "planet", "locationId": "2-223", "status": "onStation"})],
+        );
+        let r = snap.apply("fleet_depart", "structs.planet.2-223.1-194", &json!({"fleet_id": "9-194", "fleet_status": "away", "block_height": 10}));
+        assert_eq!(r, Applied::Changed);
+        assert_eq!(snap.fleets["9-194"]["status"], "away");
+        let r = snap.apply("fleet_arrive", "structs.planet.2-223.1-194", &json!({"fleet_id": "9-194", "fleet_status": "onStation", "block_height": 11}));
+        assert_eq!(r, Applied::Changed);
+        assert_eq!(snap.fleets["9-194"]["status"], "onStation");
     }
 
     #[test]

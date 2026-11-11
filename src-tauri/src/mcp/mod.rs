@@ -43,6 +43,7 @@ pub mod guild_admin;
 pub mod providers;
 pub mod guild_auth;
 pub mod guild_power;
+pub mod ledger;
 pub mod loop_util;
 pub mod mandate;
 pub mod event_buffer;

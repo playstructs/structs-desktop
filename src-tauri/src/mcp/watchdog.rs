@@ -728,6 +728,8 @@ pub fn health_snapshot() -> Value {
         "lcd_player_callers": crate::mcp::cosmos_client::lcd_player_callers(8),
         "verify": crate::mcp::verify::health(),
         "snapshot": crate::mcp::perception::entity_stats(),
+        // Alpha balances held from the GRASS ledger stream (mcp/ledger.rs).
+        "ledger": crate::mcp::ledger::status_json(),
     })
 }
 

@@ -105,6 +105,10 @@ pub fn ingest(app: &tauri::AppHandle, event: GameEvent) {
     // this is what keeps the bulk snapshot current between refreshes.
     crate::mcp::perception::on_grass(&event.category, &event.subject, &event.detail);
 
+    // Alpha balances: ledger frames are deltas, kept against a height-stamped
+    // base (mcp/ledger.rs) so the roster and auto_sweep need no balance reads.
+    crate::mcp::ledger::on_grass(&event.subject, &event.detail);
+
     // A DROPPED settlement is the most dangerous event in the system and used
     // to be the quietest. The signing bridge acks "queued" the moment a message
     // is accepted — it must, because charge-gated messages settle minutes later

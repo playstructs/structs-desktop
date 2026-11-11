@@ -338,7 +338,7 @@ pub(crate) fn perception_usable_now_for_test() -> bool {
     perception_usable_now()
 }
 
-fn perception_usable_now() -> bool {
+pub(crate) fn perception_usable_now() -> bool {
     let now = crate::hasher::types::now_millis();
     crate::mcp::perception::with_snapshot(|s| {
         // Liveness is "a frame arrived", heartbeats included — not "something
