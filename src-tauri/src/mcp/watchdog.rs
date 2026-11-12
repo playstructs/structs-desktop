@@ -672,7 +672,14 @@ pub fn health_snapshot() -> Value {
             wedged.push(name);
         } else if enabled
             && !stat.running
-            && now - stat.last_finished_ms.max(app_start) > OVERDUE_FACTOR * interval_ms
+            // Same baseline as the findings pass: a need-gated loop the
+            // scheduler is deliberately idling is alive, not overdue.
+            && now
+                - stat
+                    .last_finished_ms
+                    .max(app_start)
+                    .max(crate::mcp::schedule::last_skip_ms(name))
+                > OVERDUE_FACTOR * interval_ms
         {
             overdue.push(name);
         }
