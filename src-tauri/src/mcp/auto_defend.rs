@@ -295,6 +295,36 @@ pub fn plan_web_stance(
     guards_on_primary: usize,
     guards_on_blocker: usize,
 ) -> Vec<Edge> {
+    plan_web_reconcile(hulls, stats, temperament, key, protect, guards_on_primary, guards_on_blocker, &HashMap::new())
+}
+
+/// [`plan_web_stance`] that KEEPS the spare hulls' existing edges.
+///
+/// `current` is defender id -> protected id as it stands on chain. The
+/// structural edges (blocker, guards, production blockers) are planned exactly
+/// as before; only the leftover "additional counter mass" step honours
+/// `current`: a spare hull already wired to a target it can usefully defend
+/// stays there, and only unwired (or uselessly wired) hulls are sampled.
+///
+/// Why: that step SAMPLES, and the seeded RNG is one stream across all its
+/// draws. Any change to the target set — a bait explores and rebuilds its
+/// Extractor, which becomes a new target — shifts every later draw, so every
+/// spare hull got re-dealt between the Command Ship and its blocker. Spare
+/// hulls of the same ambit are interchangeable, so the re-deal bought nothing
+/// and cost a clear + set per hull: measured 2026-11-13 on 1-14534, seven hulls
+/// rotated CMD <-> Tank one every three minutes, every time its planet
+/// changed, on this machine and another.
+#[allow(clippy::too_many_arguments)]
+pub fn plan_web_reconcile(
+    hulls: &[Hull],
+    stats: &HashMap<TypeId, TypeStats>,
+    temperament: &crate::mcp::variance::Temperament,
+    key: &str,
+    protect: &[ProtectTarget],
+    guards_on_primary: usize,
+    guards_on_blocker: usize,
+    current: &HashMap<String, String>,
+) -> Vec<Edge> {
     let mut rng = crate::mcp::variance::seeded_rng(key);
     let get = |tid: TypeId| stats.get(&tid).cloned().unwrap_or_default();
     // Walk the priority list and keep whatever this player actually owns. The
@@ -473,6 +503,38 @@ pub fn plan_web_stance(
         let mut load: HashMap<String, f64> = HashMap::new();
         for e in edges.iter() {
             *load.entry(e.protected.clone()).or_insert(0.0) += 1.0;
+        }
+        // Keep what is already wired (see [`plan_web_reconcile`]). An edge
+        // stays when the chain would still honour it usefully: the target is
+        // one of this web's targets, the hull can block or counter for it, the
+        // stance permits that defender type, and it travels with the target —
+        // or nothing this hull could cover travels with it either (a fleet
+        // away from home), in which case re-pointing gains nothing.
+        let legal = |h: &Hull, t: &Hull| -> bool {
+            rank(&get(h.type_id), &t.ambit, &h.ambit) > 0
+                && accepts.get(&t.id).map(|by| by.is_empty() || by.contains(&h.type_id)).unwrap_or(true)
+        };
+        let mut kept = 0usize;
+        while kept < pool.len() {
+            let h = pool[kept];
+            let keep = current.get(&h.id).and_then(|cur| {
+                let (t, _) = targets.iter().find(|(t, _)| &t.id == cur)?;
+                if !legal(h, t) {
+                    return None;
+                }
+                let travels = travels_with_target(&h.location_id, &t.location_id);
+                let could_travel = targets
+                    .iter()
+                    .any(|(o, _)| legal(h, o) && travels_with_target(&h.location_id, &o.location_id));
+                (travels || !could_travel).then_some(*t)
+            });
+            match keep {
+                Some(t) => {
+                    *load.entry(t.id.clone()).or_insert(0.0) += 1.0;
+                    take(&mut pool, Some(kept), t, "additional counter mass", &mut edges);
+                }
+                None => kept += 1,
+            }
         }
         while !pool.is_empty() {
             // Every legal (defender, target) pairing left on the board.
@@ -787,7 +849,7 @@ async fn scan(
                 if protect.is_empty() {
                     protect = DEFAULT_PROTECT.iter().map(|t| ProtectTarget::plain(*t)).collect();
                 }
-                let desired = plan_web_stance(
+                let desired = plan_web_reconcile(
                     &hulls,
                     &stats,
                     &profile.temperament,
@@ -795,6 +857,7 @@ async fn scan(
                     &protect,
                     profile.defence.guards_on_primary,
                     profile.defence.guards_on_blocker,
+                    &current,
                 );
                 if desired.is_empty() {
                     return;
@@ -1104,6 +1167,60 @@ mod tests {
             ids.iter().any(|k| web_of(k) != first),
             "every player produced an identical web — no variance at all"
         );
+    }
+
+    /// A rebuilt Extractor must not re-deal the spare hulls.
+    ///
+    /// 1-14534 (bait) on 2026-11-13: every explore rebuilt its Extractor, the
+    /// new target shifted the seeded draws, and seven spare hulls rotated
+    /// between the Command Ship and its Tank one clear + set at a time — then
+    /// back again on the next planet. With the chain's current edges passed
+    /// in, a web that already holds must come back unchanged.
+    #[test]
+    fn a_new_target_does_not_reshuffle_spare_hulls_already_wired() {
+        let st = stats();
+        let warm = crate::mcp::variance::Temperament { temperature: 1.2, ..Default::default() };
+        let fleet = "9-14534";
+        let hulls = vec![
+            hull_t("5-cmd", COMMAND_SHIP_TYPE, "land", fleet),
+            hull("5-tank", "9", "land", fleet),
+            hull("5-bb1", "2", "space", fleet),
+            hull("5-bb2", "2", "space", fleet),
+            hull("5-cr1", "11", "water", fleet),
+            hull("5-cr2", "11", "water", fleet),
+            hull("5-ma", "8", "land", fleet),
+            hull("5-de1", "12", "water", fleet),
+            hull("5-de2", "12", "air", fleet),
+        ];
+        let protect = stance(&[COMMAND_SHIP_TYPE, REFINERY_TYPE, EXTRACTOR_TYPE]);
+        let as_map = |web: &[Edge]| -> HashMap<String, String> {
+            web.iter().map(|e| (e.defender.clone(), e.protected.clone())).collect()
+        };
+        for key in ["1-14534", "1-3691", "1-3693", "1-14540", "1-4243"] {
+            let before = plan_web_reconcile(&hulls, &st, &warm, key, &protect, CMD_GUARDS, BLOCKER_GUARDS, &HashMap::new());
+            let wired = as_map(&before);
+            // Converged: replanning against its own edges changes nothing.
+            assert_eq!(
+                as_map(&plan_web_reconcile(&hulls, &st, &warm, key, &protect, CMD_GUARDS, BLOCKER_GUARDS, &wired)),
+                wired,
+                "{key}: a settled web re-planned itself"
+            );
+            // The bait explores and rebuilds its Extractor on the new planet.
+            let mut with_ext = hulls.clone();
+            with_ext.push(hull_t("5-ext", EXTRACTOR_TYPE, "land", "2-83482"));
+            let after = as_map(&plan_web_reconcile(&with_ext, &st, &warm, key, &protect, CMD_GUARDS, BLOCKER_GUARDS, &wired));
+            for (d, t) in &wired {
+                assert_eq!(after.get(d), Some(t), "{key}: {d} was re-pointed when only an Extractor appeared");
+            }
+        }
+        // A hull wired to something that is no longer a target IS re-planned.
+        let web = plan_web_reconcile(&hulls, &st, &warm, "p", &protect, CMD_GUARDS, BLOCKER_GUARDS, &HashMap::new());
+        let mut wired = as_map(&web);
+        let spare = web.iter().find(|e| e.why == "additional counter mass").expect("a spare hull").defender.clone();
+        wired.insert(spare.clone(), "5-dead".into());
+        let replanned = as_map(&plan_web_reconcile(&hulls, &st, &warm, "p", &protect, CMD_GUARDS, BLOCKER_GUARDS, &wired));
+        assert_ne!(replanned.get(&spare).map(String::as_str), Some("5-dead"));
+        assert!(replanned.contains_key(&spare), "the freed hull is still wired somewhere");
     }
 
     fn stance(ids: &[TypeId]) -> Vec<ProtectTarget> {
