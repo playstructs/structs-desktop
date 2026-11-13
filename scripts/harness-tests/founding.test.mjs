@@ -61,6 +61,24 @@ const type = (w, input, value) => { input.value = value; input.dispatchEvent(new
   await until(() => calls('terminal_found_plan_preview').some((c) => c.args.choices.members === 10));
   check('changing it asks again', calls('terminal_found_plan_preview').some((c) => c.args.choices.members === 10));
 
+  // Who owns the power: inferred, shown as the founder's until chosen.
+  const routeSel = () => [...card(d).querySelectorAll('select')].find((s) => [...s.options].some((o) => o.value === 'treasury'));
+  check('Power owned by starts at the inferred route', !!routeSel() && routeSel().value === 'personal' && /Power owned by/.test(card(d).textContent));
+  routeSel().value = 'treasury'; routeSel().dispatchEvent(new w.Event('change'));
+  await until(() => calls('terminal_found_plan_preview').some((c) => c.args.choices.power === 'treasury') && /Guild stake/.test(card(d).textContent));
+  check('choosing The guild asks again and stakes for the guild', /Guild stake/.test(card(d).textContent), card(d).textContent.slice(0, 400));
+  tab(d, /^Review/).click();
+  await until(() => /Fund the guild vault/.test(card(d).textContent));
+  f = card(d);
+  check('…Review founds first, funds and stakes the guild, then connects you',
+    /1 · Found the guild/.test(f.textContent) && /3 · Fund the guild vault/.test(f.textContent) && /8 · Connect you to it/.test(f.textContent), f.textContent.slice(0, 600));
+  check('…says who owns the power and how long you are without a substation',
+    /Power owned bythe guild/.test(f.textContent) && /No substation/.test(f.textContent) && /7 steps after founding/.test(f.textContent));
+  tab(d, /^Members/).click();
+  await until(() => routeSel());
+  routeSel().value = 'personal'; routeSel().dispatchEvent(new w.Event('change'));
+  await until(() => calls('terminal_found_plan_preview').slice(-1)[0].args.choices.power === 'personal' && !/Guild stake/.test(card(d).textContent));
+
   tab(d, /^Joining/).click();
   await until(() => /Who may join/.test(card(d).textContent));
   f = card(d);

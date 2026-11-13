@@ -3586,6 +3586,9 @@
     stake: 'anyone with enough Alpha infused joins at once',
     open: 'anyone joins at once; every join shares the power',
   };
+  // Who owns the guild's power: the founder's capacity, or the guild's own
+  // stake (it outlives the founder going quiet). Inferred until chosen.
+  var POWER_CHOICES = [{ value: 'personal', label: 'You' }, { value: 'treasury', label: 'The guild' }];
   var STEP_MARK = { pending: '·', running: '…', done: '✓', skipped: '–', failed: '✕' };
   var alpha = function (u) { return H.fmtAlpha(Number(u) || 0); };
 
@@ -3657,11 +3660,13 @@
       } else if (st === 'members') {
         var choices = ((pv && pv.power && pv.power.member_choices) || [5, 10, 25, 50]).map(function (n) { return { value: String(n), label: String(n) }; });
         left.appendChild(H.field('Ready for', H.selectBox(String(c.members), choices, function (v) { set('members', Number(v)); })));
+        var route = c.power || (pv && pv.power && pv.power.route) || 'personal';
+        left.appendChild(H.field('Power owned by', H.selectBox(route, POWER_CHOICES, function (v) { set('power', v); })));
         if (pv && pv.power) {
           var pw = pv.power;
           left.appendChild(H.fact('Each member, when full', H.fmtWatts(pw.share_full_mw)));
           left.appendChild(H.fact('Substation', H.fmtWatts(pw.allocation_mw)));
-          left.appendChild(H.fact('Stake', Number(pw.infuse_ualpha) > 0 ? alpha(pw.infuse_ualpha) + ' · recoverable' : 'none needed'));
+          left.appendChild(H.fact(pw.route === 'treasury' ? 'Guild stake' : 'Stake', Number(pw.infuse_ualpha) > 0 ? alpha(pw.infuse_ualpha) + ' · recoverable' : 'none needed'));
         }
       } else if (st === 'joining') {
         left.appendChild(H.field('Who may join', H.selectBox(c.policy, JOIN_CHOICES, function (v) { set('policy', v); paint(); })));
@@ -3692,6 +3697,7 @@
       you.appendChild(H.fact('Guild', (f.guild_id || 'none') + (f.rank ? ' · #' + f.rank : '') + ' → new guild · #1'));
       you.appendChild(H.fact('Power share', pow));
       you.appendChild(H.fact('You draw', H.fmtWatts(f.draw_mw)));
+      if (f.unpowered_steps) you.appendChild(H.fact('No substation', 'for ' + f.unpowered_steps + ' steps after founding'));
       if (f.replicants_stay) you.appendChild(H.fact('Replicants', H.fmtInt(f.replicants_stay) + ' stay in ' + (f.guild_id || 'their guild')));
       box.appendChild(you);
       var r = pv.reactor || {};
@@ -3701,7 +3707,9 @@
       box.appendChild(H.field('Reactor', H.selectBox(c.reactor || r.id || '', opts, function (v) { set('reactor', v); })));
       var cost = pv.cost || {};
       box.appendChild(H.fact('Founding', alpha(cost.founding_ualpha) + ' · 1 burned'));
-      if (Number(cost.infuse_ualpha) > 0) box.appendChild(H.fact('Stake', alpha(cost.infuse_ualpha) + ' · recoverable'));
+      var treasury = pv.power && pv.power.route === 'treasury';
+      box.appendChild(H.fact('Power owned by', treasury ? 'the guild' : 'you'));
+      if (Number(cost.infuse_ualpha) > 0) box.appendChild(H.fact(treasury ? 'Guild stake' : 'Stake', alpha(cost.infuse_ualpha) + ' · recoverable'));
       box.appendChild(H.fact('From your vault', alpha(cost.total_ualpha) + ' of ' + alpha(f.vault_ualpha)));
       var steps = H.resultTable();
       (pv.steps || []).forEach(function (s, i) { steps.appendChild(H.resultRow({ title: (i + 1) + ' · ' + s.label })); });
@@ -3732,6 +3740,7 @@
       var body = H.el('div');
       body.appendChild(H.fact('Guild', (fresh.choices.tag ? '[' + fresh.choices.tag + '] ' : '') + fresh.choices.name));
       body.appendChild(H.fact('Ready for', String(fresh.choices.members) + ' members'));
+      body.appendChild(H.fact('Power owned by', fresh.power && fresh.power.route === 'treasury' ? 'the guild' : 'you'));
       body.appendChild(H.fact('From your vault', alpha(cost.total_ualpha)));
       body.appendChild(H.fact('Steps', String((fresh.steps || []).length)));
       H.confirmModal('Found ' + fresh.choices.name + '?', body, 'Found', function () {
@@ -3778,7 +3787,7 @@
     var rows = H.resultTable();
     var line = function (title, sub, open) { rows.appendChild(H.resultRow({ title: title, subtitle: sub, onClick: open })); };
     line('Joining · ' + ((JOIN_CHOICES.filter(function (j) { return j.value === c.policy; })[0] || {}).label || c.policy), JOIN_STATE[c.policy] || '', function () { add('guildset', { id: gid }); });
-    line('Power · ready for ' + (c.members || '?'), 'entry substation ' + (st.substation_id || '—'), function () { add('energy'); });
+    line('Power · ready for ' + (c.members || '?'), 'entry substation ' + (st.substation_id || '—') + (st.route === 'treasury' ? ' · owned by the guild' : ''), function () { add('energy'); });
     line('Members', 'requests, invites and the roster', function () { add('members', { id: gid }); });
     line('Invite players', 'by player id', function () { add('guildmember', { id: gid }); });
     line('Officers and grants', 'who can approve, invite and remove', function () { add('guildadmin', { id: gid }); });

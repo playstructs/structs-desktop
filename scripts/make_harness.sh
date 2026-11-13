@@ -488,7 +488,7 @@ cat > "$FIX" <<'EOF'
         return { id: id, label: { allocation: 'Route power', substation: 'Build the entry substation', found: 'Found the guild', policy: 'Set who may join', name: 'Name the guild' }[id],
           status: status, tx: status === 'done' ? 'ABCDEF' + i : '', error: status === 'failed' ? 'the guild was signed but has not appeared yet; resume in a minute' : '' };
       });
-      return { running: mode === 'running', state: { founder: '1-194', guild_id: mode === 'done' ? '0-6' : '', substation_id: '4-20',
+      return { running: mode === 'running', state: { founder: '1-194', guild_id: mode === 'done' ? '0-6' : '', substation_id: '4-20', route: window.__HARNESS_FOUND_ROUTE__ || 'personal',
         choices: { name: 'Iron Tide', tag: 'TIDE', members: 5, policy: 'application', hosting: mode === 'done' ? 'self' : 'none', endpoint: 'https://tide.example/guild.json', pitch: 'Five friends, one sector.' },
         steps: steps } };
     },
@@ -501,18 +501,26 @@ cat > "$FIX" <<'EOF'
       var tag = c.tag || (c.name ? c.name.split(' ').map(function (w) { return w[0]; }).join('').toUpperCase() : '');
       var alloc = Math.ceil(c.members * 2180000 * 1.5 / 0.9);
       var infuse = Math.ceil(alloc / 0.96 * 1.01 / 10000) * 10000;
+      var route = c.power || (c.members > 25 ? 'treasury' : 'personal');
+      var steps = route === 'treasury'
+        ? [['found', 'Found the guild'], ['policy', 'Set who may join'], ['fund', 'Fund the guild vault'], ['guild_stake', "Stake the guild's Alpha"],
+           ['guild_allocation', "Route the guild's power"], ['guild_substation', 'Build the guild substation'], ['entry', 'Make it the entry substation'],
+           ['connect', 'Connect you to it'], ['name', 'Name the guild']]
+        : [['infuse', 'Stake Alpha for power'], ['allocation', 'Route power'], ['substation', 'Build the entry substation'],
+           ['found', 'Found the guild'], ['policy', 'Set who may join'], ['name', 'Name the guild']];
       return { ok: !problems.length, problems: problems, warnings: c.hosting === 'self' ? [] : ['no sign-up site: new players can only join from a client that already plays'],
         choices: Object.assign({}, c, { tag: tag }),
         founder: { player_id: '1-194', guild_id: '0-1', rank: 50, owns: null, vault_ualpha: '40000000', replicants_stay: 42, draw_mw: 3100000, capacity_mw: 0,
-          substation_now: '4-1', share_now_mw: 7400000, moves: true, share_after_mw: Math.floor(alloc * 0.9), online_after: true },
+          substation_now: '4-1', share_now_mw: 7400000, moves: true, share_after_mw: Math.floor(alloc * 0.9), online_after: true,
+          unpowered_steps: route === 'treasury' ? 7 : 0 },
         reactor: { id: '3-15', moniker: 'sn-corp', jailed: false, bonded: true, commission: 0.04, guilds: ['0-5'] },
         reactors: [{ id: '3-15', moniker: 'sn-corp', jailed: false, bonded: true, commission: 0.04, guilds: ['0-5'] },
                    { id: '3-10', moniker: 'kilgore-crabla', jailed: true, bonded: false, commission: 0.04, guilds: [] }],
         power: { members: c.members, member_choices: [5, 10, 25, 50], p75_draw_mw: 2180000, headroom: 1.5, allocation_mw: alloc,
-          share_alone_mw: Math.floor(alloc * 0.9), share_full_mw: Math.floor(alloc * 0.9) / c.members, infuse_ualpha: String(infuse) },
+          share_alone_mw: Math.floor(alloc * 0.9), share_full_mw: Math.floor(alloc * 0.9) / c.members, infuse_ualpha: String(infuse),
+          route: route, route_auto: !c.power, routes: { personal: { stake_ualpha: String(infuse) }, treasury: { stake_ualpha: String(infuse) } } },
         cost: { founding_ualpha: '2000000', burned_ualpha: '1000000', infuse_ualpha: String(infuse), total_ualpha: String(2000000 + infuse) },
-        steps: [{ id: 'infuse', label: 'Stake Alpha for power' }, { id: 'allocation', label: 'Route power' }, { id: 'substation', label: 'Build the entry substation' },
-                { id: 'found', label: 'Found the guild' }, { id: 'policy', label: 'Set who may join' }, { id: 'name', label: 'Name the guild' }],
+        steps: steps.map(function (s) { return { id: s[0], label: s[1] }; }),
         guild_json: {} };
     },
     terminal_found_plan_start: function (args) {

@@ -864,7 +864,8 @@ async fn action_rank(app_handle: &tauri::AppHandle, action: &str, args: &Value) 
 async fn action_found_guild(app_handle: &tauri::AppHandle, args: &Value) -> Vec<Content> {
     let s = |k: &str| args.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string();
     // The founding PLAN (mcp/guild_founding.rs): `{name, tag?, members?,
-    // policy?, hosting?, endpoint?, pitch?, reactor?}` previews everything —
+    // policy?, hosting?, endpoint?, pitch?, reactor?, power?}` (power:
+    // personal | treasury, inferred when absent) previews everything —
     // power, cost, steps — and `confirm:true` runs it (resumable). `status`
     // reads the saved plan. The bare three-field form below stays for
     // agents that already speak it.

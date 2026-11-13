@@ -8,13 +8,34 @@
 //! in `guild_founding.<player>.json`, so a crash or a closed window resumes
 //! at the step that did not finish — and never founds twice.
 //!
-//! Steps (proposals/guild-founding.md §5.1, personal power route):
+//! Two power routes (proposals/guild-founding.md §5.1). PERSONAL — the
+//! founder's own capacity powers the guild, built before founding so the
+//! founder is never unpowered:
 //!   infuse     stake Alpha from the vault so the founder has spare capacity
 //!   allocation a dynamic allocation of the sized power from the founder
 //!   substation a substation made from it (the guild's entry substation)
 //!   found      MsgGuildCreate {reactor, endpoint or "", substation}
 //!   policy     join minimum and invite/request levels for the chosen policy
 //!   name       MsgGuildUpdateName
+//!
+//! TREASURY — the guild owns its power, so it outlives the founder going
+//! quiet. The guild vault only exists once the guild does, so this route
+//! founds first:
+//!   found             MsgGuildCreate {reactor, endpoint or "", ""}
+//!   policy            as above (the guild is open until this lands)
+//!   fund              MsgVaultSend founder → guild vault
+//!   guild_stake       MsgReactorInfuse {ownerId: guild} — the guild's capacity
+//!   guild_allocation  MsgAllocationCreate automated from the guild, so every
+//!                     later guild infusion grows the substation by itself
+//!   guild_substation  MsgSubstationCreate {owner: guild}
+//!   entry             MsgGuildUpdateEntrySubstationId
+//!   connect           MsgSubstationPlayerConnect for the founder — only when
+//!                     founding took them off their old guild's entry
+//!                     substation (the entry update moves no one)
+//!   name              as above
+//!
+//! Every guild-owned object passes the chain's permission check for the
+//! guild's owner (`permissions_context.go`), so the founder signs them all.
 //!
 //! Chain rules this follows (v0.22.0 `msg_server_guild_create.go`,
 //! `guild_charter.go`): 2 Alpha from the player VAULT (1 burned, 1 collateral
@@ -71,6 +92,9 @@ pub struct Choices {
     pub endpoint: String,
     /// Empty = pick the best reactor.
     pub reactor: String,
+    /// Who owns the guild's power: personal · treasury. Empty = inferred
+    /// ([`pick_route`]).
+    pub power: String,
 }
 
 impl Choices {
@@ -110,8 +134,15 @@ pub struct Step {
 pub struct FoundState {
     pub founder: String,
     pub choices: Choices,
+    /// personal · treasury. Plans saved before the treasury route are "".
+    pub route: String,
     pub reactor_id: String,
+    /// Alpha staked for power: the founder's (personal) or the guild's
+    /// (treasury, also the amount sent to the guild vault).
     pub infuse_ualpha: u64,
+    /// Treasury: the guild vault's ualpha just before `fund` signed, so a
+    /// resumed run sends only what has not arrived.
+    pub fund_base_ualpha: Option<u64>,
     pub allocation_mw: u64,
     pub allocation_id: String,
     pub substation_id: String,
@@ -215,6 +246,42 @@ pub fn infuse_needed(draw: &Draw, old_share: f64, alloc_mw: u64, commission: f64
     ((need / 10_000.0).ceil() as u64) * 10_000
 }
 
+/// Ualpha the guild must stake so its capacity covers `alloc_mw` (an
+/// automated allocation takes the guild's whole capacity). 1 ualpha = 1 mW
+/// less the reactor's commission; rounded up to 0.01 Alpha plus 1%.
+pub fn treasury_stake(alloc_mw: u64, commission: f64) -> u64 {
+    let keep = (1.0 - commission).clamp(0.5, 1.0);
+    let need = alloc_mw as f64 / keep * 1.01;
+    ((need / 10_000.0).ceil() as u64) * 10_000
+}
+
+/// The power route: the founder's answer, else inferred
+/// (guild-founding-experience.md §4.2) — the guild's own above 25 members,
+/// the founder's while their spare capacity already covers it, else the
+/// guild's (the founder would stake either way, so the stake should outlive
+/// them).
+pub fn pick_route(asked: &str, members: u64, personal_infuse: u64) -> &'static str {
+    match asked {
+        "personal" => "personal",
+        "treasury" => "treasury",
+        _ if members > 25 => "treasury",
+        _ if personal_infuse == 0 => "personal",
+        _ => "treasury",
+    }
+}
+
+/// Key permissions the route signs with (the chain checks the signing key
+/// before any object standing).
+pub fn route_bits(route: &str) -> u64 {
+    use crate::mcp::guild_admin::bits::*;
+    let base = PLAY | TOKEN_TRANSFER | TOKEN_INFUSE | SOURCE_ALLOCATION | ALLOCATION_CONNECTION | GUILD_JOIN_CONSTRAINTS_UPDATE | UPDATE;
+    if route == "treasury" {
+        base | SUBSTATION_CONNECTION | GUILD_SUBSTATION_UPDATE
+    } else {
+        base
+    }
+}
+
 /// The guild_admin actions that turn a fresh guild (minimum 0, both levels
 /// closed) into `policy`. Settings already at the chain default are left out.
 pub fn policy_actions(policy: &str, stake_ualpha: u64) -> Vec<(&'static str, Value)> {
@@ -257,11 +324,26 @@ pub fn pick_reactor(rows: &[ReactorRow]) -> Option<String> {
     ok.first().map(|r| r.id.clone())
 }
 
-/// The ordered steps for these answers. The infuse step is present only when
-/// the founder is short of capacity.
-pub fn steps_for(infuse_ualpha: u64) -> Vec<Step> {
+/// The ordered steps for these answers. Personal: the infuse step is present
+/// only when the founder is short of capacity. Treasury: `connect` only when
+/// founding leaves the founder with no substation.
+pub fn steps_for(route: &str, infuse_ualpha: u64, connect: bool) -> Vec<Step> {
     let s = |id: &str, label: &str| Step { id: id.into(), label: label.into(), status: "pending".into(), ..Default::default() };
     let mut out = Vec::new();
+    if route == "treasury" {
+        out.push(s("found", "Found the guild"));
+        out.push(s("policy", "Set who may join"));
+        out.push(s("fund", "Fund the guild vault"));
+        out.push(s("guild_stake", "Stake the guild's Alpha"));
+        out.push(s("guild_allocation", "Route the guild's power"));
+        out.push(s("guild_substation", "Build the guild substation"));
+        out.push(s("entry", "Make it the entry substation"));
+        if connect {
+            out.push(s("connect", "Connect you to it"));
+        }
+        out.push(s("name", "Name the guild"));
+        return out;
+    }
     if infuse_ualpha > 0 {
         out.push(s("infuse", "Stake Alpha for power"));
     }
@@ -333,6 +415,9 @@ pub fn choice_refusals(c: &Choices) -> Vec<String> {
     }
     if c.pitch.chars().count() > 140 {
         out.push("the pitch is at most 140 characters".into());
+    }
+    if !matches!(c.power.as_str(), "" | "personal" | "treasury") {
+        out.push("power is owned by you (personal) or the guild (treasury)".into());
     }
     out
 }
@@ -442,9 +527,6 @@ pub async fn preview(choices: Choices) -> Result<Value, String> {
         }
     }
     let vault = crate::mcp::guild_economy::vault_balance(&client, &pid, "ualpha").await.unwrap_or(0) as u64;
-    if let Some(why) = crate::mcp::send_guard::signer_lacks(&address, crate::mcp::guild_admin::bits::PLAY | crate::mcp::guild_admin::bits::TOKEN_TRANSFER, "play + token transfer").await {
-        problems.push(why);
-    }
 
     // Reactor.
     let rows = reactors(&client).await;
@@ -458,10 +540,17 @@ pub async fn preview(choices: Choices) -> Result<Value, String> {
     }
     let commission = chosen.as_ref().map(|r| r.commission).filter(|c| *c > 0.0).unwrap_or(0.04);
 
-    // Power: size the substation, then what the founder must stake for it.
+    // Power: size the substation, then what each route stakes for it.
     let (draw, old_share) = draw_of(&client, &pid).await;
     let alloc = allocation_for(c.members, P75_MEMBER_DRAW_MW);
-    let infuse = infuse_needed(&draw, old_share, alloc, commission);
+    let personal_infuse = infuse_needed(&draw, old_share, alloc, commission);
+    let guild_stake = treasury_stake(alloc, commission);
+    let route = pick_route(&c.power, c.members, personal_infuse);
+    let treasury = route == "treasury";
+    let infuse = if treasury { guild_stake } else { personal_infuse };
+    if let Some(why) = crate::mcp::send_guard::signer_lacks(&address, route_bits(route), "the founding steps").await {
+        problems.push(why);
+    }
     let share_alone = (alloc as f64 * USABLE).floor();
     let share_full = share_alone / c.members.max(1) as f64;
     // Does founding move them? Only off their old guild's entry substation.
@@ -472,10 +561,25 @@ pub async fn preview(choices: Choices) -> Result<Value, String> {
     };
     let moves = draw.substation.is_empty() || draw.substation == old_entry;
     let share_after = if moves { share_alone } else { old_share };
-    let cap_after = draw.capacity + infuse as f64 * (1.0 - commission) - alloc as f64;
+    // Personal: the founder's capacity gains the stake and sources the
+    // allocation. Treasury: it is the guild's capacity; the founder's is
+    // untouched.
+    let cap_after = if treasury { draw.capacity } else { draw.capacity + infuse as f64 * (1.0 - commission) - alloc as f64 };
     let online_after = draw.load + draw.structs_load <= cap_after.max(0.0) + share_after;
     if !online_after {
         problems.push("you would go offline after founding: ready for fewer members, or stake more".into());
+    }
+    let steps = steps_for(route, infuse, treasury && moves);
+    // Treasury founds before the guild has power: a founder moved off their
+    // old entry substation has none until `connect`.
+    let unpowered_steps = if treasury && moves {
+        let at = |id: &str| steps.iter().position(|s| s.id == id).unwrap_or(0);
+        at("connect").saturating_sub(at("found"))
+    } else {
+        0
+    };
+    if unpowered_steps > 0 && draw.load + draw.structs_load > draw.capacity {
+        warnings.push(format!("you are offline for {unpowered_steps} steps after founding, until the guild substation connects you"));
     }
     let total = FOUNDING_UALPHA + infuse;
     if vault < total {
@@ -490,7 +594,6 @@ pub async fn preview(choices: Choices) -> Result<Value, String> {
     }
 
     let replicants = crate::mcp::virtual_players::count();
-    let steps = steps_for(infuse);
     let doc = render_guild_json("0-?", &c, &json!({ "guild_api": "", "grass_nats_websocket": "" }));
     Ok(json!({
         "ok": problems.is_empty(),
@@ -503,6 +606,7 @@ pub async fn preview(choices: Choices) -> Result<Value, String> {
             "draw_mw": draw.need(), "capacity_mw": draw.capacity,
             "substation_now": draw.substation, "share_now_mw": old_share,
             "moves": moves, "share_after_mw": share_after, "online_after": online_after,
+            "unpowered_steps": unpowered_steps,
         },
         "reactor": chosen.as_ref().map(reactor_json),
         "reactors": rows.iter().map(reactor_json).collect::<Vec<_>>(),
@@ -510,6 +614,11 @@ pub async fn preview(choices: Choices) -> Result<Value, String> {
             "members": c.members, "member_choices": MEMBER_CHOICES, "p75_draw_mw": P75_MEMBER_DRAW_MW, "headroom": HEADROOM,
             "allocation_mw": alloc, "share_alone_mw": share_alone, "share_full_mw": share_full,
             "infuse_ualpha": infuse.to_string(),
+            "route": route, "route_auto": c.power.is_empty(),
+            "routes": {
+                "personal": { "stake_ualpha": personal_infuse.to_string() },
+                "treasury": { "stake_ualpha": guild_stake.to_string() },
+            },
         },
         "cost": {
             "founding_ualpha": FOUNDING_UALPHA.to_string(),
@@ -563,12 +672,15 @@ pub async fn start(app: tauri::AppHandle, choices: Option<Choices>) -> Result<Va
             }
             let c: Choices = serde_json::from_value(pv["choices"].clone()).map_err(|e| e.to_string())?;
             let infuse = pv["power"]["infuse_ualpha"].as_str().and_then(|v| v.parse().ok()).unwrap_or(0);
+            let route = pv["power"]["route"].as_str().unwrap_or("personal").to_string();
+            let connect = route == "treasury" && pv["founder"]["moves"] == true;
             let st = FoundState {
                 founder: pid.clone(),
                 reactor_id: pv["reactor"]["id"].as_str().unwrap_or("").to_string(),
                 infuse_ualpha: infuse,
                 allocation_mw: pv["power"]["allocation_mw"].as_u64().unwrap_or(0),
-                steps: steps_for(infuse),
+                steps: steps_for(&route, infuse, connect),
+                route,
                 choices: c,
                 started_ms: now_ms(),
                 updated_ms: now_ms(),
@@ -691,43 +803,153 @@ async fn run_one(app: &tauri::AppHandle, client: &CosmosClient, address: &str, s
                 .ok_or("the allocation was signed but has not appeared yet; resume in a minute")?;
             Ok(String::new())
         }
-        "substation" => {
-            // Already built from this allocation (a resumed run)? Adopt it.
-            let dest = client
-                .query_entity("allocation", &st.allocation_id)
-                .await
-                .ok()
-                .map(|a| s(a.pointer("/Allocation/destinationId")))
-                .unwrap_or_default();
-            if !dest.is_empty() {
-                st.substation_id = dest;
+        "substation" => build_substation(app, client, st, &pid).await,
+        "guild_substation" => {
+            let guild = st.guild_id.clone();
+            build_substation(app, client, st, &guild).await
+        }
+        "fund" => {
+            let guild = st.guild_id.clone();
+            // Already staked: the Alpha went where it was meant to.
+            if grid(client, "2", &guild).await > 0.0 {
                 return Ok(String::new());
             }
-            let before = crate::mcp::energy_card::newest(client, "substation", "Substation", |v| s(v.get("owner")) == pid)
-                .await
-                .as_ref()
-                .and_then(crate::mcp::energy_card::id_of);
-            let r = crate::mcp::tx_retry::sign_as_primary(
-                app,
-                "/structs.structs.MsgSubstationCreate",
-                json!({ "owner": pid, "allocationId": st.allocation_id }),
-                "guild:found:substation",
-            )
-            .await?;
-            let probe = || {
-                let before = before.clone();
-                let pid = pid.clone();
-                async move {
-                    crate::mcp::energy_card::newest(client, "substation", "Substation", |v| s(v.get("owner")) == pid)
-                        .await
-                        .filter(|v| crate::mcp::energy_card::id_of(v) != before)
+            let held = guild_vault(client, &guild).await;
+            // The baseline is saved BEFORE signing, so a resumed run counts
+            // what already arrived and sends only the rest.
+            let base = match st.fund_base_ualpha {
+                Some(b) => b,
+                None => {
+                    st.fund_base_ualpha = Some(held);
+                    save(st)?;
+                    held
                 }
             };
-            st.substation_id = crate::mcp::energy_card::wait_for(probe)
+            let need = st.infuse_ualpha.saturating_sub(held.saturating_sub(base));
+            if need == 0 {
+                return Ok(String::new());
+            }
+            let payload = crate::mcp::send_guard::vault_send_payload(&pid, &guild, "ualpha", &need.to_string())?;
+            let r = crate::mcp::tx_retry::sign_as_primary(app, "/structs.structs.MsgVaultSend", payload, "guild:found:fund").await?;
+            let want = base + st.infuse_ualpha;
+            let probe = || {
+                let guild = guild.clone();
+                async move { (guild_vault(client, &guild).await >= want).then(|| json!(true)) }
+            };
+            crate::mcp::energy_card::wait_for(probe).await.ok_or("the Alpha was sent but has not arrived yet; resume in a minute")?;
+            Ok(tx_of(&r))
+        }
+        "guild_stake" => {
+            let guild = st.guild_id.clone();
+            let staked = || {
+                let guild = guild.clone();
+                async move { (grid(client, "2", &guild).await > 0.0).then(|| json!(true)) }
+            };
+            if staked().await.is_some() {
+                return Ok(String::new());
+            }
+            // Short of the stake: either it was infused and the capacity is
+            // a block behind, or the fund step never landed.
+            let held = guild_vault(client, &guild).await;
+            if held < st.infuse_ualpha {
+                if crate::mcp::energy_card::wait_for(staked).await.is_some() {
+                    return Ok(String::new());
+                }
+                return Err(format!(
+                    "the guild vault holds {}; staking needs {}",
+                    crate::mcp::tools::format::format_alpha(held as f64),
+                    crate::mcp::tools::format::format_alpha(st.infuse_ualpha as f64)
+                ));
+            }
+            let validator = client.query_entity("reactor", &st.reactor_id).await.ok().map(|r| s(r.pointer("/Reactor/validator"))).unwrap_or_default();
+            if validator.is_empty() {
+                return Err(format!("reactor {} has no validator address", st.reactor_id));
+            }
+            let r = crate::mcp::tx_retry::sign_as_primary(
+                app,
+                "/structs.structs.MsgReactorInfuse",
+                json!({
+                    "validatorAddress": validator,
+                    "amount": { "denom": "ualpha", "amount": st.infuse_ualpha.to_string() },
+                    "ownerId": guild,
+                }),
+                "guild:found:stake",
+            )
+            .await?;
+            crate::mcp::energy_card::wait_for(staked).await.ok_or("the stake was signed but the guild has no capacity yet; resume in a minute")?;
+            Ok(tx_of(&r))
+        }
+        "guild_allocation" => {
+            let guild = st.guild_id.clone();
+            let find = || {
+                let guild = guild.clone();
+                async move {
+                    crate::mcp::energy_card::newest(client, "allocation", "Allocation", |a| s(a.get("sourceObjectId")) == guild && s(a.get("destinationId")).is_empty())
+                        .await
+                        .as_ref()
+                        .and_then(crate::mcp::energy_card::id_of)
+                        .map(Value::String)
+                }
+            };
+            if resumed {
+                if let Some(a) = find().await.and_then(|v| v.as_str().map(String::from)) {
+                    st.allocation_id = a;
+                    return Ok(String::new());
+                }
+            }
+            // Automated: the allocation tracks the guild's whole capacity, so
+            // every later guild infusion grows the substation unasked.
+            let automated = json!({ "controller": guild, "sourceObjectId": guild, "allocationType": "automated", "power": 0 });
+            let r = match crate::mcp::tx_retry::sign_as_primary(app, "/structs.structs.MsgAllocationCreate", automated, "guild:found:allocation").await {
+                Ok(r) => r,
+                // The chain refuses automated when the guild already carries
+                // load or its capacity is not all usable; route the spare as
+                // a dynamic allocation instead.
+                Err(e) if e.contains("automated_conflict") || e.contains("unsupported_supply") => {
+                    let spare = (grid(client, "2", &guild).await - grid(client, "3", &guild).await).floor();
+                    if spare <= 0.0 {
+                        return Err(format!("the guild has no spare capacity to route ({e})"));
+                    }
+                    let dynamic = json!({ "controller": guild, "sourceObjectId": guild, "allocationType": "dynamic", "power": spare as u64 });
+                    crate::mcp::tx_retry::sign_as_primary(app, "/structs.structs.MsgAllocationCreate", dynamic, "guild:found:allocation").await?
+                }
+                Err(e) => return Err(e),
+            };
+            st.allocation_id = crate::mcp::energy_card::wait_for(find)
                 .await
-                .as_ref()
-                .and_then(crate::mcp::energy_card::id_of)
-                .ok_or("the substation was signed but has not appeared yet; resume in a minute")?;
+                .and_then(|v| v.as_str().map(String::from))
+                .ok_or("the allocation was signed but has not appeared yet; resume in a minute")?;
+            Ok(tx_of(&r))
+        }
+        "entry" => {
+            let g = client.query_entity("guild", &st.guild_id).await?;
+            if s(g.pointer("/Guild/entrySubstationId")) == st.substation_id {
+                return Ok(String::new());
+            }
+            let r = crate::mcp::guild_admin::execute(app, Some(st.guild_id.clone()), "entry_substation", &json!({ "substation": st.substation_id })).await?;
+            Ok(s(r.get("tx")))
+        }
+        "connect" => {
+            // Connected anywhere already (here, or a substation of their own
+            // they chose since): leave them where they are.
+            let (d, _) = draw_of(client, &pid).await;
+            if !d.substation.is_empty() {
+                return Ok(String::new());
+            }
+            let r = crate::mcp::tx_retry::sign_as_primary(
+                app,
+                "/structs.structs.MsgSubstationPlayerConnect",
+                json!({ "substationId": st.substation_id, "playerId": pid }),
+                "guild:found:connect",
+            )
+            .await?;
+            let want = st.substation_id.clone();
+            let probe = || {
+                let pid = pid.clone();
+                let want = want.clone();
+                async move { (draw_of(client, &pid).await.0.substation == want).then(|| json!(true)) }
+            };
+            crate::mcp::energy_card::wait_for(probe).await.ok_or("the connection was signed but has not landed yet; resume in a minute")?;
             Ok(tx_of(&r))
         }
         "found" => {
@@ -783,6 +1005,54 @@ async fn run_one(app: &tauri::AppHandle, client: &CosmosClient, address: &str, s
         }
         other => Err(format!("unknown step {other}")),
     }
+}
+
+/// A grid record (`/structs/grid/<type>-<object id>`: 2 capacity, 3 load).
+/// Guild queries carry no grid attributes, so a guild's power is read here.
+async fn grid(client: &CosmosClient, kind: &str, object: &str) -> f64 {
+    client.lcd_get(&format!("/structs/grid/{kind}-{object}")).await.ok().map(|v| num(v.pointer("/gridRecord/value"))).unwrap_or(0.0)
+}
+
+async fn guild_vault(client: &CosmosClient, guild: &str) -> u64 {
+    crate::mcp::guild_economy::vault_balance(client, guild, "ualpha").await.unwrap_or(0).min(u64::MAX as u128) as u64
+}
+
+/// Build a substation owned by `owner` from `st.allocation_id`, or adopt the
+/// one a resumed run already built from it.
+async fn build_substation(app: &tauri::AppHandle, client: &CosmosClient, st: &mut FoundState, owner: &str) -> Result<String, String> {
+    let dest = client
+        .query_entity("allocation", &st.allocation_id)
+        .await
+        .ok()
+        .map(|a| s(a.pointer("/Allocation/destinationId")))
+        .unwrap_or_default();
+    if !dest.is_empty() {
+        st.substation_id = dest;
+        return Ok(String::new());
+    }
+    let mine = |v: &Value| s(v.get("owner")) == owner;
+    let before = crate::mcp::energy_card::newest(client, "substation", "Substation", mine).await.as_ref().and_then(crate::mcp::energy_card::id_of);
+    let r = crate::mcp::tx_retry::sign_as_primary(
+        app,
+        "/structs.structs.MsgSubstationCreate",
+        json!({ "owner": owner, "allocationId": st.allocation_id }),
+        "guild:found:substation",
+    )
+    .await?;
+    let probe = || {
+        let before = before.clone();
+        async move {
+            crate::mcp::energy_card::newest(client, "substation", "Substation", |v| s(v.get("owner")) == owner)
+                .await
+                .filter(|v| crate::mcp::energy_card::id_of(v) != before)
+        }
+    };
+    st.substation_id = crate::mcp::energy_card::wait_for(probe)
+        .await
+        .as_ref()
+        .and_then(crate::mcp::energy_card::id_of)
+        .ok_or("the substation was signed but has not appeared yet; resume in a minute")?;
+    Ok(tx_of(&r))
 }
 
 
@@ -903,12 +1173,44 @@ mod tests {
 
     #[test]
     fn steps_stake_only_when_short() {
-        assert_eq!(steps_for(0).iter().map(|s| s.id.as_str()).collect::<Vec<_>>(), vec!["allocation", "substation", "found", "policy", "name"]);
-        assert_eq!(steps_for(5).first().unwrap().id, "infuse");
-        let mut st = FoundState { steps: steps_for(0), ..Default::default() };
+        assert_eq!(steps_for("personal", 0, false).iter().map(|s| s.id.as_str()).collect::<Vec<_>>(), vec!["allocation", "substation", "found", "policy", "name"]);
+        assert_eq!(steps_for("personal", 5, false).first().unwrap().id, "infuse");
+        let mut st = FoundState { steps: steps_for("personal", 0, false), ..Default::default() };
         assert!(!st.started() && !st.finished());
         st.steps.iter_mut().for_each(|s| s.status = "done".into());
         assert!(st.finished());
+    }
+
+    #[test]
+    fn treasury_founds_first_and_locks_down_before_spending() {
+        let ids = |connect| steps_for("treasury", 25_000_000, connect).into_iter().map(|s| s.id).collect::<Vec<_>>();
+        assert_eq!(ids(true), vec!["found", "policy", "fund", "guild_stake", "guild_allocation", "guild_substation", "entry", "connect", "name"]);
+        // A founder on a substation of their own is never pulled off it.
+        assert!(!ids(false).contains(&"connect".to_string()));
+    }
+
+    #[test]
+    fn the_guild_stakes_enough_for_the_whole_substation() {
+        let alloc = allocation_for(5, P75_MEMBER_DRAW_MW);
+        let stake = treasury_stake(alloc, 0.04);
+        // Capacity after commission covers the automated allocation…
+        assert!(stake as f64 * 0.96 >= alloc as f64, "{stake} for {alloc}");
+        // …without staking a whole extra member's worth.
+        assert!((stake as f64 * 0.96) < alloc as f64 * 1.02);
+        assert_eq!(stake % 10_000, 0, "whole 0.01 Alpha");
+    }
+
+    #[test]
+    fn the_route_is_the_founders_answer_else_inferred() {
+        assert_eq!(pick_route("personal", 50, 9), "personal");
+        assert_eq!(pick_route("treasury", 5, 0), "treasury");
+        assert_eq!(pick_route("", 5, 0), "personal", "spare capacity covers it");
+        assert_eq!(pick_route("", 5, 1), "treasury", "staking either way: let the guild own it");
+        assert_eq!(pick_route("", 50, 0), "treasury", "big guilds own their power");
+        assert!(route_bits("treasury") & crate::mcp::guild_admin::bits::GUILD_SUBSTATION_UPDATE != 0);
+        assert!(route_bits("personal") & crate::mcp::guild_admin::bits::GUILD_SUBSTATION_UPDATE == 0);
+        let bad = Choices { name: "Iron Tide".into(), power: "borrowed".into(), ..Default::default() }.with_defaults();
+        assert!(choice_refusals(&bad).iter().any(|r| r.contains("power")));
     }
 
     #[test]
@@ -941,7 +1243,7 @@ mod tests {
 
     #[test]
     fn state_round_trips_through_its_file() {
-        let st = FoundState { founder: "1-9".into(), guild_id: "0-6".into(), steps: steps_for(10), ..Default::default() };
+        let st = FoundState { founder: "1-9".into(), guild_id: "0-6".into(), steps: steps_for("personal", 10, false), route: "personal".into(), fund_base_ualpha: Some(3), ..Default::default() };
         let text = serde_json::to_string(&st).unwrap();
         let back: FoundState = serde_json::from_str(&text).unwrap();
         assert_eq!(back, st);
