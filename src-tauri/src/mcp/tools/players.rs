@@ -374,6 +374,7 @@ pub async fn execute(
                 VPlayerRole::Bait => "mines only; ore accumulates on its planet as raid bait (no refinery, no transfers).",
                 VPlayerRole::Productive => "runs the flywheel: mine → refine → send alpha to the primary (drive it with structs_players economy).",
                 VPlayerRole::Raider => "expendable offensive arm for auto_raid: no extractor, keeps a refinery to launder seized ore into Alpha. Losing its Command Ship is affordable — the primary never leaves home.",
+                VPlayerRole::Founder => "holds a guild for the primary: no planet, never swept; made only by the founding plan.",
             };
             vec![Content::text(format!(
                 "Virtual player {} (idx {}) → role {} — {}",

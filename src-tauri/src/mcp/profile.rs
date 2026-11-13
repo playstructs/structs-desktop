@@ -392,8 +392,33 @@ pub static BUILTIN: LazyLock<Vec<Profile>> = LazyLock::new(|| {
             avatar: None,
             replication_weight: 15.0,
         },
+        // Holds a guild for the primary. Every capability off and nothing to
+        // build: the Alpha it is funded with must still be there when the
+        // founding plan spends it. Weight 0, and auto_replicate refuses the
+        // id outright, so only the founding plan ever makes one.
+        Profile {
+            id: FOUNDER_PROFILE.into(),
+            label: "Founder — holds a guild, never swept".into(),
+            schema: SCHEMA,
+            capabilities: Capabilities {
+                raids: false,
+                refines: false,
+                explore_when_drained_only: true,
+                sweeps_alpha: false,
+                auto_defends: false,
+            },
+            loadout: Vec::new(),
+            temperament: v.bait,
+            limits: TemperamentLimits::default(),
+            defence: DefenceStance::default(),
+            avatar: None,
+            replication_weight: 0.0,
+        },
     ]
 });
+
+/// The founder's built-in profile id (= `VPlayerRole::Founder.as_str()`).
+pub const FOUNDER_PROFILE: &str = "founder";
 
 /// Deep-validate a profile. Pure, so tests can drive it and so [`set`] can
 /// reject BEFORE touching stored state.
@@ -425,7 +450,10 @@ pub fn validate(p: &Profile) -> Result<(), String> {
             p.id, p.schema, SCHEMA
         ));
     }
-    if p.loadout.is_empty() {
+    // Building nothing is the founder's whole point (it has no planet); for
+    // any other profile an empty loadout is a mistake. A custom profile can
+    // never take the founder's id — built-ins cannot be shadowed.
+    if p.loadout.is_empty() && p.id != FOUNDER_PROFILE {
         return Err(format!("profile '{}' has an empty loadout — it would build nothing", p.id));
     }
 
@@ -1012,6 +1040,20 @@ mod tests {
                            (t.0, t.1, t.2, t.3), "{id} row drifted");
             }
         }
+    }
+
+    #[test]
+    fn a_founder_does_nothing_with_its_alpha() {
+        let p = find(VPlayerRole::Founder.as_str());
+        assert_eq!(p.id, FOUNDER_PROFILE);
+        let c = p.capabilities;
+        assert!(!c.raids && !c.refines && !c.sweeps_alpha && !c.auto_defends);
+        assert!(p.loadout.is_empty());
+        assert_eq!(p.replication_weight, 0.0);
+        assert!(validate(&p).is_ok());
+        assert_eq!(for_player(None, Some(VPlayerRole::Founder)).id, FOUNDER_PROFILE);
+        assert!(!VPlayerRole::ALL.contains(&VPlayerRole::Founder));
+        assert_eq!(VPlayerRole::parse("founder"), Some(VPlayerRole::Founder));
     }
 
     #[test]

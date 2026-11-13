@@ -493,33 +493,74 @@ cat > "$FIX" <<'EOF'
         steps: steps } };
     },
     terminal_found_plan_preview: function (args) {
-      var c = Object.assign({ members: 5, policy: 'application', hosting: 'none' }, (args && args.choices) || {});
-      var problems = [];
-      if (!c.name) problems.push('name the guild');
-      else if (c.name.length < 3) problems.push('name: 3-20 letters, digits, hyphens, underscores, apostrophes or spaces');
-      if (c.name === 'SN Corp') problems.push("the name 'SN Corp' is taken by 0-5");
+      var c = Object.assign({ members: 5, policy: 'application', hosting: 'none', substation: '', founder: '' }, (args && args.choices) || {});
+      var byFounder = c.founder === 'new';
+      var issues = [];
+      var block = function (t, fix) { issues.push({ level: 'block', text: t, fix: fix }); };
+      var warn = function (t, fix) { issues.push({ level: 'warn', text: t, fix: fix }); };
+      if (!c.name) block('name the guild', 'identity');
+      else if (c.name.length < 3) block('name: 3-20 letters, digits, hyphens, underscores, apostrophes or spaces', 'identity');
+      if (c.name === 'SN Corp') block("the name 'SN Corp' is taken by 0-5", 'identity');
       var tag = c.tag || (c.name ? c.name.split(' ').map(function (w) { return w[0]; }).join('').toUpperCase() : '');
       var alloc = Math.ceil(c.members * 2180000 * 1.5 / 0.9);
       var infuse = Math.ceil(alloc / 0.96 * 1.01 / 10000) * 10000;
-      var route = c.power || (c.members > 25 ? 'treasury' : 'personal');
+      var reactors = [
+        { id: '3-1', moniker: 'Orbital Hydro', jailed: false, bonded: true, commission: 0.04, guilds: ['0-1'], tokens: '3408000000', validator_fee: 0.1, website: 'https://oh.energy', owner: '1-1', infusers: 16, rank: 1, share: 0.195 },
+        { id: '3-15', moniker: 'sn-corp', jailed: false, bonded: true, commission: 0.04, guilds: ['0-5'], tokens: '1733200000', validator_fee: 0.11, website: '', owner: '', infusers: 10, rank: 2, share: 0.099 },
+        { id: '3-10', moniker: 'kilgore-crabla', jailed: true, bonded: false, commission: 0.04, guilds: [], tokens: '2000000', validator_fee: 0.1, website: '', owner: '1-172', infusers: 0, rank: 0, share: 0 }];
+      var reactor = reactors.filter(function (r) { return r.id === (c.reactor || '3-15'); })[0] || null;
+      if (reactor && reactor.jailed) block('the validator of ' + reactor.id + ' is jailed', 'reactor');
+      var sub = function (id, owner, access, cap, conns, here) {
+        var usable = Math.max(0, cap * 0.9);
+        return { id: id, owner: owner, name: '', deleting: false, access: access, capacity_mw: cap, load_mw: 0, connections: conns,
+          share_now_mw: conns ? usable / conns : usable, each_mw: usable / (conns + c.members), here: !!here, founder_ok: access === 'owner' };
+      };
+      var options = [sub('4-17', '1-194', 'owner', 1000000, 0), sub('4-16', '1-194', 'owner', 0, 0), sub('4-1', '1-1', 'none', 41614900000, 5071, true)];
+      var existing = /^4-/.test(c.substation);
+      var picked = existing ? options.filter(function (o) { return o.id === c.substation; })[0] : null;
+      var route = c.substation === 'none' ? 'none' : existing ? 'existing' : (c.power || (c.members > 25 ? 'treasury' : 'personal'));
+      if (picked && byFounder && picked.access !== 'owner') block(picked.id + ': a founder can only be handed a substation you own', 'substation');
+      else if (picked && picked.access === 'none') block(picked.id + ': you hold no substation_connection grant', 'substation');
+      else if (picked && !(picked.capacity_mw > 0)) warn(picked.id + ' has no power in; joiners connect to nothing', 'substation');
+      else if (picked && picked.each_mw < 2180000) warn(picked.id + ': low each at ' + c.members + ' members', 'substation');
+      if (c.substation === 'none') warn('no entry substation: joiners get no connection until you set one', 'substation');
+      var building = route === 'personal' || route === 'treasury';
+      var stake = building ? infuse : 0;
       var steps = route === 'treasury'
         ? [['found', 'Found the guild'], ['policy', 'Set who may join'], ['fund', 'Fund the guild vault'], ['guild_stake', "Stake the guild's Alpha"],
            ['guild_allocation', "Route the guild's power"], ['guild_substation', 'Build the guild substation'], ['entry', 'Make it the entry substation'],
            ['connect', 'Connect you to it'], ['name', 'Name the guild']]
-        : [['infuse', 'Stake Alpha for power'], ['allocation', 'Route power'], ['substation', 'Build the entry substation'],
-           ['found', 'Found the guild'], ['policy', 'Set who may join'], ['name', 'Name the guild']];
-      return { ok: !problems.length, problems: problems, warnings: c.hosting === 'self' ? [] : ['no sign-up site: new players can only join from a client that already plays'],
+        : building ? [['infuse', 'Stake Alpha for power'], ['allocation', 'Route power'], ['substation', 'Build the entry substation'],
+           ['found', 'Found the guild'], ['policy', 'Set who may join'], ['name', 'Name the guild']]
+        : [['found', 'Found the guild'], ['policy', 'Set who may join'], ['name', 'Name the guild']];
+      warn('anyone can join until the join policy lands, a block after founding', 'joining');
+      if (c.hosting !== 'self') warn('no sign-up site: new players can only join from a client that already plays', 'signup');
+      var grant = byFounder && picked && picked.access === 'owner';
+      if (byFounder) {
+        steps = [['founder_create', 'Create the founder'], ['founder_fund', 'Fund the founder']]
+          .concat(grant ? [['founder_grant', 'Let the founder use your substation']] : [])
+          .concat(steps).concat([['controls', "Give you the guild's controls"]]);
+      }
+      var each = building ? Math.floor(alloc * 0.9) / c.members : picked ? picked.each_mw : 0;
+      var alone = building ? Math.floor(alloc * 0.9) : picked ? picked.capacity_mw * 0.9 : 0;
+      var problems = issues.filter(function (i) { return i.level === 'block'; }).map(function (i) { return i.text; });
+      return { ok: !problems.length, problems: problems,
+        warnings: issues.filter(function (i) { return i.level === 'warn'; }).map(function (i) { return i.text; }), issues: issues,
         choices: Object.assign({}, c, { tag: tag }),
-        founder: { player_id: '1-194', guild_id: '0-1', rank: 50, owns: null, vault_ualpha: '40000000', replicants_stay: 42, draw_mw: 3100000, capacity_mw: 0,
-          substation_now: '4-1', share_now_mw: 7400000, moves: true, share_after_mw: Math.floor(alloc * 0.9), online_after: true,
-          unpowered_steps: route === 'treasury' ? 7 : 0 },
-        reactor: { id: '3-15', moniker: 'sn-corp', jailed: false, bonded: true, commission: 0.04, guilds: ['0-5'] },
-        reactors: [{ id: '3-15', moniker: 'sn-corp', jailed: false, bonded: true, commission: 0.04, guilds: ['0-5'] },
-                   { id: '3-10', moniker: 'kilgore-crabla', jailed: true, bonded: false, commission: 0.04, guilds: [] }],
-        power: { members: c.members, member_choices: [5, 10, 25, 50], p75_draw_mw: 2180000, headroom: 1.5, allocation_mw: alloc,
-          share_alone_mw: Math.floor(alloc * 0.9), share_full_mw: Math.floor(alloc * 0.9) / c.members, infuse_ualpha: String(infuse),
-          route: route, route_auto: !c.power, routes: { personal: { stake_ualpha: String(infuse) }, treasury: { stake_ualpha: String(infuse) } } },
-        cost: { founding_ualpha: '2000000', burned_ualpha: '1000000', infuse_ualpha: String(infuse), total_ualpha: String(2000000 + infuse) },
+        founder: { player_id: '1-194', guild_id: '0-1', rank: 50, owns: null, vault_ualpha: '140000000', replicants_stay: 42, draw_mw: 3100000, capacity_mw: 0, spare_mw: 0,
+          substation_now: '4-1', share_now_mw: 7400000, moves: true, substation_after: building ? 'new' : (picked ? picked.id : ''), share_after_mw: alone, online_after: true,
+          unpowered_steps: route === 'treasury' && !byFounder ? 7 : 0, by_founder: byFounder,
+          primary: { guild_id: '0-1', rank: 50, substation: '4-1', share_mw: 7400000, draw_mw: 3100000 },
+          founder_new: byFounder ? { index: 3001, name: 'KESTREL-3001', fund_ualpha: String(2000000 + stake), grant_substation: grant ? picked.id : '' } : null },
+        reactor: reactor, reactors: reactors,
+        substation: { choice: c.substation || 'new', picked: picked || null, options: options },
+        power: { members: c.members, member_choices: [5, 10, 25, 50], p75_draw_mw: 2180000, headroom: 1.5, allocation_mw: building ? alloc : 0,
+          share_alone_mw: alone, share_full_mw: each, infuse_ualpha: String(stake),
+          route: route, route_auto: !c.power, routes: { personal: { stake_ualpha: String(infuse), allocation_mw: alloc, each_mw: Math.floor(alloc * 0.9) / c.members },
+            treasury: { stake_ualpha: String(infuse), allocation_mw: alloc, each_mw: Math.floor(alloc * 0.9) / c.members } } },
+        cost: { founding_ualpha: '2000000', burned_ualpha: '1000000', collateral_ualpha: '1000000', infuse_ualpha: String(stake), total_ualpha: String(2000000 + stake) },
+        treasury: { guild_id: '0-6', denom: 'uguild.0-6', vault_tokens: '1000000', collateral_ualpha: '1000000', convert_in_fee: '0', convert_out_fee: '0',
+          capacity_mw: route === 'treasury' ? Math.floor(infuse * 0.96) : 0, join_minimum: 0, entry_rank: 101 },
         steps: steps.map(function (s) { return { id: s[0], label: s[1] }; }),
         guild_json: {} };
     },

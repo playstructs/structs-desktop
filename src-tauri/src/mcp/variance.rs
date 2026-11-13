@@ -286,6 +286,8 @@ impl VarianceConfig {
             Some(VPlayerRole::Raider) => self.raider,
             Some(VPlayerRole::Bait) => self.bait,
             Some(VPlayerRole::Productive) => self.productive,
+            // A founder takes no gameplay decisions; bait's is the quietest.
+            Some(VPlayerRole::Founder) => self.bait,
             // `collect_targets` yields the primary with no role.
             None => self.primary,
         }

@@ -36,6 +36,12 @@ pub enum VPlayerRole {
     Bait,
     Productive,
     Raider,
+    /// Holds a guild for the primary so the primary can stay where it is.
+    /// Never explored, so it has no planet for any loop to work, and its
+    /// profile switches off sweeping, refining, raiding and defence: the
+    /// Alpha it is funded with stays put until founding spends it. Not in
+    /// [`Self::ALL`] — only the founding plan creates one.
+    Founder,
 }
 
 impl VPlayerRole {
@@ -44,6 +50,7 @@ impl VPlayerRole {
             "bait" => Some(Self::Bait),
             "productive" | "miner" | "worker" => Some(Self::Productive),
             "raider" | "raid" | "vulture" => Some(Self::Raider),
+            "founder" => Some(Self::Founder),
             _ => None,
         }
     }
@@ -52,11 +59,13 @@ impl VPlayerRole {
             Self::Bait => "bait",
             Self::Productive => "productive",
             Self::Raider => "raider",
+            Self::Founder => "founder",
         }
     }
-    /// Every role name accepted by `parse`, canonical spellings only — used by
-    /// the tool schemas and the board's role pickers so a new role shows up
-    /// everywhere without another hardcoded list.
+    /// Every LAUNCHABLE role, canonical spellings only — used by the tool
+    /// schemas and the board's role pickers so a new role shows up everywhere
+    /// without another hardcoded list. `Founder` is parsed but not listed:
+    /// a mass launch must never make one.
     pub const ALL: &'static [Self] = &[Self::Bait, Self::Productive, Self::Raider];
 }
 
@@ -631,19 +640,23 @@ pub async fn spawn_one(
         // Started before the explore rather than after: an explore that fails
         // must not leave the player unreachable from the primary key.
         crate::mcp::delegation::grant_on_create(app, index, pid);
-        match crate::mcp::tx_retry::sign_with_retry(
+        // A founder holds a guild, not a planet: unexplored, no loop has
+        // anything of it to mine, build, defend or sweep.
+        let explore = role != VPlayerRole::Founder;
+        match if !explore { Err("founder: no planet".to_string()) } else { crate::mcp::tx_retry::sign_with_retry(
             app,
             index,
             "/structs.structs.MsgPlanetExplore",
             json!({ "playerId": pid }),
             &format!("launch:{pid}"),
         )
-        .await
+        .await }
         {
             Ok(_) => {
                 invalidate_owned(pid);
                 explored = true;
             }
+            Err(_) if !explore => {}
             Err(e) => tlog("launch", Sev::Warn, format!("{name} created but explore failed: {e}")),
         }
         // Its role-themed portrait, so it lands in the roster already looking

@@ -1442,6 +1442,16 @@
     .tm-found-pitch { margin-top: var(--spacing-sm); }
     .tm-found-status, .tm-found-move, .tm-found-signup { text-align: left; margin-top: var(--spacing-md); }
     .tm-found-json { text-align: left; white-space: pre-wrap; word-break: break-all; max-height: 40vh; overflow: auto; color: var(--text-body); }
+    /* Reactor and substation pickers: SUI result rows, the chosen one framed
+       in the accent, the ones the chain would refuse shown but inert. */
+    .tm-pick { text-align: left; margin-top: var(--spacing-sm); }
+    .tm-pick .sui-result-row.is-selected { box-shadow: inset 0 0 0 2px var(--accent-primary); }
+    .tm-pick .sui-result-row.is-disabled { opacity: .45; cursor: default; }
+    .tm-pick .sui-result-row-player-info { flex: 1 1 auto; min-width: 0; }
+    /* One problem: the game's inline alert, with the door that fixes it. */
+    .tm-found-issue { display: flex; align-items: center; gap: var(--spacing-md); margin-top: var(--spacing-sm); }
+    .tm-found-issue > .sui-message-inline-alert { flex: 1 1 auto; min-width: 0; }
+    .tm-found-issue > .sui-screen-btn { flex: none; }
     /* The Cluster card's quiet layout: one status line, one large state
        word, doors, and folded rows. */
     .tm-status { display: flex; flex-wrap: wrap; align-items: center; gap: var(--spacing-md) var(--spacing-lg);

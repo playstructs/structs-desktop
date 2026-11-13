@@ -344,6 +344,8 @@ fn snapshot_weights() -> Vec<(String, f64)> {
     let cfg = get();
     crate::mcp::profile::list()
         .into_iter()
+        // A founder is made by the founding plan, never replicated.
+        .filter(|p| p.id != crate::mcp::profile::FOUNDER_PROFILE)
         .map(|p| {
             let w = cfg.weights.get(&p.id).copied().unwrap_or(p.replication_weight);
             (p.id, w)
@@ -356,6 +358,9 @@ fn snapshot_weights() -> Vec<(String, f64)> {
 /// field is written and any stale override for it cleared, so the profile
 /// document stays the one truth for a snapshot the operator authored.
 pub fn set_weight(id: &str, weight: f64) -> Result<String, String> {
+    if id == crate::mcp::profile::FOUNDER_PROFILE {
+        return Err("founders are made by the founding plan, not replicated".into());
+    }
     if !weight.is_finite() || !(0.0..=100.0).contains(&weight) {
         return Err(format!("replication weight {weight} is outside 0..100"));
     }

@@ -3573,8 +3573,9 @@
     });
   }
   var FOUND_STAGES = [
-    { key: 'identity', label: 'Identity' }, { key: 'members', label: 'Members' },
-    { key: 'joining', label: 'Joining' }, { key: 'signup', label: 'Sign-up' }, { key: 'review', label: 'Review' },
+    { key: 'identity', label: 'Identity' }, { key: 'reactor', label: 'Reactor' },
+    { key: 'substation', label: 'Substation' }, { key: 'joining', label: 'Joining' },
+    { key: 'signup', label: 'Sign-up' }, { key: 'review', label: 'Review' },
   ];
   var JOIN_CHOICES = [
     { value: 'application', label: 'By request' }, { value: 'invite', label: 'Invite only' },
@@ -3586,14 +3587,81 @@
     stake: 'anyone with enough Alpha infused joins at once',
     open: 'anyone joins at once; every join shares the power',
   };
-  // Who owns the guild's power: the founder's capacity, or the guild's own
-  // stake (it outlives the founder going quiet). Inferred until chosen.
-  var POWER_CHOICES = [{ value: 'personal', label: 'You' }, { value: 'treasury', label: 'The guild' }];
+  var FOUNDER_CHOICES = [{ value: 'you', label: 'You' }, { value: 'new', label: 'A new founder' }];
+  var REACTOR_SORTS = [{ value: 'stake', label: 'Stake' }, { value: 'infusers', label: 'Infusers' }, { value: 'guilds', label: 'Guilds' }];
+  var ACCESS_WORD = { owner: 'yours', grant: 'granted', rank: 'rank grant' };
+  // Where an issue's fix lives: a stage of this card, or another card.
+  var FIX_DOOR = {
+    identity: 'Identity', reactor: 'Reactor', substation: 'Substation', joining: 'Joining', signup: 'Sign-up',
+    vault: 'Wallet', transfer: 'Guild admin',
+  };
   var STEP_MARK = { pending: '·', running: '…', done: '✓', skipped: '–', failed: '✕' };
   var alpha = function (u) { return H.fmtAlpha(Number(u) || 0); };
+  var pct = function (x) { return (Math.round((Number(x) || 0) * 1000) / 10) + '%'; };
+
+  // A reactor as one result row: the validator's name, its standing among
+  // validators, and the cut it takes of every infusion.
+  function reactorRow(r, picked, onPick) {
+    var title = H.el('span');
+    title.appendChild(document.createTextNode(r.moniker || r.id));
+    title.appendChild(H.el('span', 'sui-text-hint', ' ' + r.id));
+    var bits = [];
+    if (r.jailed) bits.push('jailed');
+    else bits.push(r.rank ? '#' + r.rank + ' · ' + pct(r.share) : 'not bonded');
+    if (!r.jailed) bits.push(H.fmtInt(r.infusers || 0) + ' infusers');
+    if (r.guilds && r.guilds.length) bits.push('guild ' + r.guilds.join(', '));
+    var row = H.resultRow({
+      icon: r.jailed ? 'sui-icon-energy-deactivated' : r.bonded ? 'sui-icon-energy' : 'sui-icon-energy-insufficient',
+      title: title, subtitle: bits.join(' · '),
+      chips: [H.el('span', 'sui-text-hint', alpha(Number(r.tokens) || 0)), H.badge(pct(r.commission))],
+      onClick: r.jailed ? null : onPick,
+    });
+    row.classList.toggle('is-selected', !!picked);
+    if (r.jailed) row.classList.add('is-disabled');
+    row.title = 'validator fee ' + pct(r.validator_fee) + (r.website ? ' · ' + r.website : '');
+    return row;
+  }
+
+  // A substation as one result row; `each` is the per-member share at the
+  // member count being planned for, flagged when it is under one member's draw.
+  function substationRow(o, p75, picked, onPick, byFounder) {
+    var none = !(o.capacity_mw > 0), low = !none && o.each_mw < p75;
+    var title = H.el('span');
+    title.appendChild(document.createTextNode(o.id + (o.name ? ' ' + o.name : '')));
+    var who = o.access === 'none' ? o.owner : ACCESS_WORD[o.access];
+    title.appendChild(H.el('span', 'sui-text-hint', ' ' + who));
+    var sub = [H.fmtWatts(o.capacity_mw), H.fmtInt(o.connections) + ' connected'];
+    if (o.here) sub.push('you are here');
+    if (o.deleting) sub.push('being deleted');
+    var each = H.el('span', none ? 'sui-text-warning' : low ? 'sui-text-warning' : '', none ? 'no power' : H.fmtWatts(o.each_mw) + ' each');
+    var usable = substationUsable(o, byFounder);
+    var why = o.access === 'none' ? 'ask ' + o.owner : 'yours only';
+    var row = H.resultRow({
+      icon: none ? 'sui-icon-no-power' : low ? 'sui-icon-energy-insufficient' : 'sui-icon-energy',
+      title: title, subtitle: sub.join(' · '),
+      chips: [usable ? each : H.el('span', 'sui-text-hint', why)],
+      onClick: usable ? onPick : null,
+    });
+    row.classList.toggle('is-selected', !!picked);
+    if (!usable) row.classList.add('is-disabled');
+    return row;
+  }
+
+  // A founder is handed only a substation the primary owns (the primary
+  // grants it); founding yourself, any you can connect players to.
+  function substationUsable(o, byFounder) {
+    if (o.deleting) return false;
+    return byFounder ? o.founder_ok === true || (o.founder_ok == null && o.access === 'owner') : o.access !== 'none';
+  }
+
+  // A row that opens a stage: the Review stage's reactor and substation.
+  function pickedRow(icon, title, subtitle, chip, onClick) {
+    return H.resultRow({ icon: icon, title: title, subtitle: subtitle, chips: chip ? [chip] : [], onClick: onClick });
+  }
 
   function foundWizard(host, ctx) {
-    var draft = FD.drafts[ctx.id] || (FD.drafts[ctx.id] = { stage: 'identity', c: { members: 5, policy: 'application', hosting: 'none' } });
+    var draft = FD.drafts[ctx.id] || (FD.drafts[ctx.id] = { stage: 'identity', sort: 'stake', c: { members: 5, policy: 'application', hosting: 'none', substation: '', founder: 'you' } });
+    if (draft.stage === 'members') draft.stage = 'substation';
     var c = draft.c;
     var pv = draft.pv || null, timer = null, seq = 0;
     host.innerHTML = '';
@@ -3601,11 +3669,12 @@
     var left = H.el('div', 'tm-found-form');
     var right = H.el('div', 'tm-found-face');
     top.appendChild(left); top.appendChild(right);
-    host.appendChild(H.navStrip(FOUND_STAGES, draft.stage, function (k) { draft.stage = k; paint(); }));
+    host.appendChild(H.navStrip(FOUND_STAGES, draft.stage, go));
     host.appendChild(top);
     var status = H.el('div', 'tm-found-status');
     host.appendChild(status);
 
+    function go(k) { draft.stage = k; paint(); paintStatus(); }
     function set(k, v) { c[k] = v; ask(); }
     function text(label, key, placeholder) {
       var i = H.textBox(c[key] || '', placeholder || '', function () {});
@@ -3620,26 +3689,63 @@
           if (mine !== seq) return;
           draft.pv = pv = r;
           paintFace(); paintStatus();
-          if (draft.stage === 'members' || draft.stage === 'review') paint();
+          if (draft.stage !== 'identity') paint(); else paintFounder();
         }).catch(function (e) { if (mine === seq) { status.innerHTML = ''; status.appendChild(H.stateBlock('error', String(e))); } });
       }, 350);
+    }
+    // Who founds, under the Founded-by choice. Its own box, so a preview can
+    // refresh it without repainting (and unfocusing) the text fields.
+    var founderBox = null;
+    function paintFounder() {
+      if (!founderBox) return;
+      founderBox.innerHTML = '';
+      var fn = pv && pv.founder && pv.founder.founder_new;
+      if (c.founder !== 'new' || !fn) return;
+      var who = H.el('div', 'tm-found-move');
+      who.appendChild(H.fact('Founder', fn.name + ' · a new replicant'));
+      who.appendChild(H.fact('Funded from your vault', alpha(fn.fund_ualpha)));
+      var pr = pv.founder.primary || {};
+      who.appendChild(H.fact('You stay', (pr.guild_id || 'no guild') + (pr.rank ? ' · #' + pr.rank : '') + (pr.substation ? ' · on ' + pr.substation : '')));
+      founderBox.appendChild(who);
     }
     function paintFace() {
       right.innerHTML = '';
       var reads = [];
       if (pv && pv.power) reads.push({ value: H.fmtWatts(pv.power.share_full_mw), icon: 'sui-icon-energy', title: 'Power each member gets when full' });
       reads.push({ value: '1', icon: 'sui-icon-players', title: 'Members' });
+      var t = pv && pv.treasury;
       right.appendChild(window.StructsGuildCard.card({
-        id: '0-?', name: c.name || null, tag: (pv && pv.choices && pv.choices.tag) || c.tag || null,
+        id: (t && t.guild_id) || '0-?', name: c.name || null, tag: (pv && pv.choices && pv.choices.tag) || c.tag || null,
         logo: c.logo || null, readings: reads,
       }, {}));
       if (c.pitch) right.appendChild(H.el('div', 'fstat-l tm-found-pitch', c.pitch));
     }
+    // Every problem, on every stage, with the door that fixes it. Older
+    // previews carry only problems/warnings.
+    function issues() {
+      if (!pv) return [];
+      if (pv.issues) return pv.issues;
+      return (pv.problems || []).map(function (t) { return { level: 'block', text: t }; })
+        .concat((pv.warnings || []).map(function (t) { return { level: 'warn', text: t }; }));
+    }
     function paintStatus() {
       status.innerHTML = '';
-      if (!pv) return;
-      var probs = pv.problems || [];
-      if (probs.length) probs.forEach(function (p) { status.appendChild(H.stateBlock('warning', String(p))); });
+      issues().forEach(function (it) {
+        var line = H.el('div', 'tm-found-issue');
+        line.appendChild(H.stateBlock(it.level === 'block' ? 'error' : 'warning', String(it.text)));
+        var door = FIX_DOOR[it.fix];
+        if (door && it.fix !== draft.stage) {
+          var a = H.el('a', 'sui-screen-btn', door);
+          a.href = 'javascript:void(0)';
+          a.addEventListener('click', function () {
+            if (it.fix === 'vault') add('wallet');
+            else if (it.fix === 'transfer') add('guildadmin', { id: pv.founder && pv.founder.owns });
+            else go(it.fix);
+          });
+          line.appendChild(a);
+        }
+        status.appendChild(line);
+      });
     }
     function paint() {
       left.innerHTML = '';
@@ -3652,22 +3758,19 @@
         // No example values: SUI draws a placeholder almost like typed text,
         // and an example name reads as one already chosen. The tag's
         // placeholder IS the tag that will be used if left blank.
+        left.appendChild(H.field('Founded by', H.selectBox(c.founder || 'you', FOUNDER_CHOICES, function (v) { set('founder', v); paintFounder(); })));
+        founderBox = H.el('div');
+        left.appendChild(founderBox);
+        paintFounder();
         left.appendChild(text('Name', 'name', ''));
         left.appendChild(text('Tag', 'tag', (pv && pv.choices && pv.choices.tag) || ''));
         left.appendChild(text('Pitch', 'pitch', ''));
         left.appendChild(text('Logo URL', 'logo', 'https://…/logo.png'));
         left.appendChild(text('Description', 'description', ''));
-      } else if (st === 'members') {
-        var choices = ((pv && pv.power && pv.power.member_choices) || [5, 10, 25, 50]).map(function (n) { return { value: String(n), label: String(n) }; });
-        left.appendChild(H.field('Ready for', H.selectBox(String(c.members), choices, function (v) { set('members', Number(v)); })));
-        var route = c.power || (pv && pv.power && pv.power.route) || 'personal';
-        left.appendChild(H.field('Power owned by', H.selectBox(route, POWER_CHOICES, function (v) { set('power', v); })));
-        if (pv && pv.power) {
-          var pw = pv.power;
-          left.appendChild(H.fact('Each member, when full', H.fmtWatts(pw.share_full_mw)));
-          left.appendChild(H.fact('Substation', H.fmtWatts(pw.allocation_mw)));
-          left.appendChild(H.fact(pw.route === 'treasury' ? 'Guild stake' : 'Stake', Number(pw.infuse_ualpha) > 0 ? alpha(pw.infuse_ualpha) + ' · recoverable' : 'none needed'));
-        }
+      } else if (st === 'reactor') {
+        paintReactors(left);
+      } else if (st === 'substation') {
+        paintSubstations(left);
       } else if (st === 'joining') {
         left.appendChild(H.field('Who may join', H.selectBox(c.policy, JOIN_CHOICES, function (v) { set('policy', v); paint(); })));
         left.appendChild(H.el('div', 'fstat-l', JOIN_STATE[c.policy] || ''));
@@ -3675,6 +3778,7 @@
           var amt = H.textBox(c.stake_ualpha ? String(Number(c.stake_ualpha) / 1e6) : '', '2.3', function () {});
           amt.addEventListener('input', function () { var n = parseFloat(amt.value); set('stake_ualpha', isFinite(n) && n > 0 ? Math.round(n * 1e6) : 0); });
           left.appendChild(H.field('Alpha infused to join', amt));
+          if (pv && pv.reactor) left.appendChild(H.fact('Lands on', pv.reactor.id + ' · ' + (pv.reactor.moniker || '')));
         }
       } else if (st === 'signup') {
         left.appendChild(H.field('New players sign up', H.selectBox(c.hosting, [
@@ -3686,62 +3790,209 @@
         paintReview(left);
       }
     }
-    function paintReview(box) {
-      if (!pv) { box.appendChild(H.stateBlock('info', 'Checking…')); return; }
+
+    function paintReactors(box) {
+      if (!pv || !pv.reactors) { box.appendChild(H.stateBlock('loading', 'Reading reactors…')); return; }
+      box.appendChild(H.field('Sort', H.selectBox(draft.sort, REACTOR_SORTS, function (v) { draft.sort = v; paint(); })));
+      var live = pv.reactors.filter(function (r) { return !r.jailed; });
+      var jailed = pv.reactors.filter(function (r) { return r.jailed; });
+      if (draft.sort === 'infusers') live.sort(function (a, b) { return (b.infusers || 0) - (a.infusers || 0); });
+      else if (draft.sort === 'guilds') live.sort(function (a, b) { return (b.guilds || []).length - (a.guilds || []).length; });
+      var picked = pv.reactor && pv.reactor.id;
+      var list = H.resultTable();
+      list.classList.add('tm-pick');
+      live.forEach(function (r) {
+        list.appendChild(reactorRow(r, r.id === picked, function () { set('reactor', r.id); }));
+      });
+      box.appendChild(list);
+      if (jailed.length) box.appendChild(H.el('div', 'fstat-l', H.fmtInt(jailed.length) + ' jailed · ' + jailed.map(function (r) { return r.id; }).join(' · ')));
+      var r = pv.reactor;
+      if (r) {
+        var d = H.el('div', 'tm-found-move');
+        cap(d, (r.moniker || r.id) + ' · ' + r.id);
+        d.appendChild(H.fact('Infusion cut', pct(r.commission) + ' · you keep ' + pct(1 - (Number(r.commission) || 0))));
+        d.appendChild(H.fact('Validator fee', pct(r.validator_fee)));
+        d.appendChild(H.fact('Bonded stake', alpha(Number(r.tokens) || 0) + (r.rank ? ' · #' + r.rank + ' · ' + pct(r.share) : '')));
+        d.appendChild(H.fact('Primary for', r.guilds && r.guilds.length ? r.guilds.join(', ') : 'no guild'));
+        if (r.owner) d.appendChild(H.fact('Owner', r.owner));
+        if (r.website) d.appendChild(H.fact('Site', r.website));
+        d.appendChild(H.fact('Stake to join', 'infusions move here'));
+        box.appendChild(d);
+      }
+    }
+
+    function paintSubstations(box) {
+      var choices = ((pv && pv.power && pv.power.member_choices) || [5, 10, 25, 50]).map(function (n) { return { value: String(n), label: String(n) }; });
+      box.appendChild(H.field('Ready for', H.selectBox(String(c.members), choices, function (v) { set('members', Number(v)); })));
+      if (!pv || !pv.substation) { box.appendChild(H.stateBlock('loading', 'Reading substations…')); return; }
+      var p75 = pv.power.p75_draw_mw, routes = pv.power.routes || {};
+      var choice = pv.substation.choice, route = pv.power.route;
+      var key = choice === 'none' ? 'none' : /^4-/.test(choice) ? choice : route === 'treasury' ? 'new-guild' : 'new-you';
+      var spare = pv.founder ? pv.founder.spare_mw : 0;
+
+      cap(box, 'Build one');
+      var build = H.resultTable();
+      build.classList.add('tm-pick');
+      [['new-you', 'personal', 'New · yours', 'from your capacity · before founding'],
+       ['new-guild', 'treasury', 'New · the guild’s', 'guild stake ' + alpha((routes.treasury || {}).stake_ualpha) + ' · after founding']].forEach(function (b) {
+        var rt = routes[b[1]] || {};
+        var row = H.resultRow({
+          icon: b[1] === 'treasury' ? 'icon-guild' : 'sui-icon-energy',
+          title: b[2], subtitle: b[3] + ' · ' + H.fmtWatts(rt.allocation_mw) + ' raw',
+          chips: [H.el('span', '', H.fmtWatts(rt.each_mw) + ' each')],
+          onClick: function () { c.substation = 'new'; set('power', b[1]); },
+        });
+        row.classList.toggle('is-selected', key === b[0]);
+        build.appendChild(row);
+      });
+      box.appendChild(build);
+
+      var byFounder = c.founder === 'new';
+      var opts = pv.substation.options || [];
+      var usable = opts.filter(function (o) { return substationUsable(o, byFounder); });
+      var locked = opts.filter(function (o) { return !substationUsable(o, byFounder); });
+      cap(box, (byFounder ? 'Yours · handed to the founder · ' : 'Yours or granted · ') + usable.length);
+      if (usable.length) {
+        var mine = H.resultTable();
+        mine.classList.add('tm-pick');
+        usable.forEach(function (o) { mine.appendChild(substationRow(o, p75, key === o.id, function () { set('substation', o.id); }, byFounder)); });
+        box.appendChild(mine);
+      } else {
+        box.appendChild(H.el('div', 'fstat-l', byFounder ? 'no substation of yours to hand over' : 'no substation you can connect players to'));
+      }
+      if (locked.length) {
+        cap(box, (byFounder ? 'Not yours · ' : 'No connect grant · ') + locked.length);
+        var shut = H.resultTable();
+        shut.classList.add('tm-pick');
+        locked.slice(0, 5).forEach(function (o) { shut.appendChild(substationRow(o, p75, false, null, byFounder)); });
+        box.appendChild(shut);
+      }
+      var none = H.resultTable();
+      none.classList.add('tm-pick');
+      var nr = H.resultRow({ icon: 'sui-icon-no-power', title: 'None · set later', subtitle: 'joiners get no connection', onClick: function () { set('substation', 'none'); } });
+      nr.classList.toggle('is-selected', key === 'none');
+      none.appendChild(nr);
+      box.appendChild(none);
+
       var f = pv.founder || {};
+      var d = H.el('div', 'tm-found-move');
+      cap(d, 'At ' + c.members + ' members');
+      d.appendChild(H.fact('Each member', H.fmtWatts(pv.power.share_full_mw)));
+      d.appendChild(H.fact('A member draws', H.fmtWatts(p75) + ' (p75)'));
+      if (route === 'personal' && !byFounder) d.appendChild(H.fact('From your capacity', H.fmtWatts(pv.power.allocation_mw) + ' of ' + H.fmtWatts(spare) + ' spare'));
+      if (route === 'personal' && byFounder) d.appendChild(H.fact('The founder stakes', alpha(pv.power.infuse_ualpha) + ' for ' + H.fmtWatts(pv.power.allocation_mw)));
+      if (byFounder) {
+        d.appendChild(H.fact('The founder', 'joins on founding → ' + (f.substation_after === 'new' ? 'the new one' : f.substation_after || 'none')));
+        d.appendChild(H.fact('You stay on', (f.primary && f.primary.substation) || 'none'));
+      } else {
+        d.appendChild(H.fact('You move', (f.substation_now || 'none') + ' → ' + (f.substation_after === 'new' ? 'the new one' : f.substation_after || 'none')));
+      }
+      box.appendChild(d);
+    }
+
+    function paintReview(box) {
+      if (!pv) { box.appendChild(H.stateBlock('loading', 'Checking…')); return; }
+      var f = pv.founder || {}, r = pv.reactor, cost = pv.cost || {}, t = pv.treasury || {}, pw = pv.power || {};
+      var picks = H.resultTable();
+      picks.classList.add('tm-pick');
+      picks.appendChild(r
+        ? pickedRow('sui-icon-energy', (r.moniker || r.id) + ' · ' + r.id, (r.rank ? '#' + r.rank + ' · ' + pct(r.share) + ' · ' : '') + H.fmtInt(r.infusers || 0) + ' infusers', H.badge(pct(r.commission)), function () { go('reactor'); })
+        : pickedRow('sui-icon-energy-deactivated', 'No reactor', 'pick one', null, function () { go('reactor'); }));
+      var sc = pv.substation || {}, so = sc.picked;
+      var subTitle = so ? so.id + ' · ' + (ACCESS_WORD[so.access] || so.owner)
+        : sc.choice === 'none' ? 'No entry substation'
+        : pw.route === 'treasury' ? 'New · the guild’s' : 'New · yours';
+      var subSub = so ? H.fmtWatts(so.capacity_mw) + ' · ' + H.fmtInt(so.connections) + ' connected'
+        : sc.choice === 'none' ? 'set later' : H.fmtWatts(pw.allocation_mw) + ' raw';
+      var low = !(pw.share_full_mw >= pw.p75_draw_mw);
+      picks.appendChild(pickedRow(low ? 'sui-icon-energy-insufficient' : 'sui-icon-energy', subTitle, subSub,
+        H.el('span', low ? 'sui-text-warning' : '', H.fmtWatts(pw.share_full_mw) + ' each at ' + c.members), function () { go('substation'); }));
+      box.appendChild(picks);
+
+      var money = H.el('div', 'tm-found-move');
+      cap(money, 'Cost');
+      money.appendChild(H.fact('Founding', alpha(cost.founding_ualpha) + ' · ' + alpha(cost.burned_ualpha) + ' burned · ' + alpha(cost.collateral_ualpha) + ' backs the guild token'));
+      if (Number(cost.infuse_ualpha) > 0) money.appendChild(H.fact(pw.route === 'treasury' ? 'Guild stake' : 'Stake', alpha(cost.infuse_ualpha) + ' · recoverable'));
+      money.appendChild(H.fact('Network fee', 'priced · paid when signing'));
+      var vault = Number(f.vault_ualpha) || 0, total = Number(cost.total_ualpha) || 0;
+      money.appendChild(H.fact('Your vault', alpha(vault) + ' → ' + alpha(Math.max(0, vault - total))));
+      box.appendChild(money);
+
+      var bank = H.el('div', 'tm-found-move');
+      cap(bank, 'Treasury of ' + (t.guild_id || 'the guild') + ' at founding');
+      bank.appendChild(H.fact('Guild vault', '1 guild.' + (t.guild_id || '?')));
+      bank.appendChild(H.fact('Collateral', alpha(t.collateral_ualpha) + ' behind 1 token'));
+      bank.appendChild(H.fact('Bank fees', '0% in · 0% out'));
+      var gp = H.el('span', Number(t.capacity_mw) > 0 ? '' : 'sui-text-warning', Number(t.capacity_mw) > 0 ? H.fmtWatts(t.capacity_mw) + ' once staked' : '0 W');
+      bank.appendChild(H.fact('Guild power', gp));
+      bank.appendChild(H.fact('Join minimum', '0 until the policy step · entry rank ' + (t.entry_rank || 101)));
+      box.appendChild(bank);
+
+      if (f.by_founder) {
+        var fn = f.founder_new || {}, pr = f.primary || {};
+        var fd = H.el('div', 'tm-found-move');
+        cap(fd, 'Founder');
+        fd.appendChild(H.fact('Who', (fn.name || 'a new replicant') + ' · owns ' + (t.guild_id || 'the guild') + ' · #1'));
+        fd.appendChild(H.fact('Funded', alpha(fn.fund_ualpha) + ' from your vault · never swept'));
+        if (fn.grant_substation) fd.appendChild(H.fact('Granted', 'connect on ' + fn.grant_substation));
+        fd.appendChild(H.fact('Lands on', f.substation_after === 'new' ? 'the new substation' : (f.substation_after || 'no substation')));
+        box.appendChild(fd);
+        var me = H.el('div', 'tm-found-move');
+        cap(me, 'You');
+        me.appendChild(H.fact('Guild', (pr.guild_id || 'none') + (pr.rank ? ' · #' + pr.rank : '') + ' · stays'));
+        me.appendChild(H.fact('Substation', (pr.substation || 'none') + ' · stays'));
+        me.appendChild(H.fact('Controls', 'every guild permission on ' + (t.guild_id || 'the guild') + ', granted by the founder'));
+        box.appendChild(me);
+      }
       var you = H.el('div', 'tm-found-move');
       cap(you, 'You');
-      var pow = H.el('span');
-      pow.appendChild(document.createTextNode(H.fmtWatts(f.share_now_mw) + ' → '));
-      pow.appendChild(H.el('span', f.online_after ? '' : 'sui-text-warning', H.fmtWatts(f.share_after_mw) + (f.online_after ? '' : ' · offline')));
-      you.appendChild(H.fact('Guild', (f.guild_id || 'none') + (f.rank ? ' · #' + f.rank : '') + ' → new guild · #1'));
-      you.appendChild(H.fact('Power share', pow));
-      you.appendChild(H.fact('You draw', H.fmtWatts(f.draw_mw)));
+      you.appendChild(H.fact('Guild', (f.guild_id || 'none') + (f.rank ? ' · #' + f.rank : '') + ' → ' + (t.guild_id || 'new guild') + ' · #1'));
+      var after = f.substation_after === 'new' ? 'the new one' : (f.substation_after || 'none');
+      you.appendChild(H.fact('Substation', (f.substation_now || 'none') + ' → ' + after));
+      var share = H.el('span');
+      share.appendChild(document.createTextNode(H.fmtWatts(f.share_now_mw) + ' → '));
+      share.appendChild(H.el('span', f.share_after_mw < f.draw_mw ? 'sui-text-warning' : '', H.fmtWatts(f.share_after_mw)));
+      you.appendChild(H.fact('Connection', share));
+      you.appendChild(H.fact('You draw', H.fmtWatts(f.draw_mw) + (f.spare_mw > 0 ? ' · ' + H.fmtWatts(f.spare_mw) + ' own spare' : '')));
+      you.appendChild(H.fact('Status', H.el('span', f.online_after ? '' : 'sui-text-warning', f.online_after ? 'online' : 'offline')));
       if (f.unpowered_steps) you.appendChild(H.fact('No substation', 'for ' + f.unpowered_steps + ' steps after founding'));
       if (f.replicants_stay) you.appendChild(H.fact('Replicants', H.fmtInt(f.replicants_stay) + ' stay in ' + (f.guild_id || 'their guild')));
-      box.appendChild(you);
-      var r = pv.reactor || {};
-      var opts = (pv.reactors || []).map(function (x) {
-        return { value: x.id, label: x.id + ' · ' + (x.moniker || '?') + ' · ' + Math.round((x.commission || 0) * 100) + '%' + (x.jailed ? ' · jailed' : x.bonded ? '' : ' · unbonded'), disabled: x.jailed };
-      });
-      box.appendChild(H.field('Reactor', H.selectBox(c.reactor || r.id || '', opts, function (v) { set('reactor', v); })));
-      var cost = pv.cost || {};
-      box.appendChild(H.fact('Founding', alpha(cost.founding_ualpha) + ' · 1 burned'));
-      var treasury = pv.power && pv.power.route === 'treasury';
-      box.appendChild(H.fact('Power owned by', treasury ? 'the guild' : 'you'));
-      if (Number(cost.infuse_ualpha) > 0) box.appendChild(H.fact(treasury ? 'Guild stake' : 'Stake', alpha(cost.infuse_ualpha) + ' · recoverable'));
-      box.appendChild(H.fact('From your vault', alpha(cost.total_ualpha) + ' of ' + alpha(f.vault_ualpha)));
+      // A founder founds instead: you are drawn above, staying put.
+      if (!f.by_founder) box.appendChild(you);
+
       var steps = H.resultTable();
       (pv.steps || []).forEach(function (s, i) { steps.appendChild(H.resultRow({ title: (i + 1) + ' · ' + s.label })); });
       box.appendChild(steps);
-      (pv.warnings || []).forEach(function (w) { box.appendChild(H.el('div', 'fstat-l sui-text-warning', String(w))); });
       var ok = pv.ok === true;
-      var go = H.el('a', 'sui-screen-btn sui-mod-primary' + (ok ? '' : ' sui-mod-disabled'), 'Found');
-      go.href = 'javascript:void(0)';
-      go.addEventListener('click', function () {
+      var btn = H.el('a', 'sui-screen-btn sui-mod-primary' + (ok ? '' : ' sui-mod-disabled'), 'Found · ' + alpha(total));
+      btn.href = 'javascript:void(0)';
+      btn.addEventListener('click', function () {
         if (!ok) return;
         // Never sign a preview older than the answers: a change made inside
         // the debounce would otherwise found the guild as it was a moment ago.
         clearTimeout(timer);
         var mine = ++seq;
-        invoke('terminal_found_plan_preview', { choices: JSON.parse(JSON.stringify(c)) }).then(function (r) {
+        invoke('terminal_found_plan_preview', { choices: JSON.parse(JSON.stringify(c)) }).then(function (res) {
           if (mine !== seq) return;
-          draft.pv = pv = r;
-          if (r.ok !== true) { paint(); paintStatus(); return; }
-          confirmFound(r);
+          draft.pv = pv = res;
+          if (res.ok !== true) { paint(); paintStatus(); return; }
+          confirmFound(res);
         }).catch(function (e) { status.innerHTML = ''; status.appendChild(H.stateBlock('error', String(e))); });
       });
       var row = H.el('div', 'tm-doors-row');
-      row.appendChild(go);
+      row.appendChild(btn);
       box.appendChild(row);
     }
     function confirmFound(fresh) {
-      var cost = fresh.cost || {};
+      var cost = fresh.cost || {}, r = fresh.reactor || {}, sc = fresh.substation || {};
       var body = H.el('div');
-      body.appendChild(H.fact('Guild', (fresh.choices.tag ? '[' + fresh.choices.tag + '] ' : '') + fresh.choices.name));
+      body.appendChild(H.fact('Guild', (fresh.choices.tag ? '[' + fresh.choices.tag + '] ' : '') + fresh.choices.name + ' · ' + ((fresh.treasury || {}).guild_id || '')));
+      var ff = fresh.founder || {};
+      body.appendChild(H.fact('Founded by', ff.by_founder ? (ff.founder_new || {}).name + ' · a new founder; you stay in ' + ((ff.primary || {}).guild_id || 'your guild') : 'you'));
+      body.appendChild(H.fact('Reactor', r.id + ' · ' + (r.moniker || '')));
+      body.appendChild(H.fact('Entry substation', sc.picked ? sc.picked.id : sc.choice === 'none' ? 'none' : 'a new one'));
       body.appendChild(H.fact('Ready for', String(fresh.choices.members) + ' members'));
-      body.appendChild(H.fact('Power owned by', fresh.power && fresh.power.route === 'treasury' ? 'the guild' : 'you'));
-      body.appendChild(H.fact('From your vault', alpha(cost.total_ualpha)));
+      body.appendChild(H.fact('From your vault', alpha(cost.total_ualpha) + ' · ' + alpha(cost.burned_ualpha) + ' burned'));
       body.appendChild(H.fact('Steps', String((fresh.steps || []).length)));
       H.confirmModal('Found ' + fresh.choices.name + '?', body, 'Found', function () {
         invoke('terminal_found_plan_start', { choices: fresh.choices }).then(function () {
@@ -3788,6 +4039,7 @@
     var line = function (title, sub, open) { rows.appendChild(H.resultRow({ title: title, subtitle: sub, onClick: open })); };
     line('Joining · ' + ((JOIN_CHOICES.filter(function (j) { return j.value === c.policy; })[0] || {}).label || c.policy), JOIN_STATE[c.policy] || '', function () { add('guildset', { id: gid }); });
     line('Power · ready for ' + (c.members || '?'), 'entry substation ' + (st.substation_id || '—') + (st.route === 'treasury' ? ' · owned by the guild' : ''), function () { add('energy'); });
+    if (st.founder_player) line('Founder · ' + st.founder_player, 'owns ' + gid + '; you hold its controls', function () { add('player', { id: st.founder_player }); });
     line('Members', 'requests, invites and the roster', function () { add('members', { id: gid }); });
     line('Invite players', 'by player id', function () { add('guildmember', { id: gid }); });
     line('Officers and grants', 'who can approve, invite and remove', function () { add('guildadmin', { id: gid }); });
