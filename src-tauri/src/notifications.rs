@@ -93,6 +93,8 @@ pub const CHANNELS: &[(&str, &str, &str)] = &[
     // Power.
     ("load", "Power overload", "Power"),
     ("capacity", "Capacity changes", "Power"),
+    // Guild — invites and requests waiting on you or your guild, and their outcomes.
+    ("guild_membership", "Guild invites and requests", "Guild"),
     // Comms — Matrix chat.
     ("comms_dm", "Direct messages", "Comms"),
     ("comms_mention", "Mentions", "Comms"),

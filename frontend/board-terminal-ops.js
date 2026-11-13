@@ -999,49 +999,232 @@
    * Liveness is the block each player last acted on, so "quiet" is a fact
    * rather than an impression. A member we have never seen act says so
    * instead of being sorted as if they were the quietest.
+   *
+   * Membership rides on the same card: the requests waiting on the guild,
+   * the invites it has out, and what was decided — each from
+   * `terminal_guild_membership` (mcp/guild_membership.rs). A `guild-membership`
+   * frame (the indexer publishes every application change on GRASS) re-reads
+   * every open card that shows one, so an answer lands without a refresh.
    */
+  var MB = { cards: {}, listening: false, tabs: {} };
+  function mbWatch(ctx, host) {
+    MB.cards[ctx.id] = host;
+    if (MB.listening || !window.StructsEvents) return;
+    MB.listening = true;
+    window.StructsEvents.listen('guild-membership', function () {
+      Object.keys(MB.cards).forEach(function (id) {
+        var h = MB.cards[id];
+        if (!h || !h.isConnected) { delete MB.cards[id]; return; }
+        T.refresh(id, true);
+      });
+    });
+  }
+  var quietText = function (q) {
+    return q == null ? 'never seen acting' : 'quiet ' + window.StructsUnits.fmtDuration(Math.round(q * 5.28));
+  };
+  var waitingText = function (iso) {
+    var t = iso ? Date.parse(iso) : NaN;
+    return isFinite(t) ? 'waiting ' + window.StructsUnits.fmtDuration(Math.max(0, Math.round((Date.now() - t) / 1000))) : null;
+  };
+  // A share before → after a join, amber when it falls below the joiner's
+  // or the median member's draw is the caller's call (`warn`).
+  var shareChange = function (now, after, warn) {
+    var node = H.el('span');
+    node.appendChild(document.createTextNode(H.fmtWatts(now)));
+    node.appendChild(H.el('span', warn ? 'sui-text-warning' : '', ' → ' + H.fmtWatts(after)));
+    return node;
+  };
+  var POLICY_TEXT = { open: 'open', stake: 'stake to join', application: 'by request', 'invite only': 'invite only', 'rank sale': 'rank sale', closed: 'closed' };
+  // One applicant: who they are, what they draw, how long they have waited.
+  function applicantRow(a, doors) {
+    // How long they have waited leads: the line truncates, and that is the
+    // part an officer acts on.
+    var sub = [];
+    var waited = waitingText(a.since);
+    if (waited) sub.push(waited);
+    sub.push('draws ' + H.fmtWatts(a.draw_mw || 0), quietText(a.quiet_blocks), a.guild_id ? 'in ' + a.guild_id : 'no guild');
+    var acts = (doors || []).map(function (d) {
+      var b = H.el('a', 'sui-screen-btn ' + (d.primary ? 'sui-mod-primary' : 'sui-mod-secondary'), d.label);
+      b.href = 'javascript:void(0)';
+      b.addEventListener('click', function (ev) { ev.stopPropagation(); d.onClick(); });
+      return b;
+    });
+    return window.StructsPlayerCard.row({
+      id: a.player_id, name: a.name || a.player_id, pfp: a.pfp,
+      presence: Board.presenceDot && Board.presenceDot(a.player_id),
+      sub: sub.join(' · '),
+    }, { onClick: function () { add('player', { id: a.player_id }); }, actions: acts });
+  }
   T.register('members', {
     label: 'Guild members', defaultWidth: 2,
-    describe: function (p) { return 'Members · ' + (p.id || '?'); },
+    describe: function (p) { return 'Members · ' + (p.id || 'your guild'); },
     params: [{ key: 'id', label: 'Guild', kind: 'id', kinds: [0], placeholder: '0-1' }],
     cadenceMs: 120000,
     render: function (host, p, ctx) {
-      if (!p.id) { host.innerHTML = ''; host.appendChild(H.stateBlock('info', 'Configure this card with a guild id.')); return; }
+      mbWatch(ctx, host);
+      // REQUESTS with no id: your own guild, learnt from the board read.
+      if (!p.id) {
+        return invoke('terminal_guild_membership', { guildId: null }).then(function (b) {
+          if (b && b.guild_id) T.setParams(ctx.id, { id: b.guild_id });
+        }).catch(function (e) { host.innerHTML = ''; host.appendChild(H.stateBlock('info', String(e))); });
+      }
       T.retitleGuild(ctx, 'Members · ', p.id);
-      return Promise.all([invoke('terminal_guild_members', { guildId: p.id }), T.standingLists()]).then(function (res) {
-        var d = res[0] || {}, lists = res[1];
+      return Promise.all([
+        invoke('terminal_guild_members', { guildId: p.id }).catch(function () { return { members: [] }; }),
+        T.standingLists(),
+        invoke('terminal_guild_membership', { guildId: p.id }).catch(function (e) { return { error: String(e) }; }),
+      ]).then(function (res) {
+        var d = res[0] || {}, lists = res[1], b = res[2] || {};
         host.innerHTML = '';
         var all = d.members || [];
+        var me = b.me || {}, pol = b.policy || {}, power = b.power;
+        var requests = b.requests || [], invites = b.invites || [], history = b.history || [];
         // 5.28s a block: a day is ~16,364 blocks.
         var DAY = 16364;
         var live = all.filter(function (m) { return m.quiet_blocks != null && m.quiet_blocks < DAY; });
-        var never = all.filter(function (m) { return m.quiet_blocks == null; });
-        host.appendChild(tiles([
+        var reads = [
           ['members', H.fmtInt(d.count || all.length)],
           [['acted', 'in the last day'], H.fmtInt(live.length), null, live.length ? 'ok' : 'muted'],
-          [['never seen', 'acting'], H.fmtInt(never.length), null, never.length ? 'muted' : 'ok'],
-        ]));
-        if (!all.length) { host.appendChild(H.stateBlock('info', 'No roster published for ' + p.id + '.')); return; }
-        if (all.length > 30) cap(host, 'showing 30 of ' + all.length + ' · quietest last');
-        var table = H.resultTable();
-        all.slice(0, 30).forEach(function (m) {
-          // The guild is this card's subject, so only standings about the
-          // PERSON belong on their row.
-          var stand = T.standingOf(lists, m.player_id, p.id, { personOnly: true });
-          table.appendChild(window.StructsPlayerCard.row({
-            id: m.player_id, name: m.name || m.player_id, pfp: m.pfp,
-            presence: Board.presenceDot && Board.presenceDot(m.player_id),
-            badge: stand ? stand.badge : null,
-            sub: m.quiet_blocks == null ? 'never seen acting'
-              : 'quiet ' + window.StructsUnits.fmtDuration(Math.round(m.quiet_blocks * 5.28)),
-            attn: stand ? stand.note : null,
-          }, {
-            onClick: function () { add('player', { id: m.player_id }); },
-            actions: Board.reachActions ? Board.reachActions({ player_id: m.player_id, player_name: m.name }) : [],
-          }));
-        });
-        host.appendChild(table);
+          ['joining', POLICY_TEXT[pol.label] || '—', null, pol.label === 'closed' ? 'muted' : null],
+        ];
+        if (power) reads.push([['share', 'each, with one more'], shareChange(power.share_now_mw, power.share_after_mw, false), 'sui-icon-energy']);
+        host.appendChild(tiles(reads));
+
+        // Requests first when some wait on you: that is the work.
+        var tab = MB.tabs[ctx.id] || (requests.length && me.can_answer ? 'requests' : 'roster');
+        var items = [
+          { key: 'roster', label: 'Roster' },
+          { key: 'requests', label: 'Requests' + (requests.length ? ' ' + requests.length : '') },
+          { key: 'invites', label: 'Invites' + (invites.length ? ' ' + invites.length : '') },
+          { key: 'history', label: 'History' },
+        ];
+        host.appendChild(H.navStrip(items, tab, function (k) { MB.tabs[ctx.id] = k; T.refresh(ctx.id, true); }));
+        var body = H.el('div', 'tm-members-tab');
+        host.appendChild(body);
+
+        if (tab === 'requests') {
+          if (pol.request === 'closed') { body.appendChild(H.stateBlock('info', 'Requests closed.')); }
+          else if (!requests.length) { body.appendChild(H.stateBlock('info', 'No requests waiting.')); }
+          var rt = H.resultTable();
+          requests.forEach(function (a) {
+            var doors = me.can_answer ? [
+              { label: 'Approve', primary: true, onClick: function () { guildDoor(p.id, 'approve', { player: a.player_id }, ctx); } },
+              { label: 'Deny', onClick: function () { guildDoor(p.id, 'deny', { player: a.player_id }, ctx); } },
+            ] : [];
+            rt.appendChild(applicantRow(a, doors));
+          });
+          if (requests.length) body.appendChild(rt);
+        } else if (tab === 'invites') {
+          if (pol.invite === 'closed') body.appendChild(H.stateBlock('info', 'Invites closed.'));
+          else if (!invites.length) body.appendChild(H.stateBlock('info', 'No invites out.'));
+          var it = H.resultTable();
+          invites.forEach(function (a) {
+            var doors = me.can_invite ? [{ label: 'Withdraw', onClick: function () { guildDoor(p.id, 'invite_revoke', { player: a.player_id }, ctx); } }] : [];
+            it.appendChild(applicantRow(a, doors));
+          });
+          if (invites.length) body.appendChild(it);
+          if (me.can_invite) body.appendChild(doorRow([{ label: 'Invite', primary: true, onClick: function () { add('guildmember', { id: p.id }); } }]));
+        } else if (tab === 'history') {
+          if (b.history_error && !history.length) body.appendChild(H.stateBlock('info', 'History unavailable: ' + b.history_error));
+          else if (!history.length) body.appendChild(H.stateBlock('info', 'Nothing decided yet.'));
+          var ht = H.resultTable();
+          history.forEach(function (h) {
+            var when = h.updated_at ? new Date(h.updated_at).toLocaleString() : '';
+            ht.appendChild(H.resultRow({
+              title: h.player_id + ' · ' + h.join_type + ' ' + h.status,
+              subtitle: [h.proposer && h.proposer !== h.player_id ? 'by ' + h.proposer : null, when].filter(Boolean).join(' · '),
+              onClick: function () { add('player', { id: h.player_id }); },
+            }));
+          });
+          if (history.length) body.appendChild(ht);
+        } else {
+          if (!all.length) { body.appendChild(H.stateBlock('info', 'No roster published for ' + p.id + '.')); }
+          else {
+            if (all.length > 30) cap(body, 'showing 30 of ' + all.length + ' · quietest last');
+            var table = H.resultTable();
+            all.slice(0, 30).forEach(function (m) {
+              // The guild is this card's subject, so only standings about the
+              // PERSON belong on their row.
+              var stand = T.standingOf(lists, m.player_id, p.id, { personOnly: true });
+              table.appendChild(window.StructsPlayerCard.row({
+                id: m.player_id, name: m.name || m.player_id, pfp: m.pfp,
+                presence: Board.presenceDot && Board.presenceDot(m.player_id),
+                badge: stand ? stand.badge : null,
+                sub: quietText(m.quiet_blocks),
+                attn: stand ? stand.note : null,
+              }, {
+                onClick: function () { add('player', { id: m.player_id }); },
+                actions: Board.reachActions ? Board.reachActions({ player_id: m.player_id, player_name: m.name }) : [],
+              }));
+            });
+            body.appendChild(table);
+          }
+          var doors = [];
+          if (me.can_set_rank || me.can_kick) doors.push({ label: 'Ranks and removals', onClick: function () { add('guildmember', { id: p.id }); } });
+          if (!me.member && b.guild_id) doors.push({ label: 'Join', primary: true, onClick: function () { add('guild', { id: p.id }); } });
+          if (doors.length) body.appendChild(doorRow(doors));
+        }
       }).catch(function (e) { fail(host, 'members', e); });
+    },
+  });
+
+  /* ── Your own applications ──────────────────────────────────────────────
+   *
+   * Invites to you and your requests, across every guild — the one place a
+   * player would look. Accepting shows what the move does to your power
+   * before it is signed (the preview carries it). An application the chain
+   * never expires is still yours to withdraw.
+   */
+  T.register('guildinbox', {
+    label: 'Guild invites', defaultWidth: 1,
+    describe: function () { return 'Guild invites'; },
+    params: [],
+    cadenceMs: 120000,
+    render: function (host, p, ctx) {
+      mbWatch(ctx, host);
+      return invoke('terminal_guild_inbox').then(function (d) {
+        host.innerHTML = '';
+        var invites = d.invites || [], requests = d.requests || [];
+        host.appendChild(tiles([
+          ['invites', H.fmtInt(invites.length), null, invites.length ? 'ok' : 'muted'],
+          ['requests', H.fmtInt(requests.length), null, requests.length ? null : 'muted'],
+          ['your guild', d.guild_id || '—'],
+        ]));
+        if (!invites.length && !requests.length) host.appendChild(H.stateBlock('info', 'No invites or requests.'));
+        var row = function (a, doors) {
+          var im = a.impact || {};
+          var sub = [];
+          if (a.join_type === 'invite' && a.proposer) sub.push('from ' + a.proposer);
+          var waited = waitingText(a.since);
+          if (waited) sub.push(waited);
+          var line = H.el('div', 'tm-inbox-row');
+          var tbl = H.resultTable();
+          tbl.appendChild(H.resultRow({
+            title: (a.guild_name ? a.guild_name + ' · ' : '') + a.guild_id,
+            subtitle: sub.join(' · '),
+            onClick: function () { add('guild', { id: a.guild_id }); },
+          }));
+          line.appendChild(tbl);
+          var pw = H.el('div', 'fstat-l');
+          pw.appendChild(document.createTextNode('power '));
+          pw.appendChild(shareChange(im.share_now_mw || 0, im.share_after_mw || 0, im.online_after === false));
+          if (im.online_after === false) pw.appendChild(H.el('span', 'sui-text-warning', ' · offline after joining'));
+          line.appendChild(pw);
+          line.appendChild(doorRow(doors));
+          return line;
+        };
+        if (invites.length) cap(host, 'Invites to you');
+        invites.forEach(function (a) {
+          host.appendChild(row(a, [
+            { label: 'Accept', primary: true, onClick: function () { guildDoor(a.guild_id, 'accept_invite', {}, ctx); } },
+            { label: 'Decline', onClick: function () { guildDoor(a.guild_id, 'decline_invite', {}, ctx); } },
+          ]));
+        });
+        if (requests.length) cap(host, 'Your requests');
+        requests.forEach(function (a) {
+          host.appendChild(row(a, [{ label: 'Withdraw', onClick: function () { guildDoor(a.guild_id, 'request_revoke', {}, ctx); } }]));
+        });
+      }).catch(function (e) { fail(host, 'guild invites', e); });
     },
   });
 
@@ -3366,55 +3549,289 @@
     },
   });
 
-  // ── Found a guild (v0.22 paid founding) ───────────────────────────────
-  // Two Alpha from your vault — one burned, one the new token's collateral —
-  // on a reactor and an entry substation that exist. Previewed as you type;
-  // the writer re-runs the preview before it signs.
-  T.register('found', {
-    label: 'Found a guild', cadenceMs: 0,
-    describe: function () { return 'Found a guild'; },
-    render: function (host) {
-      host.innerHTML = '';
-      var preview = null;
-      host.appendChild(ticket({
-        cta: 'Found',
-        doneText: 'signed',
-        fields: [
-          { key: 'reactor', label: 'Reactor', kind: 'text', placeholder: '3-1' },
-          { key: 'sub', label: 'Entry substation', kind: 'text', placeholder: '4-1' },
-          { key: 'endpoint', label: 'Endpoint', kind: 'text', inputmode: 'url', placeholder: 'https://…/guild.json' },
-        ],
-        preview: function (v) {
-          preview = null;
-          if (!v.reactor || !v.sub || !v.endpoint) return null;
-          return invoke('terminal_found_guild_preview', { reactorId: v.reactor, endpoint: v.endpoint, entrySubstationId: v.sub })
-            .then(function (r) { return r && r.ok === false ? { ok: false, refusal: (r.problems || []).join('; ') } : r; });
-        },
-        facts: function (r) {
-          preview = r;
-          return [
-            ['cost', H.fmtAlpha(Number(r.cost_ualpha) || 0), 'sui-icon-alpha-matter', 'live'],
-            ['burned', H.fmtAlpha(Number(r.burned_ualpha) || 0), null, 'muted'],
-            ['in your vault', H.fmtAlpha(Number(r.vault_ualpha) || 0), null, 'muted'],
-          ];
-        },
-        confirm: function (v) {
-          if (!preview) return null;
-          return {
-            title: 'Found this guild?', cta: 'Found',
-            rows: [
-              ['Reactor', v.reactor],
-              ['Entry substation', v.sub],
-              ['Endpoint', v.endpoint],
-              ['Cost', H.fmtAlpha(Number(preview.cost_ualpha) || 0) + ' from your vault'],
-            ],
-          };
-        },
-        submit: function (v) {
-          if (!preview) return Promise.reject(new Error('fill in all three and wait for the preview'));
-          return invoke('terminal_found_guild', { reactorId: v.reactor, endpoint: v.endpoint, entrySubstationId: v.sub });
-        },
+  // ── Found a guild: the staged plan ─────────────────────────────────────
+  //
+  // Six answers, everything else inferred (proposals/guild-founding-
+  // experience.md §4): name, tag, members to be ready for, who may join,
+  // where new players sign up, one line of pitch. The Review stage shows
+  // what the chain will check, what founding does to YOU (power, rank,
+  // replicants left behind), the power plan in members rather than mW, the
+  // cost, and the steps. Found runs the steps in the background
+  // (mcp/guild_founding.rs); each is saved as it lands, so a closed window
+  // resumes. Once founded the card becomes the guild's setup checklist.
+  var FD = { cards: {}, drafts: {}, listening: false };
+  function fdWatch(ctx, host) {
+    FD.cards[ctx.id] = host;
+    if (FD.listening || !window.StructsEvents) return;
+    FD.listening = true;
+    window.StructsEvents.listen('guild-founding', function () {
+      Object.keys(FD.cards).forEach(function (id) {
+        var h = FD.cards[id];
+        if (!h || !h.isConnected) { delete FD.cards[id]; return; }
+        T.refresh(id, true);
+      });
+    });
+  }
+  var FOUND_STAGES = [
+    { key: 'identity', label: 'Identity' }, { key: 'members', label: 'Members' },
+    { key: 'joining', label: 'Joining' }, { key: 'signup', label: 'Sign-up' }, { key: 'review', label: 'Review' },
+  ];
+  var JOIN_CHOICES = [
+    { value: 'application', label: 'By request' }, { value: 'invite', label: 'Invite only' },
+    { value: 'stake', label: 'Stake to join' }, { value: 'open', label: 'Open' },
+  ];
+  var JOIN_STATE = {
+    application: 'players ask; you or an officer approve',
+    invite: 'you add players by name',
+    stake: 'anyone with enough Alpha infused joins at once',
+    open: 'anyone joins at once; every join shares the power',
+  };
+  var STEP_MARK = { pending: '·', running: '…', done: '✓', skipped: '–', failed: '✕' };
+  var alpha = function (u) { return H.fmtAlpha(Number(u) || 0); };
+
+  function foundWizard(host, ctx) {
+    var draft = FD.drafts[ctx.id] || (FD.drafts[ctx.id] = { stage: 'identity', c: { members: 5, policy: 'application', hosting: 'none' } });
+    var c = draft.c;
+    var pv = draft.pv || null, timer = null, seq = 0;
+    host.innerHTML = '';
+    var top = H.el('div', 'tm-found');
+    var left = H.el('div', 'tm-found-form');
+    var right = H.el('div', 'tm-found-face');
+    top.appendChild(left); top.appendChild(right);
+    host.appendChild(H.navStrip(FOUND_STAGES, draft.stage, function (k) { draft.stage = k; paint(); }));
+    host.appendChild(top);
+    var status = H.el('div', 'tm-found-status');
+    host.appendChild(status);
+
+    function set(k, v) { c[k] = v; ask(); }
+    function text(label, key, placeholder) {
+      var i = H.textBox(c[key] || '', placeholder || '', function () {});
+      i.addEventListener('input', function () { set(key, i.value); });
+      return H.field(label, i);
+    }
+    function ask() {
+      clearTimeout(timer);
+      timer = setTimeout(function () {
+        var mine = ++seq;
+        invoke('terminal_found_plan_preview', { choices: JSON.parse(JSON.stringify(c)) }).then(function (r) {
+          if (mine !== seq) return;
+          draft.pv = pv = r;
+          paintFace(); paintStatus();
+          if (draft.stage === 'members' || draft.stage === 'review') paint();
+        }).catch(function (e) { if (mine === seq) { status.innerHTML = ''; status.appendChild(H.stateBlock('error', String(e))); } });
+      }, 350);
+    }
+    function paintFace() {
+      right.innerHTML = '';
+      var reads = [];
+      if (pv && pv.power) reads.push({ value: H.fmtWatts(pv.power.share_full_mw), icon: 'sui-icon-energy', title: 'Power each member gets when full' });
+      reads.push({ value: '1', icon: 'sui-icon-players', title: 'Members' });
+      right.appendChild(window.StructsGuildCard.card({
+        id: '0-?', name: c.name || null, tag: (pv && pv.choices && pv.choices.tag) || c.tag || null,
+        logo: c.logo || null, readings: reads,
+      }, {}));
+      if (c.pitch) right.appendChild(H.el('div', 'fstat-l tm-found-pitch', c.pitch));
+    }
+    function paintStatus() {
+      status.innerHTML = '';
+      if (!pv) return;
+      var probs = pv.problems || [];
+      if (probs.length) probs.forEach(function (p) { status.appendChild(H.stateBlock('warning', String(p))); });
+    }
+    function paint() {
+      left.innerHTML = '';
+      // The strip's active tab follows the stage.
+      [].forEach.call(host.querySelectorAll('.sui-screen-nav-item'), function (a, i) {
+        a.classList.toggle('sui-mod-active', FOUND_STAGES[i] && FOUND_STAGES[i].key === draft.stage);
+      });
+      var st = draft.stage;
+      if (st === 'identity') {
+        // No example values: SUI draws a placeholder almost like typed text,
+        // and an example name reads as one already chosen. The tag's
+        // placeholder IS the tag that will be used if left blank.
+        left.appendChild(text('Name', 'name', ''));
+        left.appendChild(text('Tag', 'tag', (pv && pv.choices && pv.choices.tag) || ''));
+        left.appendChild(text('Pitch', 'pitch', ''));
+        left.appendChild(text('Logo URL', 'logo', 'https://…/logo.png'));
+        left.appendChild(text('Description', 'description', ''));
+      } else if (st === 'members') {
+        var choices = ((pv && pv.power && pv.power.member_choices) || [5, 10, 25, 50]).map(function (n) { return { value: String(n), label: String(n) }; });
+        left.appendChild(H.field('Ready for', H.selectBox(String(c.members), choices, function (v) { set('members', Number(v)); })));
+        if (pv && pv.power) {
+          var pw = pv.power;
+          left.appendChild(H.fact('Each member, when full', H.fmtWatts(pw.share_full_mw)));
+          left.appendChild(H.fact('Substation', H.fmtWatts(pw.allocation_mw)));
+          left.appendChild(H.fact('Stake', Number(pw.infuse_ualpha) > 0 ? alpha(pw.infuse_ualpha) + ' · recoverable' : 'none needed'));
+        }
+      } else if (st === 'joining') {
+        left.appendChild(H.field('Who may join', H.selectBox(c.policy, JOIN_CHOICES, function (v) { set('policy', v); paint(); })));
+        left.appendChild(H.el('div', 'fstat-l', JOIN_STATE[c.policy] || ''));
+        if (c.policy === 'stake') {
+          var amt = H.textBox(c.stake_ualpha ? String(Number(c.stake_ualpha) / 1e6) : '', '2.3', function () {});
+          amt.addEventListener('input', function () { var n = parseFloat(amt.value); set('stake_ualpha', isFinite(n) && n > 0 ? Math.round(n * 1e6) : 0); });
+          left.appendChild(H.field('Alpha infused to join', amt));
+        }
+      } else if (st === 'signup') {
+        left.appendChild(H.field('New players sign up', H.selectBox(c.hosting, [
+          { value: 'none', label: 'Not yet' }, { value: 'self', label: 'My own server' },
+        ], function (v) { set('hosting', v); paint(); })));
+        if (c.hosting === 'self') left.appendChild(text('guild.json URL', 'endpoint', 'https://my-guild.example/guild.json'));
+        else left.appendChild(H.el('div', 'fstat-l', 'existing players join from their own client; set a URL any time'));
+      } else {
+        paintReview(left);
+      }
+    }
+    function paintReview(box) {
+      if (!pv) { box.appendChild(H.stateBlock('info', 'Checking…')); return; }
+      var f = pv.founder || {};
+      var you = H.el('div', 'tm-found-move');
+      cap(you, 'You');
+      var pow = H.el('span');
+      pow.appendChild(document.createTextNode(H.fmtWatts(f.share_now_mw) + ' → '));
+      pow.appendChild(H.el('span', f.online_after ? '' : 'sui-text-warning', H.fmtWatts(f.share_after_mw) + (f.online_after ? '' : ' · offline')));
+      you.appendChild(H.fact('Guild', (f.guild_id || 'none') + (f.rank ? ' · #' + f.rank : '') + ' → new guild · #1'));
+      you.appendChild(H.fact('Power share', pow));
+      you.appendChild(H.fact('You draw', H.fmtWatts(f.draw_mw)));
+      if (f.replicants_stay) you.appendChild(H.fact('Replicants', H.fmtInt(f.replicants_stay) + ' stay in ' + (f.guild_id || 'their guild')));
+      box.appendChild(you);
+      var r = pv.reactor || {};
+      var opts = (pv.reactors || []).map(function (x) {
+        return { value: x.id, label: x.id + ' · ' + (x.moniker || '?') + ' · ' + Math.round((x.commission || 0) * 100) + '%' + (x.jailed ? ' · jailed' : x.bonded ? '' : ' · unbonded'), disabled: x.jailed };
+      });
+      box.appendChild(H.field('Reactor', H.selectBox(c.reactor || r.id || '', opts, function (v) { set('reactor', v); })));
+      var cost = pv.cost || {};
+      box.appendChild(H.fact('Founding', alpha(cost.founding_ualpha) + ' · 1 burned'));
+      if (Number(cost.infuse_ualpha) > 0) box.appendChild(H.fact('Stake', alpha(cost.infuse_ualpha) + ' · recoverable'));
+      box.appendChild(H.fact('From your vault', alpha(cost.total_ualpha) + ' of ' + alpha(f.vault_ualpha)));
+      var steps = H.resultTable();
+      (pv.steps || []).forEach(function (s, i) { steps.appendChild(H.resultRow({ title: (i + 1) + ' · ' + s.label })); });
+      box.appendChild(steps);
+      (pv.warnings || []).forEach(function (w) { box.appendChild(H.el('div', 'fstat-l sui-text-warning', String(w))); });
+      var ok = pv.ok === true;
+      var go = H.el('a', 'sui-screen-btn sui-mod-primary' + (ok ? '' : ' sui-mod-disabled'), 'Found');
+      go.href = 'javascript:void(0)';
+      go.addEventListener('click', function () {
+        if (!ok) return;
+        // Never sign a preview older than the answers: a change made inside
+        // the debounce would otherwise found the guild as it was a moment ago.
+        clearTimeout(timer);
+        var mine = ++seq;
+        invoke('terminal_found_plan_preview', { choices: JSON.parse(JSON.stringify(c)) }).then(function (r) {
+          if (mine !== seq) return;
+          draft.pv = pv = r;
+          if (r.ok !== true) { paint(); paintStatus(); return; }
+          confirmFound(r);
+        }).catch(function (e) { status.innerHTML = ''; status.appendChild(H.stateBlock('error', String(e))); });
+      });
+      var row = H.el('div', 'tm-doors-row');
+      row.appendChild(go);
+      box.appendChild(row);
+    }
+    function confirmFound(fresh) {
+      var cost = fresh.cost || {};
+      var body = H.el('div');
+      body.appendChild(H.fact('Guild', (fresh.choices.tag ? '[' + fresh.choices.tag + '] ' : '') + fresh.choices.name));
+      body.appendChild(H.fact('Ready for', String(fresh.choices.members) + ' members'));
+      body.appendChild(H.fact('From your vault', alpha(cost.total_ualpha)));
+      body.appendChild(H.fact('Steps', String((fresh.steps || []).length)));
+      H.confirmModal('Found ' + fresh.choices.name + '?', body, 'Found', function () {
+        invoke('terminal_found_plan_start', { choices: fresh.choices }).then(function () {
+          delete FD.drafts[ctx.id];
+          T.refresh(ctx.id, true);
+        }).catch(function (e) { status.innerHTML = ''; status.appendChild(H.stateBlock('error', String(e))); });
+      });
+    }
+    paint(); paintFace(); paintStatus();
+    if (!pv) ask();
+  }
+
+  function foundProgress(host, ctx, d) {
+    var st = d.state || {};
+    host.innerHTML = '';
+    host.appendChild(tiles([
+      ['guild', st.guild_id || '—', null, st.guild_id ? 'ok' : 'muted'],
+      ['name', (st.choices && st.choices.name) || '—'],
+      ['state', d.running ? 'founding' : 'paused', null, d.running ? 'live' : 'muted'],
+    ]));
+    var t = H.resultTable();
+    (st.steps || []).forEach(function (s) {
+      t.appendChild(H.resultRow({
+        title: (STEP_MARK[s.status] || '·') + ' ' + s.label,
+        subtitle: s.status === 'failed' ? s.error : (s.tx ? 'tx ' + s.tx : s.status),
       }));
+    });
+    host.appendChild(t);
+    if (!d.running) {
+      host.appendChild(doorRow([{ label: 'Resume', primary: true, onClick: function () {
+        invoke('terminal_found_plan_start', {}).then(function () { T.refresh(ctx.id, true); })
+          .catch(function (e) { Board.stamp && Board.stamp('resume: ' + e); });
+      } }]));
+    }
+  }
+
+  function foundSetup(host, ctx, d) {
+    var st = d.state || {}, c = st.choices || {}, gid = st.guild_id;
+    host.innerHTML = '';
+    host.appendChild(window.StructsGuildCard.card({ id: gid, name: c.name, tag: c.tag, logo: c.logo || null, readings: [] }, {
+      onClick: function () { add('guild', { id: gid }); },
+    }));
+    var rows = H.resultTable();
+    var line = function (title, sub, open) { rows.appendChild(H.resultRow({ title: title, subtitle: sub, onClick: open })); };
+    line('Joining · ' + ((JOIN_CHOICES.filter(function (j) { return j.value === c.policy; })[0] || {}).label || c.policy), JOIN_STATE[c.policy] || '', function () { add('guildset', { id: gid }); });
+    line('Power · ready for ' + (c.members || '?'), 'entry substation ' + (st.substation_id || '—'), function () { add('energy'); });
+    line('Members', 'requests, invites and the roster', function () { add('members', { id: gid }); });
+    line('Invite players', 'by player id', function () { add('guildmember', { id: gid }); });
+    line('Officers and grants', 'who can approve, invite and remove', function () { add('guildadmin', { id: gid }); });
+    host.appendChild(rows);
+
+    cap(host, 'Sign-up');
+    var signup = H.el('div', 'tm-found-signup');
+    host.appendChild(signup);
+    if (c.hosting === 'self' && c.endpoint) {
+      signup.appendChild(H.fact('guild.json', c.endpoint));
+      var api = H.textBox('', 'https://…/api/', function () {}), grass = H.textBox('', 'wss://…/grass', function () {});
+      signup.appendChild(H.field('Guild API', api));
+      signup.appendChild(H.field('GRASS websocket', grass));
+      var out = H.el('pre', 'tm-found-json');
+      var note = H.el('div', 'fstat-l');
+      signup.appendChild(doorRow([
+        { label: 'Write guild.json', primary: true, onClick: function () {
+          invoke('terminal_found_guildjson', { guildId: gid, services: { guild_api: api.value.trim(), grass_nats_websocket: grass.value.trim() } }).then(function (r) {
+            out.textContent = r.text;
+            note.textContent = r.valid ? 'valid · copied' : 'not yet valid: ' + (r.why || '');
+            note.className = 'fstat-l' + (r.valid ? '' : ' sui-text-warning');
+            if (navigator.clipboard && r.text) navigator.clipboard.writeText(r.text).catch(function () {});
+          });
+        } },
+        { label: 'Check the URL', onClick: function () {
+          invoke('terminal_found_check_endpoint', { guildId: gid, endpoint: c.endpoint }).then(function (r) {
+            note.textContent = r.ok ? 'live · ' + (r.name || gid) + ' · Guild API and GRASS found' : 'not live: ' + (r.why || '');
+            note.className = 'fstat-l' + (r.ok ? '' : ' sui-text-warning');
+          });
+        } },
+      ]));
+      signup.appendChild(note);
+      signup.appendChild(out);
+    } else {
+      signup.appendChild(H.el('div', 'fstat-l', 'no sign-up site'));
+      signup.appendChild(doorRow([{ label: 'Set a guild.json URL', onClick: function () { add('guildset', { id: gid }); } }]));
+    }
+  }
+
+  T.register('found', {
+    label: 'Found a guild', defaultWidth: 2, cadenceMs: 0,
+    describe: function () { return 'Found a guild'; },
+    render: function (host, p, ctx) {
+      fdWatch(ctx, host);
+      return invoke('terminal_found_plan_get').then(function (d) {
+        var st = d && d.state;
+        var steps = (st && st.steps) || [];
+        var started = steps.some(function (s) { return s.status !== 'pending'; });
+        var finished = steps.length && steps.every(function (s) { return s.status === 'done' || s.status === 'skipped'; });
+        if (st && finished) return foundSetup(host, ctx, d);
+        if (st && (started || d.running)) return foundProgress(host, ctx, d);
+        return foundWizard(host, ctx);
+      }).catch(function (e) { fail(host, 'found', e); });
     },
   });
 
@@ -3432,6 +3849,16 @@
     var body = H.el('div');
     body.appendChild(H.fact('Guild', pv.guild_id || pv.provider_id || ''));
     body.appendChild(H.fact('Change', pv.summary));
+    // A join moves power: the joiner's own share, or every member's.
+    var im = pv.impact;
+    if (im && im.share_now_mw != null) {
+      var after = H.el('span');
+      after.appendChild(document.createTextNode(H.fmtWatts(im.share_now_mw) + ' → '));
+      var low = im.online_after === false;
+      after.appendChild(H.el('span', low ? 'sui-text-warning' : '', H.fmtWatts(im.share_after_mw) + (low ? ' · offline' : '')));
+      body.appendChild(H.fact(im.draw_mw != null ? 'Your share' : 'Share each', after));
+      if (im.draw_mw != null) body.appendChild(H.fact('You draw', H.fmtWatts(im.draw_mw)));
+    }
     (pv.warnings || []).forEach(function (w) { body.appendChild(H.stateBlock('warning', String(w))); });
     return body;
   }
@@ -3446,6 +3873,8 @@
       });
     }).catch(function (e) { Board.stamp && Board.stamp(action + ': ' + e); });
   }
+  // The guild card (board-terminal.js) offers the same one-press doors.
+  T.guildDoor = guildDoor;
   var ADMIN_LABELS = { 'names and pictures': 'UGC', 'token burn': 'burn', 'token mint': 'mint', 'entry substation': 'entry sub', 'join rules': 'join rules' };
   var shortBits = function (labels) {
     return (labels || []).filter(function (l) { return !/^hash /.test(l); }).map(function (l) { return ADMIN_LABELS[l] || l; }).join(' · ') || '—';
@@ -3522,7 +3951,8 @@
           doors.push({ label: 'Members', primary: true, onClick: function () { add('guildmember', { id: d.guild_id }); } });
           doors.push({ label: 'Settings', onClick: function () { add('guildset', { id: d.guild_id }); } });
         } else {
-          doors.push({ label: 'Ask to join', primary: true, onClick: function () { guildDoor(d.guild_id, 'request', {}, ctx); } });
+          // The guild card holds the way in, as the guild's policy offers it.
+          doors.push({ label: 'Join', primary: true, onClick: function () { add('guild', { id: d.guild_id }); } });
         }
         doors.push({ label: 'Buy a rank', onClick: function () { add('rank', { id: d.guild_id }); } });
         host.appendChild(doorRow(doors));

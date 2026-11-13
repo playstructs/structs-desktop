@@ -40,6 +40,8 @@ pub mod grass_native;
 pub mod guild_api;
 pub mod guild_economy;
 pub mod guild_admin;
+pub mod guild_membership;
+pub mod guild_founding;
 pub mod providers;
 pub mod guild_auth;
 pub mod guild_power;

@@ -478,6 +478,55 @@ cat > "$FIX" <<'EOF'
         founder: '1-194', cost_ualpha: '2000000', burned_ualpha: '1000000', collateral_ualpha: '1000000', vault_ualpha: '136101019988' };
     },
     terminal_found_guild: { ok: true, tx: 'FOUNDTX' },
+    /* The staged founding plan (mcp/guild_founding.rs). Tests pick the saved
+     * state with window.__HARNESS_FOUND__ = 'running' | 'failed' | 'done'. */
+    terminal_found_plan_get: function () {
+      var mode = window.__HARNESS_FOUND__;
+      if (!mode) return { state: null, running: false };
+      var steps = ['allocation', 'substation', 'found', 'policy', 'name'].map(function (id, i) {
+        var status = mode === 'done' ? 'done' : i < 2 ? 'done' : i === 2 ? (mode === 'failed' ? 'failed' : 'running') : 'pending';
+        return { id: id, label: { allocation: 'Route power', substation: 'Build the entry substation', found: 'Found the guild', policy: 'Set who may join', name: 'Name the guild' }[id],
+          status: status, tx: status === 'done' ? 'ABCDEF' + i : '', error: status === 'failed' ? 'the guild was signed but has not appeared yet; resume in a minute' : '' };
+      });
+      return { running: mode === 'running', state: { founder: '1-194', guild_id: mode === 'done' ? '0-6' : '', substation_id: '4-20',
+        choices: { name: 'Iron Tide', tag: 'TIDE', members: 5, policy: 'application', hosting: mode === 'done' ? 'self' : 'none', endpoint: 'https://tide.example/guild.json', pitch: 'Five friends, one sector.' },
+        steps: steps } };
+    },
+    terminal_found_plan_preview: function (args) {
+      var c = Object.assign({ members: 5, policy: 'application', hosting: 'none' }, (args && args.choices) || {});
+      var problems = [];
+      if (!c.name) problems.push('name the guild');
+      else if (c.name.length < 3) problems.push('name: 3-20 letters, digits, hyphens, underscores, apostrophes or spaces');
+      if (c.name === 'SN Corp') problems.push("the name 'SN Corp' is taken by 0-5");
+      var tag = c.tag || (c.name ? c.name.split(' ').map(function (w) { return w[0]; }).join('').toUpperCase() : '');
+      var alloc = Math.ceil(c.members * 2180000 * 1.5 / 0.9);
+      var infuse = Math.ceil(alloc / 0.96 * 1.01 / 10000) * 10000;
+      return { ok: !problems.length, problems: problems, warnings: c.hosting === 'self' ? [] : ['no sign-up site: new players can only join from a client that already plays'],
+        choices: Object.assign({}, c, { tag: tag }),
+        founder: { player_id: '1-194', guild_id: '0-1', rank: 50, owns: null, vault_ualpha: '40000000', replicants_stay: 42, draw_mw: 3100000, capacity_mw: 0,
+          substation_now: '4-1', share_now_mw: 7400000, moves: true, share_after_mw: Math.floor(alloc * 0.9), online_after: true },
+        reactor: { id: '3-15', moniker: 'sn-corp', jailed: false, bonded: true, commission: 0.04, guilds: ['0-5'] },
+        reactors: [{ id: '3-15', moniker: 'sn-corp', jailed: false, bonded: true, commission: 0.04, guilds: ['0-5'] },
+                   { id: '3-10', moniker: 'kilgore-crabla', jailed: true, bonded: false, commission: 0.04, guilds: [] }],
+        power: { members: c.members, member_choices: [5, 10, 25, 50], p75_draw_mw: 2180000, headroom: 1.5, allocation_mw: alloc,
+          share_alone_mw: Math.floor(alloc * 0.9), share_full_mw: Math.floor(alloc * 0.9) / c.members, infuse_ualpha: String(infuse) },
+        cost: { founding_ualpha: '2000000', burned_ualpha: '1000000', infuse_ualpha: String(infuse), total_ualpha: String(2000000 + infuse) },
+        steps: [{ id: 'infuse', label: 'Stake Alpha for power' }, { id: 'allocation', label: 'Route power' }, { id: 'substation', label: 'Build the entry substation' },
+                { id: 'found', label: 'Found the guild' }, { id: 'policy', label: 'Set who may join' }, { id: 'name', label: 'Name the guild' }],
+        guild_json: {} };
+    },
+    terminal_found_plan_start: function (args) {
+      window.__HARNESS_FOUND__ = 'running';
+      return { running: true, state: { choices: (args && args.choices) || null } };
+    },
+    terminal_found_plan_abandon: { ok: true },
+    terminal_found_guildjson: function (args) {
+      var sv = (args && args.services) || {};
+      var valid = /^https:\/\//.test(sv.guild_api || '') && /^wss:\/\//.test(sv.grass_nats_websocket || '');
+      var doc = { guild: { schema_version: 1, id: args.guildId, name: 'Iron Tide', tag: 'TIDE', services: sv } };
+      return { guild_id: args.guildId, doc: doc, text: JSON.stringify(doc, null, 2), valid: valid, why: valid ? null : 'services.guild_api: not a valid URL' };
+    },
+    terminal_found_check_endpoint: { ok: false, why: 'https://tide.example/guild.json: HTTP 404' },
     // v0.22 guild management: 1-194 is a member of 0-1 at #50 with no admin.
     terminal_guild_admin_overview: function (args) {
       return { ok: true, guild_id: args.guildId || '0-1', name: 'SN Corp', owner: '1-1', endpoint: 'https://g.example/guild.json',
@@ -502,6 +551,49 @@ cat > "$FIX" <<'EOF'
         guild_id: args.guildId || '0-1', action: a, summary: summary, message: 'MsgGuild', payload: {} };
     },
     terminal_guild_admin: { ok: true, tx: 'GUILDTX' },
+    /* Membership (mcp/guild_membership.rs). 1-194 is a plain member of 0-1
+     * (open, requests closed) and owns 0-6, a guild taking requests, with one
+     * waiting, one invite out and one decision made. */
+    terminal_guild_membership: function (args) {
+      var g = (args && args.guildId) || '0-1';
+      var mine = g === '0-6';
+      return {
+        guild_id: g, owner: mine ? '1-194' : '1-1',
+        policy: { label: mine ? 'application' : 'open', minimum: mine ? '18446744073709551615' : '0', direct_open: !mine,
+          request: mine ? 'permissioned' : 'closed', invite: mine ? 'permissioned' : 'closed', rank_join: false, entry_rank: 101, entry_substation: '4-20' },
+        me: { player_id: '1-194', guild_id: g, member: true, owner: mine, rank: mine ? 1 : 50,
+          can_invite: mine, can_answer: mine, can_kick: mine, can_set_rank: mine },
+        power: { substation: '4-20', connections: 4, share_now_mw: 4150000, share_after_mw: 3320000, admitting: 1 },
+        requests: mine ? [{ player_id: '1-42', name: 'NOVA', pfp: null, guild_id: '0-1', rank: '101', draw_mw: 2180000, quiet_blocks: 300,
+          join_type: 'request', proposer: '1-42', substation_id: '', since: new Date(Date.now() - 3 * 3600e3).toISOString() }] : [],
+        invites: mine ? [{ player_id: '1-77', name: 'ORBIT', pfp: null, guild_id: '0-5', draw_mw: 900000, quiet_blocks: null,
+          join_type: 'invite', proposer: '1-194', substation_id: '', since: null }] : [],
+        history: mine ? [{ guild_id: '0-6', player_id: '1-50', join_type: 'request', status: 'approved', proposer: '1-50', updated_at: '2026-11-12T10:00:00Z' }] : [],
+        history_error: null,
+      };
+    },
+    /* A guild's way in for 1-194: 0-9 takes requests and would leave them
+     * offline; 0-2 is open; 0-3 is blocked because they own a guild. */
+    terminal_guild_door: function (args) {
+      var g = args && args.guildId;
+      var base = { guild_id: g, me: { member: false }, pending_elsewhere: 0,
+        impact: { draw_mw: 2180000, capacity_mw: 0, share_now_mw: 7400000, share_after_mw: 1040000, online_now: true, online_after: false } };
+      if (g === '0-9') return Object.assign(base, { policy: { label: 'application' },
+        doors: [{ action: 'request', label: 'Ask to join', primary: true, enabled: true, why: null }] });
+      if (g === '0-2') return Object.assign(base, { policy: { label: 'open' },
+        doors: [{ action: 'join', label: 'Join', primary: true, enabled: true, why: null }] });
+      if (g === '0-3') return Object.assign(base, { policy: { label: 'open' },
+        doors: [{ action: 'join', label: 'Join', primary: true, enabled: false, why: 'you own 0-6; hand it over first' }] });
+      return { guild_id: g, me: { member: true }, policy: { label: 'open' }, doors: [], impact: null };
+    },
+    terminal_guild_inbox: {
+      player_id: '1-194', guild_id: '0-1',
+      invites: [{ guild_id: '0-9', guild_name: 'Iron Tide', join_type: 'invite', proposer: '1-61', substation_id: '',
+        since: '2026-11-12T08:00:00Z', impact: { draw_mw: 2180000, share_now_mw: 7400000, share_after_mw: 3300000, online_now: true, online_after: true } }],
+      requests: [{ guild_id: '0-2', guild_name: '', join_type: 'request', proposer: '1-194', substation_id: '',
+        since: null, impact: { draw_mw: 2180000, share_now_mw: 7400000, share_after_mw: 1040000, online_now: true, online_after: false } }],
+      history: [], history_error: null,
+    },
     // v0.22 providers: 10-5 open with one buyer and earnings waiting; 10-6 closed and idle.
     terminal_providers: { ok: true, owner: '1-194', height: 3420000, providers: [
       { id: '10-5', owner: '1-194', guild_owned: false, substation_id: '4-15', substation_closing: false, rate: { denom: 'ualpha', amount: '2' }, access: 'openMarket',

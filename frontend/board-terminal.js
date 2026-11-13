@@ -103,7 +103,7 @@
    * fails on it: a new card that nobody filed is a card nobody will find. */
   var CARD_GROUPS = [
     ['Command', ['help', 'next', 'alerts', 'watchlist', 'feed']],
-    ['Explore', ['player', 'record', 'guild', 'guildadmin', 'guildmember', 'guildset', 'members', 'planet', 'map', 'inspector', 'sheet', 'chart', 'people', 'stats', 'onboarding']],
+    ['Explore', ['player', 'record', 'guild', 'guildadmin', 'guildmember', 'guildset', 'members', 'guildinbox', 'planet', 'map', 'inspector', 'sheet', 'chart', 'people', 'stats', 'onboarding']],
     ['Armada', ['replication', 'armada', 'ops', 'build', 'fleet', 'pow', 'tasks', 'solve', 'queue', 'results', 'crew', 'crewpay']],
     ['Industry', ['energy', 'grid', 'brownout', 'halt', 'allocations', 'fuel', 'market', 'book', 'ore', 'banks', 'gt', 'bank', 'rank', 'found', 'providers', 'provider', 'wallet', 'deliver']],
     ['War', ['scout', 'tally', 'posture', 'targets', 'raids', 'log', 'grudges', 'vetoes', 'incidents']],
@@ -1635,6 +1635,11 @@
     OPS: ['ops', 'id'], ACT: ['ops', 'id'], DO: ['ops', 'id'],
     // A guild's PEOPLE, not its statistics.
     MEMBERS: ['members', 'id'], ROSTER_OF: ['members', 'id'],
+    // Membership from both sides: what waits on your guild (REQUESTS, your
+    // own guild unless named), what waits on you (INVITES), and a guild's
+    // way in (JOIN opens its card, where the door is).
+    REQUESTS: ['members', 'optid'], APPLICANTS: ['members', 'optid'],
+    INVITES: ['guildinbox'], APPLICATIONS: ['guildinbox'], JOIN: ['guild', 'id'], APPLY: ['guild', 'id'],
     // Placement: what can stand here, and in which free slot.
     BUILD: ['build', 'id'], DEPLOY: ['build', 'id'],
     /* The Cluster: every machine's shared processing. You CONTRIBUTE work
@@ -3148,6 +3153,45 @@
     },
   });
 
+  // The way in, as a guild's policy offers it to you (none if you are a
+  // member, or it is closed), and what walking through it does to your
+  // power. Its own read, so a slow chain never holds the guild's face back —
+  // and drawn even for a guild the reference records do not know yet (a
+  // guild founded minutes ago is exactly the one people are joining).
+  function joinDoor(gid, ctx) {
+    var joinSlot = H.el('div', 'tm-join');
+    invoke('terminal_guild_door', { guildId: gid }).then(function (d) {
+      joinSlot.innerHTML = '';
+      var ds = (d && d.doors) || [];
+      var im = d && d.impact;
+      var pol = (d && d.policy) || {};
+      if (!ds.length) {
+        if (!(d && d.me && d.me.member) && pol.label === 'closed') joinSlot.appendChild(H.el('div', 'fstat-l', 'closed to new members'));
+        return;
+      }
+      if (im) {
+        var pw = H.el('div', 'fstat-l');
+        pw.appendChild(document.createTextNode('your power ' + H.fmtWatts(im.share_now_mw) + ' → '));
+        var low = im.online_after === false;
+        pw.appendChild(H.el('span', low ? 'sui-text-warning' : '', H.fmtWatts(im.share_after_mw) + (low ? ' · offline after joining' : '')));
+        joinSlot.appendChild(pw);
+      }
+      joinSlot.appendChild(doorRow(ds.map(function (x) {
+        return {
+          label: x.label, primary: x.primary, disabled: !x.enabled, title: x.why || '',
+          onClick: function () {
+            if (!x.enabled) return;
+            if (x.action === 'rank') { add('rank', { id: gid }); return; }
+            if (Terminal.guildDoor) Terminal.guildDoor(gid, x.action, {}, ctx);
+          },
+        };
+      })));
+      var why = ds.filter(function (x) { return !x.enabled && x.why; })[0];
+      if (why) joinSlot.appendChild(H.el('div', 'fstat-l sui-text-warning', why.why));
+    }).catch(function () { joinSlot.innerHTML = ''; });
+    return joinSlot;
+  }
+
   Terminal.register('guild', {
     label: 'Watch a guild', describe: function (p) { return 'Guild ' + (p.id || '?'); },
     params: [{ key: 'id', label: 'Guild id', kind: 'id', kinds: [0], placeholder: '0-1' }],
@@ -3164,7 +3208,7 @@
         host.innerHTML = '';
         var g = ((G.state.snap && G.state.snap.guilds) || []).filter(function (x) { return x.guild_id === p.id; })[0];
         var st = (ref && ref.stats) || {};
-        if (!g && !ref) { host.appendChild(H.stateBlock('info', 'Looking up ' + p.id + '…')); return; }
+        if (!g && !ref) { host.appendChild(H.stateBlock('info', 'Looking up ' + p.id + '…')); host.appendChild(joinDoor(p.id, ctx)); return; }
         var reads = [];
         var push = function (v, icon, title) { if (v != null && v !== '') reads.push({ value: v, icon: icon, title: title }); };
         push(g ? H.fmtInt(g.players) : st.members_text, 'sui-icon-players', 'Members');
@@ -3180,7 +3224,9 @@
           readings: reads,
           owner: ref && ref.owner && ref.owner.id ? { id: ref.owner.id, name: ref.owner.name, tag: ref.owner.tag, pfp: ref.owner.pfp_attrs } : null,
         }, {}));
+        host.appendChild(joinDoor(p.id, ctx));
         host.appendChild(doorRow([
+          { label: 'Members', onClick: function () { add('members', { id: p.id }); } },
           { label: 'Guild token', onClick: function () { add('gt', { id: p.id }); } },
           { label: 'Buy a rank', onClick: function () { add('rank', { id: p.id }); } },
           { label: 'Admin', onClick: function () { add('guildadmin', { id: p.id }); } },
@@ -4238,8 +4284,9 @@
   function doorRow(items) {
     var row = H.el('div', 'tm-doors-row');
     items.forEach(function (it) {
-      var a = H.el('a', 'sui-screen-btn ' + (it.primary ? 'sui-mod-primary' : 'sui-mod-secondary'), it.label);
+      var a = H.el('a', 'sui-screen-btn ' + (it.primary ? 'sui-mod-primary' : 'sui-mod-secondary') + (it.disabled ? ' sui-mod-disabled' : ''), it.label);
       a.href = 'javascript:void(0)';
+      if (it.title) a.title = it.title;
       a.addEventListener('click', function () { it.onClick(a); });
       row.appendChild(a);
     });

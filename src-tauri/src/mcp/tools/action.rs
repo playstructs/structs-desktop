@@ -863,6 +863,32 @@ async fn action_rank(app_handle: &tauri::AppHandle, action: &str, args: &Value) 
 /// spends 2 Alpha from the vault and burns half of it.
 async fn action_found_guild(app_handle: &tauri::AppHandle, args: &Value) -> Vec<Content> {
     let s = |k: &str| args.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string();
+    // The founding PLAN (mcp/guild_founding.rs): `{name, tag?, members?,
+    // policy?, hosting?, endpoint?, pitch?, reactor?}` previews everything —
+    // power, cost, steps — and `confirm:true` runs it (resumable). `status`
+    // reads the saved plan. The bare three-field form below stays for
+    // agents that already speak it.
+    if args.get("name").is_some() || s("op") == "status" || s("op") == "resume" {
+        let res = match s("op").as_str() {
+            "status" => crate::mcp::guild_founding::get(),
+            "resume" => crate::mcp::guild_founding::start(app_handle.clone(), None).await,
+            _ => {
+                let choices: crate::mcp::guild_founding::Choices = serde_json::from_value(args.clone()).unwrap_or_default();
+                if args.get("confirm").and_then(|v| v.as_bool()).unwrap_or(false) {
+                    crate::mcp::guild_founding::start(app_handle.clone(), Some(choices)).await
+                } else {
+                    crate::mcp::guild_founding::preview(choices).await.map(|mut p| {
+                        p["note"] = json!("preview only — send confirm:true to found it; op:status follows progress");
+                        p
+                    })
+                }
+            }
+        };
+        return match res {
+            Ok(v) => vec![Content::text(serde_json::to_string_pretty(&v).unwrap_or_default())],
+            Err(e) => crate::mcp::handler::fail(format!("found_guild failed: {}", translate_error(&e))),
+        };
+    }
     let (reactor, endpoint, sub) = (s("reactor_id"), s("endpoint"), s("entry_substation_id"));
     let confirmed = args.get("confirm").and_then(|v| v.as_bool()).unwrap_or(false);
     let res = if confirmed {
@@ -888,6 +914,12 @@ async fn action_guild(app_handle: &tauri::AppHandle, args: &Value) -> Vec<Conten
     let confirmed = args.get("confirm").and_then(|v| v.as_bool()).unwrap_or(false);
     let res = match op {
         "overview" => crate::mcp::guild_admin::overview(guild_id).await,
+        "members" => crate::mcp::guild_membership::board(guild_id).await,
+        "inbox" => crate::mcp::guild_membership::inbox().await,
+        "door" => match guild_id {
+            Some(g) => crate::mcp::guild_membership::door_for(g).await,
+            None => Err("guild_id required".into()),
+        },
         _ if confirmed => crate::mcp::guild_admin::execute(app_handle, guild_id, op, args).await,
         _ => crate::mcp::guild_admin::preview(guild_id, op, args).await.map(|mut p| {
             p["note"] = json!("preview only — send confirm:true to sign it");

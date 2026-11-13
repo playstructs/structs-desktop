@@ -122,7 +122,7 @@ pub const ACTIONS: &[&str] = &[
     "invite", "invite_revoke", "approve", "deny", "kick", "set_rank", "grant_admin", "revoke_admin",
     "entry_rank", "entry_substation", "join_minimum", "bypass_request", "bypass_invite", "endpoint",
     "name", "rank_sale", "convert_in_fee", "convert_out_fee", "request", "request_revoke",
-    "accept_invite", "decline_invite",
+    "accept_invite", "decline_invite", "join",
 ];
 
 fn arg_str(args: &Value, k: &str) -> Option<String> {
@@ -362,6 +362,20 @@ pub fn plan(guild_id: &str, me: &str, action: &str, args: &Value) -> Result<Plan
         }
         "decline_invite" => mk(action, Side::Own, "/structs.structs.MsgGuildMembershipInviteDeny",
             json!({ "guildId": g, "playerId": me }), GUILD_MEMBERSHIP, 0, None, format!("Decline {g}'s invite")),
+        // Direct join. `infusions` are the ids the stake minimum is counted
+        // from; `preview` fills them in from the chain, and `execute` signs
+        // the previewed payload, so the two never differ.
+        "join" => {
+            let sub = substation_arg(args)?;
+            let infusions: Vec<String> = args
+                .get("infusions")
+                .and_then(|v| v.as_array())
+                .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+                .unwrap_or_default();
+            mk(action, Side::Own, "/structs.structs.MsgGuildMembershipJoin",
+               json!({ "guildId": g, "playerId": me, "substationId": sub, "infusionId": infusions }),
+               GUILD_MEMBERSHIP, 0, None, format!("Join {g}"))
+        }
         other => return Err(format!("unknown guild action '{other}' (one of: {})", ACTIONS.join(", "))),
     };
     Ok(p)
@@ -596,7 +610,7 @@ pub async fn preview(guild_id: Option<String>, action: &str, args: &Value) -> Re
     let own_guild = p.get("guildId").and_then(|g| g.as_str()).unwrap_or("").to_string();
     let my_rank = num(p.get("guildRank")) as u64;
     let guild_id = guild_id.filter(|g| !g.trim().is_empty()).map(|g| g.trim().to_string()).unwrap_or_else(|| own_guild.clone());
-    let plan = plan(&guild_id, &me, action, args)?;
+    let mut plan = plan(&guild_id, &me, action, args)?;
 
     let mut problems: Vec<String> = Vec::new();
     let mut warnings: Vec<String> = Vec::new();
@@ -675,9 +689,78 @@ pub async fn preview(guild_id: Option<String>, action: &str, args: &Value) -> Re
                 Err(_) => problems.push(format!("no substation {sub} on chain")),
             }
         }
-        "request" | "accept_invite" if member => problems.push(format!("you are already a member of {guild_id}")),
+        "request" | "accept_invite" | "join" if member => problems.push(format!("you are already a member of {guild_id}")),
         _ => {}
     }
+
+    // The routes in follow the guild's own policy: refuse what the chain
+    // would refuse before anything is signed.
+    let policy = crate::mcp::guild_membership::Policy::from_guild(&g);
+    match action {
+        "request" if policy.request == "closed" => problems.push(format!("{guild_id} takes no requests")),
+        "approve" | "deny" if policy.request == "closed" => problems.push(format!("{guild_id} takes no requests, so there are none to answer")),
+        "invite" | "invite_revoke" if policy.invite == "closed" => problems.push(format!("{guild_id} sends no invites (Settings: who may invite)")),
+        "join" if !policy.direct_open() => problems.push(format!("{guild_id} cannot be joined directly")),
+        _ => {}
+    }
+    // An owner cannot leave the guild they own (`is_owner`).
+    if matches!(action, "join" | "request" | "accept_invite") && !member && own_guild.starts_with("0-") {
+        let owns = client
+            .query_entity("guild", &own_guild)
+            .await
+            .ok()
+            .and_then(|v| v.pointer("/Guild/owner").and_then(|o| o.as_str()).map(|o| o == me))
+            .unwrap_or(false);
+        if owns {
+            problems.push(format!("you own {own_guild}; hand it over before joining another guild"));
+        }
+    }
+    // Direct join with a stake: count every infusion; the chain keeps the
+    // ones on the guild's reactor and redelegates the rest (TokenMigrate).
+    if action == "join" && !member && policy.direct_open() && policy.minimum > 0 {
+        let (total, found) = crate::mcp::guild_membership::infused(&client, &address).await;
+        if total < policy.minimum {
+            problems.push(format!(
+                "{guild_id} needs {} infused to join; you have {}",
+                crate::mcp::tools::format::format_alpha(policy.minimum as f64),
+                crate::mcp::tools::format::format_alpha(total as f64)
+            ));
+        }
+        let reactor = g.get("primaryReactorId").and_then(|r| r.as_str()).unwrap_or("").to_string();
+        if found.iter().any(|(_, r, _)| *r != reactor) {
+            if let Some(why) = signer_lacks(&address, bits::TOKEN_MIGRATE, "token migrate").await {
+                problems.push(format!("{why} (infusions on other reactors move to {reactor})"));
+            }
+            warnings.push(format!("infusions on other reactors are redelegated to {reactor}"));
+        }
+        plan.payload["infusionId"] = json!(found.iter().map(|(id, _, _)| id.clone()).collect::<Vec<_>>());
+    }
+    // What it does to power: the joiner's own, or everyone already on the
+    // substation the new member lands on.
+    let impact = match action {
+        "join" | "accept_invite" | "request" if !member => {
+            let override_sub = plan.payload.get("substationId").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let target_id = if override_sub.is_empty() { policy.entry_substation.clone() } else { override_sub };
+            if target_id.is_empty() {
+                warnings.push(format!("{guild_id} has no entry substation: you would join unpowered"));
+            }
+            let target = crate::mcp::guild_membership::sub_power(&client, &target_id).await;
+            let (draw, now) = crate::mcp::guild_membership::draw_of(&client, &me).await;
+            let v = crate::mcp::guild_membership::joiner_impact(&draw, now, target.as_ref());
+            if v["online_now"] == true && v["online_after"] == false {
+                warnings.push("you would go offline after joining: the new share is below your draw".into());
+            }
+            Some(v)
+        }
+        "approve" | "invite" => {
+            let override_sub = plan.payload.get("substationId").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let target_id = if override_sub.is_empty() { policy.entry_substation.clone() } else { override_sub };
+            crate::mcp::guild_membership::sub_power(&client, &target_id)
+                .await
+                .map(|s| crate::mcp::guild_membership::guild_impact(&s, 1))
+        }
+        _ => None,
+    };
 
     Ok(json!({
         "ok": problems.is_empty(),
@@ -689,6 +772,7 @@ pub async fn preview(guild_id: Option<String>, action: &str, args: &Value) -> Re
         "target": plan.target,
         "message": plan.type_url.trim_start_matches("/structs.structs."),
         "payload": plan.payload,
+        "impact": impact,
     }))
 }
 
@@ -701,7 +785,11 @@ pub async fn execute(app: &tauri::AppHandle, guild_id: Option<String>, action: &
         return Err(format!("refused: {}", why.join("; ")));
     }
     let (me, _) = primary_identity()?;
-    let plan = plan(pv["guild_id"].as_str().unwrap_or(""), &me, action, args)?;
+    let mut plan = plan(pv["guild_id"].as_str().unwrap_or(""), &me, action, args)?;
+    // `join` carries the infusion ids the preview read off the chain.
+    if action == "join" {
+        plan.payload = pv["payload"].clone();
+    }
     let res = crate::mcp::tx_retry::sign_as_primary(app, plan.type_url, plan.payload, format!("guild:{action}")).await?;
     Ok(json!({
         "ok": true,
@@ -756,6 +844,11 @@ pub(crate) mod tests {
 
         let p = plan("0-1", "1-9", "accept_invite", &json!({})).unwrap();
         assert_eq!(p.payload, json!({ "guildId": "0-1", "playerId": "1-9", "substationId": "" }));
+        assert_eq!(p.side, Side::Own);
+
+        let p = plan("0-6", "1-9", "join", &json!({ "infusions": ["3-15-structs1abc"] })).unwrap();
+        assert_eq!(p.type_url, "/structs.structs.MsgGuildMembershipJoin");
+        assert_eq!(p.payload, json!({ "guildId": "0-6", "playerId": "1-9", "substationId": "", "infusionId": ["3-15-structs1abc"] }));
         assert_eq!(p.side, Side::Own);
 
         let p = plan("0-1", "1-9", "convert_out_fee", &json!({ "fee": "0.1" })).unwrap();

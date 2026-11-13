@@ -1424,6 +1424,24 @@
     /* The planet card draws no slots of its own any more: it embeds the live
        map, which draws them as art and animates them (see `mapFrame`). */
     .tm-doors-row { display: flex; flex-wrap: wrap; gap: var(--spacing-md); margin-top: var(--spacing-md); }
+    /* SUI's disabled modifier only greys an anchor; a door that cannot be
+       walked through must not take the click either. */
+    .tm-doors-row a.sui-mod-disabled { pointer-events: none; }
+    .tm-join { text-align: left; margin-top: var(--spacing-md); }
+    .tm-inbox-row { text-align: left; margin-bottom: var(--spacing-lg); }
+    /* Found a guild: the answers beside the card other players will see. */
+    .tm-found { display: flex; flex-wrap: wrap; gap: var(--spacing-lg); text-align: left; margin-top: var(--spacing-md); }
+    .tm-found-form { flex: 1 1 280px; min-width: 0; }
+    /* A column this narrow has no room for a label BESIDE its control (a
+       long reactor name covered its own label): stack them, as the drawer
+       does, and let SUI's page-sized min-widths go. */
+    #board-layout .tm-found-form label.sui-input-text.cfg-field { flex-direction: column; align-items: stretch; gap: var(--spacing-xs); }
+    #board-layout .tm-found-form label.sui-input-text.cfg-field > span:first-child { flex: none; }
+    .tm-found-form select, .tm-found-form input { min-width: 0; max-width: 100%; }
+    .tm-found-face { flex: 0 1 240px; min-width: 0; }
+    .tm-found-pitch { margin-top: var(--spacing-sm); }
+    .tm-found-status, .tm-found-move, .tm-found-signup { text-align: left; margin-top: var(--spacing-md); }
+    .tm-found-json { text-align: left; white-space: pre-wrap; word-break: break-all; max-height: 40vh; overflow: auto; color: var(--text-body); }
     /* The Cluster card's quiet layout: one status line, one large state
        word, doors, and folded rows. */
     .tm-status { display: flex; flex-wrap: wrap; align-items: center; gap: var(--spacing-md) var(--spacing-lg);

@@ -1110,6 +1110,21 @@ async fn board_invoke(
             _ => err_json("reactorId + endpoint + entrySubstationId required".into()),
         },
         "terminal_guild_admin_overview" => from_result(crate::mcp::guild_admin::overview(s("guildId")).await),
+        "terminal_guild_membership" => from_result(crate::mcp::guild_membership::board(s("guildId")).await),
+        "terminal_found_plan_preview" => from_result(crate::mcp::guild_founding::preview(serde_json::from_value(body.get("choices").cloned().unwrap_or(Value::Null)).unwrap_or_default()).await),
+        "terminal_found_plan_get" => from_result(crate::mcp::guild_founding::get()),
+        "terminal_found_plan_start" => from_result(crate::mcp::guild_founding::start(st.app.clone(), body.get("choices").cloned().and_then(|c| serde_json::from_value(c).ok())).await),
+        "terminal_found_plan_abandon" => from_result(crate::mcp::guild_founding::abandon()),
+        "terminal_found_guildjson" => from_result(crate::mcp::guild_founding::guild_json(s("guildId"), body.get("choices").cloned().and_then(|c| serde_json::from_value(c).ok()), body.get("services").cloned().unwrap_or(Value::Null))),
+        "terminal_found_check_endpoint" => match (s("guildId"), s("endpoint")) {
+            (Some(g), Some(e)) => from_result(crate::mcp::guild_founding::check_endpoint(g, e).await),
+            _ => err_json("guildId + endpoint required".into()),
+        },
+        "terminal_guild_door" => match s("guildId") {
+            Some(g) => from_result(crate::mcp::guild_membership::door_for(g).await),
+            None => err_json("guildId required".into()),
+        },
+        "terminal_guild_inbox" => from_result(crate::mcp::guild_membership::inbox().await),
         "terminal_guild_admin_preview" => match s("action") {
             Some(a) => from_result(crate::mcp::guild_admin::preview(s("guildId"), &a, body.get("args").unwrap_or(&Value::Null)).await),
             None => err_json("action required".into()),

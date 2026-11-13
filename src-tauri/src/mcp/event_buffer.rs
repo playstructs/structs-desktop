@@ -120,6 +120,12 @@ pub fn ingest(app: &tauri::AppHandle, event: GameEvent) {
         note_failed_settlement(app, &event);
     }
 
+    // An invite, request or its answer: refresh the cards that show it and
+    // tell the people it concerns (guild_membership.rs decides who).
+    if event.category == crate::mcp::guild_membership::CATEGORY {
+        crate::mcp::guild_membership::on_grass(app, &event);
+    }
+
     // ── Combat events preempt the response cadence. ──
     // auto_response rides the sync tick at a 20 s internal cadence, so the
     // WORST-case gap between a raid arming and the first defensive shot was a

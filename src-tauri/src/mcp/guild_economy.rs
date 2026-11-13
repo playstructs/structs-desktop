@@ -106,7 +106,7 @@ fn primary_identity() -> Result<(String, String), String> {
 }
 
 /// Base units of `denom` in `owner`'s vault (0 for an unfunded vault).
-async fn vault_balance(client: &CosmosClient, owner: &str, denom: &str) -> Result<u128, String> {
+pub(crate) async fn vault_balance(client: &CosmosClient, owner: &str, denom: &str) -> Result<u128, String> {
     let (vault, _) = client.vault(owner).await?;
     let coins = client.bank_balances(&vault).await?;
     Ok(coins
@@ -225,11 +225,13 @@ pub fn founding_fields_refusal(reactor_id: &str, endpoint: &str, entry_substatio
     if !is(reactor_id, ObjectKind::Reactor) {
         return Some(format!("'{reactor_id}' is not a reactor id (they look like 3-1)"));
     }
-    if !is(entry_substation_id, ObjectKind::Substation) {
+    // Both may be empty: the chain founds a guild with no endpoint (set it
+    // later) and no entry substation (members then join unpowered).
+    if !entry_substation_id.is_empty() && !is(entry_substation_id, ObjectKind::Substation) {
         return Some(format!("'{entry_substation_id}' is not a substation id (they look like 4-1)"));
     }
     let e = endpoint.trim();
-    if !(e.starts_with("https://") || e.starts_with("http://")) || e.len() < 12 || e.contains(char::is_whitespace) {
+    if !e.is_empty() && (!(e.starts_with("https://") || e.starts_with("http://")) || e.len() < 12 || e.contains(char::is_whitespace)) {
         return Some(format!("'{e}' is not an endpoint URL (the guild's guild.json)"));
     }
     None
@@ -246,12 +248,25 @@ pub async fn preview_found_guild(reactor_id: &str, endpoint: &str, entry_substat
         if client.query_entity("reactor", reactor_id).await.is_err() {
             problems.push(format!("no reactor {reactor_id} on chain"));
         }
-        match client.query_entity("substation", entry_substation_id).await {
-            Ok(s) if crate::mcp::tools::board_pages::substation_deletion_pending(&s) => {
-                problems.push(format!("substation {entry_substation_id} is pending deletion"));
+        if !entry_substation_id.is_empty() {
+            match client.query_entity("substation", entry_substation_id).await {
+                Ok(s) if crate::mcp::tools::board_pages::substation_deletion_pending(&s) => {
+                    problems.push(format!("substation {entry_substation_id} is pending deletion"));
+                }
+                Ok(_) => {}
+                Err(_) => problems.push(format!("no substation {entry_substation_id} on chain")),
             }
-            Ok(_) => {}
-            Err(_) => problems.push(format!("no substation {entry_substation_id} on chain")),
+        }
+        // The chain refuses a founder who already owns a guild (`is_owner`)
+        // and a reactor whose validator is jailed.
+        if let Ok(guilds) = client.list_all_entities("guild", "Guild").await {
+            if let Some(g) = guilds.iter().find(|g| g.get("owner").and_then(|o| o.as_str()) == Some(pid.as_str())) {
+                problems.push(format!("you own {}; hand it over before founding another", g.get("id").and_then(|v| v.as_str()).unwrap_or("a guild")));
+            }
+        }
+        let rows = crate::mcp::guild_founding::reactors(&client).await;
+        if rows.iter().any(|r| r.id == reactor_id && r.jailed) {
+            problems.push(format!("{reactor_id}'s validator is jailed; pick another reactor"));
         }
     }
     let balance = vault_balance(&client, &pid, "ualpha").await.unwrap_or(0);
@@ -343,6 +358,7 @@ mod tests {
         assert!(founding_fields_refusal("3-1", "https://example.org/guild.json", "3-1").is_some());
         assert!(founding_fields_refusal("3-1", "example.org", "4-1").is_some());
         assert!(founding_fields_refusal("3-1", "https://exa mple.org/g.json", "4-1").is_some());
+        assert!(founding_fields_refusal("3-1", "", "").is_none(), "the chain founds with neither");
     }
 
     #[test]

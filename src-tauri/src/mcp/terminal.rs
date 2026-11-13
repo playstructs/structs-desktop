@@ -1399,6 +1399,70 @@ pub async fn terminal_guild_admin(
     crate::mcp::guild_admin::execute(&app, guild_id, &action, &args).await
 }
 
+// ── Founding a guild: the staged plan (mcp/guild_founding.rs) ──────────────
+
+/// Everything Found would do with these answers: checks, your move, power,
+/// cost, steps and a draft guild.json.
+#[tauri::command]
+pub async fn terminal_found_plan_preview(choices: crate::mcp::guild_founding::Choices) -> Result<Value, String> {
+    crate::mcp::guild_founding::preview(choices).await
+}
+
+/// The saved founding plan, and whether it is running.
+#[tauri::command]
+pub fn terminal_found_plan_get() -> Result<Value, String> {
+    crate::mcp::guild_founding::get()
+}
+
+/// Found (or resume founding). Progress arrives as `guild-founding`.
+#[tauri::command]
+pub async fn terminal_found_plan_start(
+    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+    choices: Option<crate::mcp::guild_founding::Choices>,
+) -> Result<Value, String> {
+    crate::mcp::tools::board_pages::require_trusted(&window)?;
+    crate::mcp::guild_founding::start(app, choices).await
+}
+
+#[tauri::command]
+pub fn terminal_found_plan_abandon(window: tauri::WebviewWindow) -> Result<Value, String> {
+    crate::mcp::tools::board_pages::require_trusted(&window)?;
+    crate::mcp::guild_founding::abandon()
+}
+
+/// guild.json v1 for the founded guild (or a draft), and whether the app
+/// would accept it.
+#[tauri::command]
+pub fn terminal_found_guildjson(guild_id: Option<String>, choices: Option<crate::mcp::guild_founding::Choices>, services: Option<Value>) -> Result<Value, String> {
+    crate::mcp::guild_founding::guild_json(guild_id, choices, services.unwrap_or(Value::Null))
+}
+
+/// Fetch a self-hosted guild.json and validate it as the directory would.
+#[tauri::command]
+pub async fn terminal_found_check_endpoint(guild_id: String, endpoint: String) -> Result<Value, String> {
+    crate::mcp::guild_founding::check_endpoint(guild_id, endpoint).await
+}
+
+/// A guild's membership board: policy, your standing, pending requests and
+/// invites (with each applicant's draw and age), and resolved history.
+#[tauri::command]
+pub async fn terminal_guild_membership(guild_id: Option<String>) -> Result<Value, String> {
+    crate::mcp::guild_membership::board(guild_id).await
+}
+
+/// The way into one guild for you: its doors, and your power before and after.
+#[tauri::command]
+pub async fn terminal_guild_door(guild_id: String) -> Result<Value, String> {
+    crate::mcp::guild_membership::door_for(guild_id).await
+}
+
+/// Invites to you and your own requests, across every guild.
+#[tauri::command]
+pub async fn terminal_guild_inbox() -> Result<Value, String> {
+    crate::mcp::guild_membership::inbox().await
+}
+
 /// Your providers: terms, pools, buyers.
 #[tauri::command]
 pub async fn terminal_providers() -> Result<Value, String> {

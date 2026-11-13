@@ -477,6 +477,20 @@ pub async fn manifest_at(guild_id: &str, endpoint: &str) -> Result<GuildConfig, 
     Ok(cfg)
 }
 
+/// Read an endpoint the way the directory would — fetch, then validate it
+/// claims `guild_id` and names a Guild API and a GRASS stream — WITHOUT
+/// adopting it. The founding card's "Check" for a self-hosted guild.json.
+pub async fn probe_endpoint(guild_id: &str, endpoint: &str) -> Result<GuildConfig, String> {
+    let chain = ChainGuild { id: guild_id.to_string(), endpoint: endpoint.to_string() };
+    fetch_and_validate_guild(&chain).await
+}
+
+/// The same validation over a document already in hand (a rendered
+/// guild.json, before it is ever published).
+pub fn check_doc(guild_id: &str, body: &[u8]) -> Result<GuildConfig, String> {
+    validate_guild_doc(&ChainGuild { id: guild_id.to_string(), endpoint: String::new() }, body)
+}
+
 fn remember(cfg: GuildConfig) {
     let mut all = guild_config::load_configs();
     if upsert_discovered(&mut all, vec![cfg]) {

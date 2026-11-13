@@ -1027,29 +1027,7 @@ const tick = (ms) => new Promise((r) => setTimeout(r, ms));
   await until(() => /signed/.test(rank.textContent));
   check('…and says it was signed, not merely queued', /signed/.test(rank.textContent) && !/queued/.test(rank.textContent));
 
-  run('FOUND');
-  await until(() => d.querySelectorAll('#tm-grid [data-type="found"] input').length === 3);
-  const found = d.querySelector('#tm-grid [data-type="found"]');
-  const [fReactor, fSub, fEnd] = found.querySelectorAll('input');
-  check('the endpoint is typed as a URL, not on a number pad', fEnd.getAttribute('inputmode') === 'url' && fReactor.getAttribute('inputmode') === 'numeric');
-  found.querySelector('a.sui-mod-primary').click();
-  await tick(50);
-  check('FOUND with nothing previewed signs nothing', !(w.__HARNESS_CALLS__ || []).some((c) => c.cmd === 'terminal_found_guild') && /wait for the preview/.test(found.textContent));
-  fReactor.value = '4-1'; fSub.value = '4-1'; fEnd.value = 'https://g.example/guild.json';
-  fEnd.dispatchEvent(new w.Event('input'));
-  await until(() => /not a reactor id/.test(found.textContent));
-  check('a founding the chain would refuse says why', /not a reactor id/.test(found.textContent));
-  fReactor.value = '3-1'; fReactor.dispatchEvent(new w.Event('input'));
-  await until(() => /burned/.test(found.textContent));
-  check('the preview shows the cost, what is burned and the vault', /cost/.test(found.textContent) && /burned/.test(found.textContent) && /in your vault/.test(found.textContent));
-  found.querySelector('a.sui-mod-primary').click();
-  await tick(50);
-  const foundBtn = [...d.querySelectorAll('.ops-modal-overlay a, .ops-modal-overlay button')].find((b) => /^found$/i.test(b.textContent.trim()));
-  check('FOUND confirms with the reactor, substation and endpoint', !!foundBtn && /3-1/.test(d.querySelector('.ops-modal-overlay').textContent) && /guild\.json/.test(d.querySelector('.ops-modal-overlay').textContent));
-  if (foundBtn) foundBtn.click();
-  await until(() => (w.__HARNESS_CALLS__ || []).some((c) => c.cmd === 'terminal_found_guild'));
-  const foundCall = (w.__HARNESS_CALLS__ || []).find((c) => c.cmd === 'terminal_found_guild');
-  check('…and signs what was confirmed', !!foundCall && foundCall.args.reactorId === '3-1' && foundCall.args.entrySubstationId === '4-1');
+  // FOUND is the staged founding card now: scripts/harness-tests/founding.test.mjs.
 
   // v0.22 guild management: the overview names who really holds admin,
   // flags rank grants whose admin the chain no longer honours, and turns

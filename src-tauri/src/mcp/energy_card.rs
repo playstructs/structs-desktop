@@ -596,7 +596,7 @@ fn index_of(id: &str) -> u64 {
 
 /// The highest-index entity of `kind` matching `keep` — how we find what a
 /// create just made, since the create answers no id.
-async fn newest(client: &CosmosClient, kind: &str, list_key: &str, keep: impl Fn(&Value) -> bool) -> Option<Value> {
+pub(crate) async fn newest(client: &CosmosClient, kind: &str, list_key: &str, keep: impl Fn(&Value) -> bool) -> Option<Value> {
     let arr = client.list_all_entities(kind, list_key).await.ok()?;
     arr.iter()
         .filter(|a| keep(a))
@@ -604,11 +604,11 @@ async fn newest(client: &CosmosClient, kind: &str, list_key: &str, keep: impl Fn
         .cloned()
 }
 
-fn id_of(v: &Value) -> Option<String> {
+pub(crate) fn id_of(v: &Value) -> Option<String> {
     v.get("id").and_then(|i| i.as_str()).map(String::from)
 }
 
-async fn newest_unconnected(client: &CosmosClient, pid: &str) -> Option<String> {
+pub(crate) async fn newest_unconnected(client: &CosmosClient, pid: &str) -> Option<String> {
     let s = |a: &Value, k: &str| a.get(k).and_then(|c| c.as_str()).unwrap_or("").to_string();
     newest(client, "allocation", "Allocation", |a| {
         s(a, "controller") == pid && s(a, "sourceObjectId") == pid && s(a, "type") == "dynamic" && s(a, "destinationId").is_empty()
@@ -619,7 +619,7 @@ async fn newest_unconnected(client: &CosmosClient, pid: &str) -> Option<String> 
 }
 
 /// Poll for something a just-signed tx created (inclusion is a block or two).
-async fn wait_for<F, Fut>(mut probe: F) -> Option<Value>
+pub(crate) async fn wait_for<F, Fut>(mut probe: F) -> Option<Value>
 where
     F: FnMut() -> Fut,
     Fut: std::future::Future<Output = Option<Value>>,

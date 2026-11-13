@@ -5933,6 +5933,7 @@ dependencies = [
  "tokio",
  "tokio-stream",
  "tower",
+ "unicode-normalization",
  "uuid",
  "wgpu",
  "zeroize",
