@@ -291,6 +291,13 @@ async fn resolve_stub(stub: &ActivityStub, subject: &str) -> Result<GameEvent, S
 /// dropped — consumers read missing fields as zeros, which is worse than no
 /// event.
 pub fn ingest_resolving(app: &tauri::AppHandle, event: GameEvent) {
+    // Influence contest frames arrive as 4 KiB base64 PARTS: transport, not
+    // game events. They go to the assembler (mcp/influence_stream.rs) and
+    // never into telemetry, the snapshot or the event ring.
+    if event.category == crate::mcp::influence_stream::PART_CATEGORY {
+        crate::mcp::influence_stream::accept(app, &event.subject, &event.detail);
+        return;
+    }
     let Some(stub) = activity_stub(&event) else {
         crate::mcp::event_buffer::ingest(app, event);
         return;

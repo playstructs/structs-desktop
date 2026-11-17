@@ -1,0 +1,113 @@
+/* The Sector Blitz contest cards (board-terminal-contest.js). Tokens only,
+   except 1px hairlines and the chart's plot geometry, which SUI has none for. */
+.ipc { text-align: left; display: flex; flex-direction: column; gap: var(--spacing-md); min-width: 0; }
+.ipc-grow { flex: 1 1 auto; min-width: 0; }
+.ipc-right { text-align: right; white-space: nowrap; }
+.ipc-num { min-width: 4ch; }
+.ipc-row-line { display: flex; align-items: center; justify-content: space-between; gap: var(--spacing-md); flex-wrap: wrap; }
+.ipc-sec { display: flex; align-items: baseline; justify-content: space-between; gap: var(--spacing-md); padding-top: var(--spacing-md); border-top: 1px solid var(--border-subtle); }
+.ipc-aside { text-align: right; }
+.ipc-note { padding: var(--spacing-sm) 0; }
+.ipc-foot { padding-top: var(--spacing-sm); border-top: 1px solid var(--border-subtle); }
+.ipc-tiles { margin-bottom: 0; }
+.ipc-controls { display: flex; flex-wrap: wrap; align-items: center; gap: var(--spacing-md) var(--spacing-xl); }
+.ipc-controls .sui-input-select, .ipc-controls select { min-width: 0; }
+#board-layout .ipc .sui-checkbox-container.has-label label { margin-left: calc(var(--form-input-height-total) + var(--spacing-md)); }
+#board-layout .ipc a.ipc-link, #board-layout .ipc a.ipc-link:link, #board-layout .ipc a.ipc-link:visited { color: var(--text-player-primary); text-decoration: none; }
+#board-layout .ipc a.ipc-link:hover { color: var(--accent-primary-active); }
+.ipc-who { display: flex; align-items: center; gap: var(--spacing-sm); flex-wrap: wrap; }
+.ipc-light { width: var(--icon-md); height: var(--icon-md); flex: none; image-rendering: pixelated; }
+.ipc .sui-icon.sector-blitz-influence-icon { vertical-align: middle; }
+
+/* The guild palette: the webapp's 1st, 2nd and 3rd (SECTOR_BLITZ_GUILD_COLOURS),
+   then more SUI accents for the race's extra lines; everyone else is muted. */
+.ipc-c0 { --ipc: var(--accent-primary); }
+.ipc-c1 { --ipc: var(--struct-health-bar-health); }
+.ipc-c2 { --ipc: var(--accent-destructive); }
+.ipc-c3 { --ipc: var(--accent-secondary); }
+.ipc-c4 { --ipc: var(--accent-disabled); }
+.ipc-c5 { --ipc: var(--border-strong); }
+.ipc-cx { --ipc: var(--border); }
+.ipc-sw { display: inline-block; flex: none; width: var(--spacing-md); height: var(--spacing-xl); background: var(--ipc); vertical-align: middle; margin-right: var(--spacing-sm); }
+
+/* Rows that open something. */
+#board-layout .ipc a.ipc-srow, #board-layout .ipc a.ipc-tape { color: var(--text-body); text-decoration: none; }
+.ipc-srow { display: flex; align-items: center; gap: var(--spacing-md); padding: var(--spacing-sm) var(--spacing-xs); border-top: 1px solid var(--border-subtle); min-height: var(--icon-lg); }
+.ipc-srow.ipc-thin { min-height: var(--icon-md); }
+a.ipc-srow:hover, a.ipc-tape:hover { background: var(--surface-player-highlight); }
+.ipc-when { white-space: nowrap; }
+
+/* Tables: guilds × sectors, paths, legends. */
+.ipc-scroll { overflow-x: auto; }
+.ipc-table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+.ipc-table th, .ipc-table td { text-align: right; padding: var(--spacing-sm) var(--spacing-md); border-bottom: 1px solid var(--border-subtle); white-space: nowrap; vertical-align: middle; }
+.ipc-table th.ipc-l, .ipc-table td.ipc-l { text-align: left; }
+.ipc-table th { color: var(--text-hint); font-weight: normal; }
+#board-layout .ipc a.ipc-th { display: inline-flex; align-items: center; gap: var(--spacing-sm); color: var(--text-hint); text-decoration: none; }
+.ipc-table th.ipc-focus, .ipc-table td.ipc-focus { box-shadow: inset 0 calc(-1 * var(--spacing-xs)) 0 var(--accent-primary); }
+#board-layout .ipc .ipc-table th.ipc-focus a.ipc-th { color: var(--accent-primary-active); }
+.ipc-table td.ipc-lead { background: var(--surface-player-body); }
+.ipc-table td.ipc-tie { background: var(--surface-enemy-body); color: var(--text-warning); }
+.ipc-table tr.ipc-mine td { color: var(--accent-primary-active); }
+.ipc-table tr.ipc-dim td { color: var(--text-hint); }
+.ipc-table tr.ipc-toggle { cursor: pointer; }
+.ipc-table tr.ipc-toggle:hover td { background: var(--surface-player-highlight); }
+.ipc-table tr.ipc-off td { opacity: 0.4; }
+.ipc .pc-row.ipc-mine, .ipc .gc-row.ipc-mine { box-shadow: inset var(--spacing-xs) 0 0 var(--accent-primary); }
+.ipc .pc-row.ipc-flag { box-shadow: inset var(--spacing-xs) 0 0 var(--text-warning); }
+
+/* Where a guild's points come from: unique wins against claims held. */
+.ipc-split { display: flex; gap: var(--spacing-xs); height: var(--spacing-xl); }
+.ipc-split-u { background: var(--accent-primary); flex: 1 1 0; }
+.ipc-split-c { background: var(--text-warning); flex: 1 1 0; }
+
+/* The race chart. Plot geometry lives in the SVG's own viewBox. */
+.ipc-race { display: flex; flex-wrap: wrap; gap: var(--spacing-xl); align-items: flex-start; }
+.ipc-race-chart { flex: 999 1 420px; min-width: 0; }
+.ipc-race-side { flex: 1 1 260px; min-width: 0; display: flex; flex-direction: column; gap: var(--spacing-sm); }
+.ipc-chart, .ipc-spark { display: block; width: 100%; height: auto; }
+.ipc-spark { height: var(--icon-xxl); }
+.ipc-grid { stroke: var(--border-subtle); stroke-width: 1; }
+.ipc-axis { fill: var(--text-hint); font-family: 'ExtremeHazard', sans-serif; font-size: 8px; text-transform: uppercase; }
+.ipc-future { fill: var(--surface-neutral-body); }
+.ipc-now { stroke: var(--text-warning); stroke-width: 1; stroke-dasharray: 2 3; }
+.ipc-line { fill: none; stroke: var(--ipc); stroke-width: 2; stroke-linejoin: miter; }
+.ipc-line-mine { stroke-width: 3; }
+.ipc-proj { stroke-dasharray: 4 4; opacity: 0.8; }
+.ipc-band { fill: var(--ipc); }
+.ipc-band-tie { fill: var(--text-warning); }
+.ipc-band-none { fill: var(--border-subtle); }
+
+/* Territory: one cell per planet, the picked one's facts beside them. */
+.ipc-terr { display: flex; flex-wrap: wrap; gap: var(--spacing-xl); align-items: flex-start; }
+.ipc-cells { flex: 999 1 300px; min-width: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(var(--icon-sm), 1fr)); gap: var(--spacing-xs); }
+.ipc-detail { flex: 1 1 220px; min-width: 0; display: flex; flex-direction: column; gap: var(--spacing-sm); }
+.ipc-cell { aspect-ratio: 1; min-height: var(--icon-sm); border: 0; padding: 0; cursor: pointer; background: var(--surface-neutral-body); box-shadow: inset 0 0 0 1px var(--border-subtle); }
+.ipc-cell.ipc-c0, .ipc-cell.ipc-c1, .ipc-cell.ipc-c2, .ipc-cell.ipc-cx { background: var(--ipc); box-shadow: none; }
+.ipc-cell.ipc-cell-open { background: var(--border-subtle); box-shadow: inset 0 0 0 1px var(--border); }
+.ipc-cell.ipc-cell-own { background: var(--surface-player-body); }
+.ipc-cell.ipc-depth1 { background: var(--surface-player-body); }
+.ipc-cell.ipc-depth2 { background: var(--surface-player-highlight); }
+.ipc-cell.ipc-depth3 { background: var(--border-focus-friendly-dark); }
+.ipc-cell.ipc-depth4 { background: var(--text-player-highlight); }
+.ipc-cell.ipc-w1 { background: var(--border); }
+.ipc-cell.ipc-w2 { background: var(--struct-health-bar-health); }
+.ipc-cell.ipc-w3 { background: var(--text-warning); }
+.ipc-cell.ipc-sel { outline: var(--spacing-xs) solid var(--text-warning); outline-offset: 1px; }
+.ipc-cell:focus-visible { outline: var(--spacing-xs) solid var(--accent-primary-active); }
+.ipc-legend { display: flex; flex-wrap: wrap; gap: var(--spacing-sm) var(--spacing-lg); }
+.ipc-legend .ipc-sw { height: var(--spacing-md); }
+.ipc-legend .ipc-sw.ipc-cell-open { background: var(--border-subtle); }
+.ipc-legend .ipc-sw.ipc-cell-own, .ipc-legend .ipc-sw.ipc-depth1 { background: var(--surface-player-body); }
+.ipc-legend .ipc-sw.ipc-depth2 { background: var(--surface-player-highlight); }
+.ipc-legend .ipc-sw.ipc-depth3 { background: var(--border-focus-friendly-dark); }
+.ipc-legend .ipc-sw.ipc-depth4 { background: var(--text-player-highlight); }
+.ipc-legend .ipc-sw.ipc-w1 { background: var(--border); }
+.ipc-legend .ipc-sw.ipc-w2 { background: var(--struct-health-bar-health); }
+.ipc-legend .ipc-sw.ipc-w3 { background: var(--text-warning); }
+
+/* The claims tape. */
+.ipc-tape { display: flex; flex-direction: column; gap: var(--spacing-xs); padding: var(--spacing-sm) var(--spacing-xs); border-top: 1px solid var(--border-subtle); }
+.ipc-tape .ipc-who { flex-wrap: nowrap; align-items: flex-start; }
+.ipc-tape .ipc-who .sui-badge, .ipc-tape .ipc-who .ipc-sw { flex: none; }
+.ipc-tape.ipc-mine { box-shadow: inset var(--spacing-xs) 0 0 var(--accent-primary); }

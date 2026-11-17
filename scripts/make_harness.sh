@@ -721,6 +721,126 @@ cat > "$FIX" <<'EOF'
      * `alpha_per_kw_day` is. */
     /* The Replication card. `mcp_replicate` answers like the Rust press:
      * the queue after the press, so a stale optimistic count is corrected. */
+    /* Sector Blitz (mcp/influence.rs). One contest, three sectors, five
+     * guilds — the shapes /api/influence answers: decimal strings, competition
+     * ranks, the build and height in `meta`. Contest #1 is an earlier final. */
+    terminal_influence: function (a) {
+      var path = a.path || '', q = a.query || {};
+      var C2 = { contest_id: '2', chain_id: 'structstestnet-111', start_height: '3540000', end_height: '3640000', rule_id: '1', scoring_mode: 'planet_sectors',
+        win_points: '100', claim_points: '200', build_id: '7', projected_height: '3598410', state: 'live', source_height: '3598412', coverage_start: '3500000',
+        sectors_complete: true, data_ready: true, status: 'active', sectors: [44, 127, 999] };
+      var C1 = Object.assign({}, C2, { contest_id: '1', start_height: '3400000', end_height: '3480000', status: 'final', state: 'final', build_id: '3' });
+      var meta = { api_contract: 'structs-influence-v1', contest_id: '2', build_id: '7', height: '3598410', projected_height: '3598410', source_height: '3598412',
+        contest_start_height: '3540000', contest_end_height: '3640000', status: 'active', scoring_mode: 'planet_sectors', win_points: '100', claim_points: '200' };
+      var G = [['0-7', 'Vanta Syndicate', 'VNT', [2300, 1800, 2600], [15, 12, 14], [4, 3, 6]], ['0-2', 'Slow Tide', 'SLT', [2100, 3400, 500], [13, 20, 5], [4, 7, 0]],
+        ['0-11', 'Helix Accord', 'HLX', [900, 300, 2600], [5, 3, 16], [2, 0, 5]], ['0-5', 'Deepcore Union', 'ORE', [400, 1100, 700], [4, 7, 5], [0, 2, 1]],
+        ['0-14', 'Null Meridian', 'NUL', [0, 100, 0], [0, 1, 0], [0, 0, 0]]];
+      var SEC = [44, 127, 999];
+      var sum = function (a) { return a[0] + a[1] + a[2]; };
+      var P = [['1-902', 'Sable Wren', '0-2', 2100, 9, 3], ['1-3120', 'Ion Halvard', '0-11', 1900, 11, 4], ['1-1450', 'Pike Morrow', '0-2', 1700, 9, 4],
+        ['1-61', 'Kestrel Nine', '0-7', 1500, 9, 3], ['1-2210', 'Vel Okoro', '0-7', 1400, 8, 3], ['1-873', 'Ashgrove', '0-7', 1300, 9, 2], ['1-2788', 'Tamsin Rook', '0-2', 1300, 7, 3]];
+      var prow = function (r, i) { return { player_id: r[0], guild_id: r[2], unique_planets: String(r[4]), held_planets: String(r[5]), points: String(r[3]),
+        rank: String(i === 6 ? 6 : i + 1), profile: { username: r[1], pfp_client_render_attributes: null, guild_id: r[2], tag: null, planet_id: '2-' + (400 + i),
+          fleet_status: i % 2 ? 'away' : 'on_station', ore: String(i * 3), undiscovered_ore: '0', under_attack: i === 0 } }; };
+      var standings = [];
+      G.forEach(function (g) { SEC.forEach(function (s, i) {
+        var top = Math.max.apply(null, G.map(function (x) { return x[3][i]; }));
+        var ahead = G.filter(function (x) { return x[3][i] > g[3][i] || (x[3][i] === g[3][i] && sum(x[3]) > sum(g[3])); }).length;
+        standings.push({ guild_id: g[0], sector: s, unique_planets: String(g[4][i]), held_planets: String(g[5][i]), points: String(g[3][i]),
+          overall_points: String(sum(g[3])), sector_rank: String(ahead + 1), tied_for_lead: g[3][i] === top && top > 0 && G.filter(function (x) { return x[3][i] === top; }).length > 1, is_winner: false });
+      }); });
+      var guildRows = [['0-7', 2], ['0-2', 1], ['0-11', 1], ['0-5', 0], ['0-14', 0]].map(function (x, i) {
+        var g = G.filter(function (y) { return y[0] === x[0]; })[0];
+        return { guild_id: g[0], rank: String(i + 1), points: String(sum(g[3])), overall_points: String(sum(g[3])), unique_planets: String(sum(g[4])), held_planets: String(sum(g[5])),
+          sectors_controlled: x[1], controlled_sectors: [], profile: { name: g[1], tag: g[2], logo: null } };
+      });
+      if (path === 'contests') return { success: true, errors: [], data: [C1, C2], meta: {} };
+      var m;
+      if (/^contests\/2\/standings$/.test(path)) return { success: true, errors: [], data: standings, meta: meta };
+      if (/^contests\/2\/guilds(\/page\/\d+)?$/.test(path)) return { success: true, errors: [], data: guildRows, total: '5', meta: meta };
+      if ((m = /^contests\/2\/guilds\/(0-\d+)$/.exec(path))) {
+        var g = G.filter(function (y) { return y[0] === m[1]; })[0];
+        return { success: true, errors: [], meta: meta, data: { guild_id: g[0], sector: null, unique_planets: String(sum(g[4])), held_planets: String(sum(g[5])), points: String(sum(g[3])), overall_points: String(sum(g[3])),
+          sectors: standings.filter(function (r) { return r.guild_id === g[0]; }) } };
+      }
+      if (/^contests\/2\/players(\/page\/\d+)?$/.test(path)) {
+        var rows = P.map(prow).filter(function (r) { return !q.guild_id || r.guild_id === q.guild_id; });
+        return { success: true, errors: [], data: rows, total: String(q.guild_id ? rows.length : 212), meta: meta };
+      }
+      if ((m = /^contests\/2\/players\/(1-\d+)$/.exec(path))) {
+        var pl = P.filter(function (y) { return y[0] === m[1]; })[0];
+        if (!pl) return Promise.reject('Guild API 404 http://guild/api/influence/' + path + ': Player is not a contest participant');
+        return { success: true, errors: [], meta: meta, data: { player_id: pl[0], guild_id: pl[2], sector: null, unique_planets: String(pl[4]), held_planets: String(pl[5]), points: String(pl[3]),
+          overall_points: String(pl[3]), rank: String(P.indexOf(pl) + 1), sectors: [{ sector: 44, unique_planets: '5', held_planets: '2', points: '900' }, { sector: 127, unique_planets: '0', held_planets: '0', points: '0' }, { sector: 999, unique_planets: '4', held_planets: '1', points: '600' }] } };
+      }
+      if (/\/history$/.test(path)) {
+        var start = Number(q.start_height), end = Number(q.end_height), b = Number(q.bucket_blocks) || 1000;
+        var opening = [], samples = [];
+        var keys = q.group_by === 'guild_sector' ? [].concat.apply([], G.map(function (g) { return SEC.map(function (s, i) { return { guild_id: g[0], sector: s, fin: g[3][i] }; }); }))
+          : /players\//.test(path) ? [{ player_id: path.split('/')[3], fin: 1500 }] : G.map(function (g) { return { guild_id: g[0], fin: sum(g[3]) }; });
+        keys.forEach(function (k, ki) {
+          var val = function (h) { var t = (h - 3540000) / 58410; return Math.round(k.fin * Math.max(0, Math.min(1, ki % 2 ? Math.pow(t, 1.6) : Math.sqrt(t))) / 100) * 100; };
+          var lab = function (o) { if (k.guild_id) o.guild_id = k.guild_id; if (k.player_id) o.player_id = k.player_id; if (k.sector != null) o.sector = k.sector; return o; };
+          opening.push(lab({ unique_planets: '0', held_planets: '0', points: String(val(start - 1)) }));
+          var prev = val(start - 1);
+          for (var lo = start; lo <= end; lo += b) {
+            var hi = Math.min(end, lo + b - 1), v = val(hi);
+            samples.push(lab({ start_height: String(lo), height: String(hi), unique_planets: '0', held_planets: '0', points: String(v),
+              unique_delta: String(Math.max(0, (v - prev) / 100)), claim_delta: '0', points_delta: String(v - prev) }));
+            prev = v;
+          }
+        });
+        return { success: true, errors: [], data: { opening: opening, samples: samples }, meta: Object.assign({}, meta, { bucket_blocks: String(b) }) };
+      }
+      if (/^contests\/1\//.test(path)) return Promise.reject('Guild API 404 http://guild/api/influence/' + path + ': Contest not found');
+      return Promise.reject('harness: no influence fixture for ' + path);
+    },
+    /* The live tape (mcp/influence_stream.rs). `window.__INFLUENCE_LIVE__ =
+     * false` plays a session that has heard no influence frames. */
+    terminal_influence_tape: function (a) {
+      if (window.__INFLUENCE_LIVE__ === false) return { events: [], live: false, connected: false, status: { frames: 0, gaps: 0 } };
+      var now = Date.now();
+      return { live: true, connected: true, status: { frames: 41, gaps: 0, last_height: '3598402' }, events: [
+        { seq: 4, kind: 'lead', contest_id: '2', height: '3598402', at_ms: now - 20000, sector: 999, leaders: ['0-11', '0-7'], before: ['0-7'], points: '2600' },
+        { seq: 3, kind: 'raid', contest_id: '2', height: '3598402', at_ms: now - 20000, planet_id: '2-4410', sector: 999,
+          raid: { raid_id: '9001', height: '3598402', attacker: '1-3388', defender: '1-61', attacker_guild: '0-11', defender_guild: '0-7', source_sector: 999 },
+          credited: [], uncredited: [], holder_before: '1-61', holder_after: '1-3388', holder_guild_before: '0-7', holder_guild_after: '0-11', claim_known: true,
+          gains: [{ guild_id: '0-11', points: 200 }, { guild_id: '0-7', points: -200 }] },
+        { seq: 2, kind: 'raid', contest_id: '2', height: '3598350', at_ms: now - 340000, planet_id: '2-3310', sector: 44,
+          raid: { raid_id: '8990', height: '3598350', attacker: '1-61', defender: '1-902', attacker_guild: '0-7', defender_guild: '0-2', source_sector: 44 },
+          credited: ['0-7'], uncredited: [], holder_before: null, holder_after: '1-61', holder_guild_before: null, holder_guild_after: '0-7', claim_known: true,
+          gains: [{ guild_id: '0-7', points: 300 }] },
+        { seq: 1, kind: 'transfer', contest_id: '2', height: '3598310', at_ms: now - 580000, planet_id: '2-118', sector: 127,
+          raid: null, credited: ['0-7'], uncredited: ['0-5'], holder_before: '1-873', holder_after: '1-873', holder_guild_before: '0-5', holder_guild_after: '0-7', claim_known: true,
+          gains: [{ guild_id: '0-5', points: -300 }, { guild_id: '0-7', points: 300 }] },
+      ] };
+    },
+    terminal_influence_me: { player_id: '1-61', standing: { player_id: '1-61', guild_id: '0-7', rank: '4', points: '1500', overall_points: '1500', unique_planets: '9', held_planets: '3' } },
+    terminal_influence_planet: function (a) {
+      return { meta: { build_id: '7', height: '3598410' }, chain: { name: 'Aqixe', owner: '1-3388', owner_guild_id: '0-11', sector: 999 },
+        data: { planet_id: a.planet, exists: true, sector: 999, holder: '1-2210', holder_guild_id: '0-7',
+          latest_raid: { raid_id: '8765', height: '3597880', attacker: '1-2210', defender: '1-3388', attacker_guild: '0-7', defender_guild: '0-11', source_sector: 999 },
+          guild_coverage: [{ guild_id: '0-2', supporter_count: '1' }, { guild_id: '0-5', supporter_count: '1' }, { guild_id: '0-7', supporter_count: '2' }] } };
+    },
+    terminal_influence_territory: function (a) {
+      var planets = [];
+      for (var i = 0; i < 48; i++) {
+        var raided = i % 3 !== 2;
+        planets.push({ planet_id: '2-' + (4000 + i), name: null, owner: '1-' + (100 + i), owner_guild_id: i % 5 === 0 ? '0-7' : '0-2', status: 'active',
+          influence: { planet_id: '2-' + (4000 + i), exists: raided, sector: a.sector, holder: raided && i % 2 ? '1-902' : null, holder_guild_id: raided && i % 2 ? (i % 4 === 1 ? '0-2' : '0-7') : null,
+            latest_raid: raided ? { raid_id: String(i), height: '3598000', attacker: '1-902', defender: '1-' + (100 + i), attacker_guild: '0-2', defender_guild: '0-7', source_sector: a.sector } : null,
+            guild_coverage: raided ? [{ guild_id: '0-2', supporter_count: '1' }].concat(i % 4 === 0 ? [{ guild_id: '0-7', supporter_count: '2' }] : []) : [] } });
+      }
+      return { sector: a.sector, planets: planets, total: 48, cut: false, snapshot_height: 3598412, meta: { build_id: '7', height: '3598410' }, mixed_builds: false };
+    },
+    terminal_influence_hunt: function (a) {
+      return { searcher: '1-61', page: a.page || 1, rows: [
+        { id: '1-3120', username: 'Ion Halvard', guild_name: 'Helix Accord', tag: 'HLX', fleet_status: 'away', ore: '6', planet_id: '2-5021', under_attack: false, influence_points: '300', sector: 999 },
+        { id: '1-902', username: 'Sable Wren', guild_name: 'Slow Tide', tag: 'SLT', fleet_status: 'on_station', ore: '9', planet_id: '2-3302', under_attack: true, influence_points: '300', sector: 127 },
+        { id: '1-1450', username: 'Pike Morrow', guild_name: 'Slow Tide', tag: 'SLT', fleet_status: 'away', ore: '2', planet_id: '2-1288', under_attack: false, influence_points: '200', sector: 44 },
+        { id: '1-4022', username: 'Brask Vey', guild_name: 'Null Meridian', tag: 'NUL', fleet_status: 'away', ore: '1', planet_id: '2-6120', under_attack: false, influence_points: '0', sector: 127 },
+      ] };
+    },
     terminal_replication: {
       queue: 7, replicants: 182, incubating: [{ index: 1204, name: 'Kelmoran', snapshot: 'productive', started_ms: 0 }],
       room: 2, room_now: 2, room_reason: 'energy', max_per_round: 5, enabled: true,

@@ -107,6 +107,7 @@
     ['Armada', ['replication', 'armada', 'ops', 'build', 'fleet', 'pow', 'tasks', 'solve', 'queue', 'results', 'crew', 'crewpay']],
     ['Industry', ['energy', 'grid', 'brownout', 'halt', 'allocations', 'fuel', 'market', 'book', 'ore', 'banks', 'gt', 'bank', 'rank', 'found', 'providers', 'provider', 'wallet', 'deliver']],
     ['War', ['scout', 'tally', 'posture', 'targets', 'raids', 'log', 'grudges', 'vetoes', 'incidents']],
+    ['Contest', ['contest', 'standings', 'race', 'territory', 'influence', 'leaders', 'hunt', 'claims']],
     ['System', ['health', 'sounds', 'external']],
   ];
   function cardGroups() {
@@ -1650,6 +1651,16 @@
      * word the game uses. */
     CLUSTER: ['crew'], CONTRIBUTE: ['crew'], SYNC: ['crew'], SYNCHRONIZED: ['crew'], PHERALS: ['crew'], PROXIES: ['crew'],
     BOUNTY: ['crewpay'], OWED: ['crewpay'], PAYOUTS: ['crewpay'],
+    /* Sector Blitz — the influence contests (board-terminal-contest.js). Read
+     * only. `IP` takes a guild, player or planet; the rest read their own
+     * words after them (`STANDINGS 127`, `LEADERS guilds 999`, `CONTEST #2`)
+     * through the card's parseArgs. */
+    CONTEST: ['contest', 'args'], BLITZ: ['contest', 'args'],
+    STANDINGS: ['standings', 'args'], SECTORS: ['standings', 'args'],
+    RACE: ['race', 'args'], TERRITORY: ['territory', 'args'], TURF: ['territory', 'args'],
+    IP: ['influence', 'id'], INFLUENCE: ['influence', 'id'],
+    LEADERS: ['leaders', 'args'], LEADERBOARD: ['leaders', 'args'],
+    HUNT: ['hunt', 'args'], CLAIMS: ['claims', 'args'],
   };
   Terminal.WORDS = WORDS;
 
@@ -1851,6 +1862,13 @@
        * false, which is exactly the case the menu already knows to win. */
       if (arg === 'id' && !acceptsId(type, rest)) return null;
       var pp = {}; pp[arg] = rest; return card(type, pp);
+    }
+    /* `args` — the card reads its own words (`LEADERS guilds 127`). Its
+     * parseArgs answers params, or null for a line it does not take. */
+    if (arg === 'args') {
+      var adef = TYPES[type];
+      var pa = adef && adef.parseArgs ? adef.parseArgs(rest) : {};
+      return pa ? card(type, pa) : null;
     }
     if (arg === 'optid') return card(type, rest ? { id: rest } : {});
     /* `text` — everything after the word is one free-text argument. `FIND
@@ -2090,7 +2108,7 @@
         g.options.forEach(function (o) {
           var word = wordFor(o.value);
           if (!word) return;
-          var arg = WORDS[word] && WORDS[word][1] ? ARG_LABEL[WORDS[word][1]] || '' : '';
+          var arg = argLabel(WORDS[word]);
           out.push({ line: word + (arg ? ' ' : ''), words: word, what: o.label, arg: arg, group: g.group, run: !arg });
         });
       });
@@ -2151,7 +2169,7 @@
       if (!def || def.hidden) return;
       var key = w.join(':');
       if (seen[key]) { seen[key].words += ' · ' + word; return; }
-      var arg = w[1] && ARG_LABEL[w[1]] ? ARG_LABEL[w[1]] : '';
+      var arg = argLabel(w);
       seen[key] = { line: word + (arg ? ' ' : ''), words: word, what: def.label, arg: arg, run: !arg };
       out.push(seen[key]);
     });
@@ -2619,6 +2637,13 @@
   // opens its card; one that needs an argument lands in the command box with
   // the caret after it. The bare-id forms and the workspace verbs are rows too.
   var ARG_LABEL = { id: '<id>', ids: '<id id …>', rules: '<rule …>', section: '<section>', optid: '[id]' };
+  /* The hint a word's argument shows: the shared labels, or the card's own
+   * `argHint` for a word that reads its own arguments. */
+  function argLabel(w) {
+    if (!w || !w[1]) return '';
+    if (w[1] === 'args') { var d = TYPES[w[0]]; return (d && d.argHint) || ''; }
+    return ARG_LABEL[w[1]] || '';
+  }
   function helpLine(words, what, arg, onClick) {
     var r = H.el('a', 'sui-data-card-row tm-help-row');
     r.href = 'javascript:void(0)';
@@ -2673,7 +2698,7 @@
         section(g.group);
         rows.forEach(function (o) {
           var e = by[o.value];
-          var arg = e.arg && e.arg !== 'config' ? ARG_LABEL[e.arg] || e.arg : '';
+          var arg = e.arg === 'args' ? argLabel([o.value, 'args']) : e.arg && e.arg !== 'config' ? ARG_LABEL[e.arg] || e.arg : '';
           var first = e.words[0];
           /* A fixed set is worth naming: `<section>` is a prompt, `universe ·
            * trends · …` is the answer. */

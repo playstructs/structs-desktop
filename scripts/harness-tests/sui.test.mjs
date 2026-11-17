@@ -202,6 +202,11 @@ const BUDGET = {
   // bars and swatches on the spacing scale.
   'board-terminal-onboarding.js': [0, 0],
   'onboarding.css': [0, 15],
+  // The Sector Blitz cards (2026-11-17): DOM builders only; the stylesheet's
+  // px are 1px hairlines and the flex bases at which the race legend and the
+  // territory panel stop sitting beside their chart (breakpoints, no token).
+  'board-terminal-contest.js': [0, 0],
+  'contest.css': [0, 7],
   'board-shim.js':      [0, 0],
   // The debug-tab patch INJECTED INTO THE GAME'S OWN WINDOW, so it renders
   // inches from the real UI — and it was the least audited file in the repo.

@@ -773,7 +773,7 @@ const tick = (ms) => new Promise((r) => setTimeout(r, ms));
      * only when the CARD's own `kinds` accepts it. */
     const words = (l) => T.suggestFor(l).map((s) => s.words);
     check('typing an id offers every question you can ask OF it, named by the card it opens',
-      words('2-29604 ').join(' ') === 'MAP PLANET INSPECT WATCH LOG HIST SCOUT BUILD ROOM',
+      words('2-29604 ').join(' ') === 'MAP PLANET INSPECT WATCH LOG HIST SCOUT BUILD IP ROOM',
       words('2-29604 ').join(' '));
     /* A conversation is not a card. `ROOM 2-29604`, `DM 1-61`, `ROOM #trade`
      * and `COMMS` all open the Comms WINDOW — at that subject when there is

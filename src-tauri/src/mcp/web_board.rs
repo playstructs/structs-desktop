@@ -1072,6 +1072,41 @@ async fn board_invoke(
             Some(g) => from_result(crate::mcp::terminal::terminal_guild_bank_history(g).await),
             None => err_json("guildId required".into()),
         },
+        // Sector Blitz: reads only (mcp/influence.rs).
+        "terminal_influence" => match s("path") {
+            Some(p) => from_result(crate::mcp::influence::terminal_influence(p, body.get("query").cloned()).await),
+            None => err_json("path required".into()),
+        },
+        "terminal_influence_hunt" => match body.get("contest").and_then(|v| v.as_u64()) {
+            Some(c) => from_result(crate::mcp::influence::terminal_influence_hunt(
+                c,
+                body.get("sector").and_then(|v| v.as_u64()).map(|n| n as u16),
+                body.get("rival").and_then(|v| v.as_bool()),
+                body.get("undefeated").and_then(|v| v.as_bool()),
+                body.get("page").and_then(|v| v.as_u64()).map(|n| n as u32),
+            ).await),
+            None => err_json("contest required".into()),
+        },
+        "terminal_influence_territory" => match (body.get("contest").and_then(|v| v.as_u64()), body.get("sector").and_then(|v| v.as_u64())) {
+            (Some(c), Some(sec)) => from_result(crate::mcp::influence::terminal_influence_territory(c, sec as u16).await),
+            _ => err_json("contest + sector required".into()),
+        },
+        "terminal_influence_tape" => match body.get("contest").and_then(|v| v.as_u64()) {
+            Some(c) => ok_json(crate::mcp::influence_stream::terminal_influence_tape(
+                c,
+                body.get("since").and_then(|v| v.as_u64()),
+                body.get("limit").and_then(|v| v.as_u64()).map(|n| n as u32),
+            )),
+            None => err_json("contest required".into()),
+        },
+        "terminal_influence_me" => match body.get("contest").and_then(|v| v.as_u64()) {
+            Some(c) => from_result(crate::mcp::influence::terminal_influence_me(c).await),
+            None => err_json("contest required".into()),
+        },
+        "terminal_influence_planet" => match (body.get("contest").and_then(|v| v.as_u64()), s("planet")) {
+            (Some(c), Some(p)) => from_result(crate::mcp::influence::terminal_influence_planet(c, p).await),
+            _ => err_json("contest + planet required".into()),
+        },
         "terminal_tearsheet" => match s("id") {
             Some(i) => from_result(crate::mcp::terminal::terminal_tearsheet(i).await),
             None => err_json("id required".into()),

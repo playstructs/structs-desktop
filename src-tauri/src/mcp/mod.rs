@@ -38,6 +38,8 @@ pub mod rates;
 pub mod game_stats;
 pub mod grass_native;
 pub mod guild_api;
+pub mod influence;
+pub mod influence_stream;
 pub mod guild_economy;
 pub mod guild_admin;
 pub mod guild_membership;

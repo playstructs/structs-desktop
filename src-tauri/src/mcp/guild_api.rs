@@ -256,6 +256,20 @@ fn errors_empty(v: &Value) -> bool {
     }
 }
 
+/// The one human sentence in an error envelope's `errors` — the influence
+/// API's `influence_error`, or the first string value of any other key.
+pub(crate) fn envelope_error_text(env: &Value) -> Option<String> {
+    let errors = env.get("errors")?;
+    if let Some(s) = errors.get("influence_error").and_then(|v| v.as_str()) {
+        return Some(s.to_string());
+    }
+    match errors {
+        Value::Object(o) => o.values().find_map(|v| v.as_str().map(String::from)),
+        Value::Array(a) => a.iter().find_map(|v| v.as_str().map(String::from)),
+        _ => None,
+    }
+}
+
 /// A page of results plus a hint about whether more pages exist.
 #[derive(Debug, Clone)]
 pub struct GuildPage<T> {
@@ -397,6 +411,50 @@ impl GuildApiClient {
         }
 
         Ok(env.data)
+    }
+
+    /// GET a route and keep the WHOLE envelope — `data` beside `meta` and
+    /// `total`. The influence API puts the contest's build, height and
+    /// scoring weights in `meta`, and a card that dropped it could not say
+    /// how fresh its numbers are. Same login retry as `get`.
+    pub(crate) async fn get_whole(&self, path: &str) -> Result<Value, String> {
+        match self.get_whole_once(path).await {
+            Err(e) if Self::is_auth_error(&e) => {
+                if crate::mcp::guild_auth::recover(self).await {
+                    self.get_whole_once(path).await
+                } else {
+                    Err(e)
+                }
+            }
+            other => other,
+        }
+    }
+
+    async fn get_whole_once(&self, path: &str) -> Result<Value, String> {
+        let url = self.build_url(path);
+        note_request(&url);
+        let resp = send_get(&url).await?;
+        let status = resp.status();
+        let body = resp.text().await.map_err(|e| format!("Guild API read error: {}", e))?;
+        let parsed: Option<Value> = serde_json::from_str(&body).ok();
+        if !status.is_success() {
+            // The influence routes answer 404/422/503 with a sentence in
+            // `errors.influence_error`; that sentence is what a card shows.
+            if let Some(msg) = parsed.as_ref().and_then(envelope_error_text) {
+                return Err(format!("Guild API {} {}: {}", status.as_u16(), url, msg));
+            }
+            return Err(format!("Guild API {} {}: {}", status.as_u16(), url, body));
+        }
+        let env = parsed.ok_or_else(|| format!("Guild API JSON parse error (body: {})", body))?;
+        let ok = env.get("success").and_then(|v| v.as_bool()).unwrap_or(false);
+        let errors = env.get("errors").cloned().unwrap_or(Value::Null);
+        if !ok || !errors_empty(&errors) {
+            if errors.get("authentication_error").is_some() {
+                return Err("Guild API requires login — sign in via the Structs app first".into());
+            }
+            return Err(format!("Guild API returned errors: {}", serde_json::to_string(&errors).unwrap_or_default()));
+        }
+        Ok(env)
     }
 
     /// GET a list endpoint and wrap as `GuildPage`.
