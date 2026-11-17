@@ -83,6 +83,17 @@ const SIEGE_IDLE_ROUNDS: usize = 3;
 const ONGOING_GRACE_BLOCKS: u64 = 60;
 /// A failed attempt doubles the target's cooldown, up to 2^this.
 const MAX_COOLDOWN_DOUBLINGS: u32 = 4;
+/// Hours a player rests after ANY raid they were part of — raider or raided,
+/// ours or anyone's. Bots out-pace humans; a player who just fought gets a
+/// day to rebuild before we come knocking.
+pub const RAID_REST_HOURS: f64 = 24.0;
+/// How long one read of the galaxy's raid history is reused across scans.
+const RAID_HISTORY_TTL_SECS: f64 = 5.0 * 60.0;
+/// A history older than this is too stale to vouch for anyone: dispatch
+/// stops rather than risk raiding a player who is resting.
+const RAID_HISTORY_MAX_AGE_SECS: f64 = 60.0 * 60.0;
+/// Pages of 100 `raid_status` rows walked back looking for the rest horizon.
+const RAID_HISTORY_MAX_PAGES: u32 = 40;
 /// Difficulty the raid proof is expected to decay to before it is worth
 /// hashing — only used to turn a shield into "minutes exposed" for the score.
 const RAID_PROOF_DIFFICULTY: u64 = 6;
@@ -244,6 +255,10 @@ static HISTORY: LazyLock<Mutex<HashMap<String, (u32, u32)>>> = LazyLock::new(|| 
 /// the loop backs off a target it keeps bouncing off instead of re-flying the
 /// same losing trip every two hours.
 static FAIL_STREAK: LazyLock<Mutex<HashMap<String, u32>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+/// player_id -> ms of the newest raid event they took part in (last
+/// `RAID_REST_HOURS`), with the ms it was read. See [`recent_raiders`].
+static RAID_HISTORY: LazyLock<Mutex<(f64, HashMap<String, f64>)>> =
+    LazyLock::new(|| Mutex::new((0.0, HashMap::new())));
 /// Expeditions currently in flight, keyed by raider player id.
 static ACTIVE: LazyLock<Mutex<HashMap<String, Expedition>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
 
@@ -391,6 +406,10 @@ pub struct Candidate {
     pub last_action_block: u64,
     #[serde(default)]
     pub blocks_since_action: u64,
+    /// Hours since this player last took part in any raid, either side, if
+    /// within `RAID_REST_HOURS`. `None` = rested.
+    #[serde(default)]
+    pub raided_hours_ago: Option<f64>,
     #[serde(default)]
     pub score: f64,
     /// `None` = GO. `Some(reason)` = NO-GO, shown verbatim on the board.
@@ -496,6 +515,15 @@ pub fn gate(c: &Candidate, cfg: &AutoRaidConfig, cooldown_remaining_mins: f64) -
     }
     if c.planet_id.is_empty() {
         return Some("no planet".into());
+    }
+    // Anyone who raided or was raided in the last day is left alone. Humans
+    // are slower than bots; back-to-back raids are no fun to play against.
+    if let Some(h) = c.raided_hours_ago.filter(|h| *h < RAID_REST_HOURS) {
+        return Some(format!(
+            "resting — in a raid {:.0} h ago, off-limits for {:.0} h more",
+            h,
+            (RAID_REST_HOURS - h).max(1.0)
+        ));
     }
     if c.stored_ore < cfg.min_ore {
         return Some(format!("ore {:.0} < min_ore {:.0}", c.stored_ore, cfg.min_ore));
@@ -610,6 +638,14 @@ async fn scan(
     }
     let batch = next_batch(&roster, EVALUATE_PER_SCAN);
 
+    // Who fought in the last day. Without it we cannot tell a resting player
+    // from a fresh one, so no new raid goes out — expeditions already in
+    // flight were supervised above and carry on.
+    let Some(recent) = recent_raiders(&client).await else {
+        run.blocked("raid history unavailable — not dispatching until resting players are known");
+        return;
+    };
+
     // ── Phase B: evaluate + score. ──
     let client_c = client.clone();
     // Defender counts come from the GRASS-fed snapshot, built once per scan.
@@ -630,8 +666,12 @@ async fn scan(
     .flatten()
     .collect();
 
+    let now = now_millis();
     for c in board.iter_mut() {
         run.players.fetch_add(1, Ordering::Relaxed);
+        c.raided_hours_ago = recent
+            .get(c.player_id.as_str())
+            .map(|ms| ((now - ms) / 3_600_000.0).max(0.0));
         c.score = score(c, cfg);
         c.blocked_by = gate(c, cfg, cooldown_remaining_mins(&c.planet_id, cfg.target_cooldown_mins));
     }
@@ -1029,9 +1069,150 @@ async fn evaluate(
         enemy_fleet_structs,
         last_action_block: last_action,
         blocks_since_action: crate::mcp::types::Block::new(current_block).since(crate::mcp::types::Block::new(last_action)),
+        raided_hours_ago: None,
         score: 0.0,
         blocked_by: None,
     })
+}
+
+/// One raid seen in the history: (planet, raiding fleet, newest event ms).
+type RaidSighting = (String, Option<String>, f64);
+
+/// Pure: fold `raid_status` activity rows into one sighting per
+/// (planet, fleet), keeping only events at or after `horizon_ms`. Every status
+/// counts — a raid that was turned back still put both players through it.
+fn raid_sightings(rows: &[serde_json::Value], horizon_ms: f64) -> Vec<RaidSighting> {
+    let text = |v: Option<&serde_json::Value>| {
+        v.and_then(|x| x.as_str()).map(str::trim).filter(|s| !s.is_empty()).map(String::from)
+    };
+    let mut newest: HashMap<(String, Option<String>), f64> = HashMap::new();
+    for row in rows {
+        if text(row.get("category")).as_deref() != Some("raid_status") {
+            continue;
+        }
+        let Some(ms) = text(row.get("time"))
+            .as_deref()
+            .and_then(crate::mcp::raid_view::parse_guild_time)
+        else {
+            continue;
+        };
+        if ms < horizon_ms {
+            continue;
+        }
+        // `detail` arrives as an object or as a JSON string, by route.
+        let detail = match row.get("detail") {
+            Some(serde_json::Value::String(s)) => serde_json::from_str(s).unwrap_or_default(),
+            Some(v) => v.clone(),
+            None => serde_json::Value::Null,
+        };
+        let Some(planet) = text(row.get("planet_id")).or_else(|| text(detail.get("planet_id"))) else {
+            continue;
+        };
+        let e = newest.entry((planet, text(detail.get("fleet_id")))).or_insert(ms);
+        *e = e.max(ms);
+    }
+    newest.into_iter().map(|((p, f), ms)| (p, f, ms)).collect()
+}
+
+/// Every player who took part in a raid — the fleet's owner and the planet's
+/// owner — in the last `RAID_REST_HOURS`, with the time of their newest one.
+/// `None` when the history cannot be read and the last good read is too old
+/// to trust; the caller must not dispatch on a guess.
+async fn recent_raiders(client: &CosmosClient) -> Option<HashMap<String, f64>> {
+    let now = now_millis();
+    {
+        let cache = RAID_HISTORY.lock().unwrap();
+        if cache.0 > 0.0 && now - cache.0 < RAID_HISTORY_TTL_SECS * 1000.0 {
+            return Some(cache.1.clone());
+        }
+    }
+    let horizon = now - RAID_REST_HOURS * 3_600_000.0;
+    let stale_fallback = || {
+        let cache = RAID_HISTORY.lock().unwrap();
+        (cache.0 > 0.0 && now - cache.0 < RAID_HISTORY_MAX_AGE_SECS * 1000.0).then(|| cache.1.clone())
+    };
+
+    // The feed is newest-first (time DESC), so walk until a page reaches past
+    // the horizon. Hitting the page cap first means the day held more raids
+    // than we read — the oldest few hours are then unknown, and treated so.
+    let mut rows: Vec<serde_json::Value> = Vec::new();
+    let mut reached_horizon = false;
+    for page in 1..=RAID_HISTORY_MAX_PAGES {
+        let p = match client.guild.planet_activity_by_category("raid_status", page).await {
+            Ok(p) => p,
+            Err(e) => {
+                crate::mcp::telemetry::tlog(
+                    "auto_raid",
+                    crate::mcp::telemetry::Sev::Warn,
+                    format!("raid history page {page} failed: {e}"),
+                );
+                return stale_fallback();
+            }
+        };
+        let oldest = p
+            .items
+            .iter()
+            .filter_map(|r| r.get("time").and_then(|t| t.as_str()))
+            .filter_map(crate::mcp::raid_view::parse_guild_time)
+            .fold(f64::INFINITY, f64::min);
+        let more = p.has_more;
+        rows.extend(p.items);
+        if !more || oldest < horizon {
+            reached_horizon = true;
+            break;
+        }
+    }
+    if !reached_horizon {
+        crate::mcp::telemetry::tlog(
+            "auto_raid",
+            crate::mcp::telemetry::Sev::Warn,
+            format!(
+                "raid history: {RAID_HISTORY_MAX_PAGES} pages did not reach back {RAID_REST_HOURS} h — \
+                 not dispatching"
+            ),
+        );
+        return stale_fallback();
+    }
+
+    let mut lookups: Vec<(&'static str, String, f64)> = Vec::new();
+    for (planet, fleet, ms) in raid_sightings(&rows, horizon) {
+        lookups.push(("planet", planet, ms));
+        if let Some(f) = fleet {
+            lookups.push(("fleet", f, ms));
+        }
+    }
+    // Owners from the perception snapshot; the chain only for what it lacks.
+    let client_o = client.clone();
+    let resolved = crate::mcp::loop_util::map_concurrent(
+        lookups,
+        crate::mcp::capacity::reads_fanout(),
+        move |(kind, id, ms)| {
+            let client = client_o.clone();
+            async move {
+                let wrapper = if kind == "planet" { "Planet" } else { "Fleet" };
+                let read = |v: &serde_json::Value| {
+                    v.get(wrapper)
+                        .and_then(|b| b.get("owner"))
+                        .and_then(|o| o.as_str())
+                        .filter(|s| !s.is_empty())
+                        .map(String::from)
+                };
+                let owner = match crate::mcp::perception::snapshot_entity(kind, &id).as_ref().and_then(read) {
+                    Some(o) => Some(o),
+                    None => client.entity(kind, &id).await.ok().as_ref().and_then(read),
+                };
+                owner.map(|p| (p, ms))
+            }
+        },
+    )
+    .await;
+    let mut out: HashMap<String, f64> = HashMap::new();
+    for (player, ms) in resolved.into_iter().flatten() {
+        let e = out.entry(player).or_insert(ms);
+        *e = e.max(ms);
+    }
+    *RAID_HISTORY.lock().unwrap() = (now, out.clone());
+    Some(out)
 }
 
 /// Minutes of cooldown left on a target. The configured cooldown doubles for
@@ -1963,9 +2144,60 @@ mod tests {
             enemy_fleet_structs: 4,
             last_action_block: 0,
             blocks_since_action: 100_000,
+            raided_hours_ago: None,
             score: 0.0,
             blocked_by: None,
         }
+    }
+
+    #[test]
+    fn a_player_in_a_raid_within_a_day_rests() {
+        isolate_lists();
+        let cfg = AutoRaidConfig::default();
+        let mut c = cand();
+        c.raided_hours_ago = Some(3.0);
+        let why = gate(&c, &cfg, 0.0).expect("a fresh raid must block");
+        assert!(why.starts_with("resting"), "{why}");
+        assert!(why.contains("21 h"), "{why}");
+        c.raided_hours_ago = Some(23.9);
+        assert!(gate(&c, &cfg, 0.0).is_some(), "still inside the day");
+        c.raided_hours_ago = Some(24.0);
+        assert!(gate(&c, &cfg, 0.0).is_none(), "a full day of rest clears it");
+    }
+
+    #[test]
+    fn rest_outranks_a_rich_open_target() {
+        isolate_lists();
+        let mut c = cand();
+        c.stored_ore = 5_000.0;
+        c.vulnerable = true;
+        c.raided_hours_ago = Some(0.1);
+        assert!(gate(&c, &AutoRaidConfig::default(), 0.0).unwrap().starts_with("resting"));
+    }
+
+    #[test]
+    fn raid_sightings_keep_both_sides_inside_the_horizon() {
+        let horizon = crate::mcp::raid_view::parse_guild_time("2026-11-16 12:00:00+00").unwrap();
+        let rows = vec![
+            // Fresh, detail as a JSON string — the inconsistent route shape.
+            json!({"category": "raid_status", "planet_id": "2-10", "time": "2026-11-17 09:00:00+00",
+                   "detail": "{\"status\":\"initiated\",\"fleet_id\":\"9-7\"}"}),
+            // Same raid, later status: one sighting, newest time wins.
+            json!({"category": "raid_status", "planet_id": "2-10", "time": "2026-11-17 10:00:00+00",
+                   "detail": {"status": "attackerRetreated", "fleet_id": "9-7"}}),
+            // Too old.
+            json!({"category": "raid_status", "planet_id": "2-11", "time": "2026-11-15 10:00:00+00",
+                   "detail": {"status": "raidSuccessful", "fleet_id": "9-8"}}),
+            // Not a raid row.
+            json!({"category": "fleet_arrive", "planet_id": "2-12", "time": "2026-11-17 10:00:00+00",
+                   "detail": {"fleet_id": "9-9"}}),
+        ];
+        let s = raid_sightings(&rows, horizon);
+        assert_eq!(s.len(), 1);
+        let (planet, fleet, ms) = &s[0];
+        assert_eq!(planet, "2-10");
+        assert_eq!(fleet.as_deref(), Some("9-7"));
+        assert_eq!(*ms, crate::mcp::raid_view::parse_guild_time("2026-11-17 10:00:00+00").unwrap());
     }
 
     /// A config written before a new field existed must still load, with the
