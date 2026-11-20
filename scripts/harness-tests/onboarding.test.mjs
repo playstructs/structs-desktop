@@ -2,10 +2,11 @@
 //
 //   bash scripts/make_harness.sh && node scripts/harness-tests/onboarding.test.mjs
 //
-// The brief this pins: how far new players get through signup and Combat
-// Training, how long it takes, where they quit or skip, and what players do
-// afterwards — over every guild. Every page reads the same filters
-// (interface, guild, active/inactive, replicants) and can compare by one of them.
+// The brief this pins (proposals/telemetry-redesign.md): eight sections in
+// journey order drawn with ONE grammar — a scope bar that never changes shape,
+// a KPI strip that states its time scope, blocks with the same actions, one
+// table component with one drill — over every guild, splittable by one
+// dimension, and every old figure still there.
 import { JSDOM } from 'jsdom';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { dirname, resolve } from 'node:path';
@@ -36,6 +37,11 @@ const T = w.Board.Terminal;
 check('TELEMETRY, ONBOARDING, FUNNEL and SIGNUPS open the card', ['TELEMETRY', 'ONBOARDING', 'FUNNEL', 'SIGNUPS'].every((x) => T.parse(x) && T.parse(x).type === 'onboarding'));
 const row = T.suggestFor('').find((o) => /\bTELEMETRY\b/.test(String(o.words || '')));
 check('filed under Explore as Telemetry', row && row.group === 'Explore' && row.what === 'Telemetry', JSON.stringify(row || null));
+const pp = (line) => (T.parse(line) || {}).params;
+check('a word opens a section: TELEMETRY retention lands on Engagement ▸ Retention', JSON.stringify(pp('TELEMETRY retention')) === '{"page":"engagement","view":"retention"}', JSON.stringify(pp('TELEMETRY retention')));
+check('…a view after its section, a window and a guild', JSON.stringify(pp('TELEMETRY onboarding runs 7d guild 0-5')) === '{"page":"onboarding","view":"runs","win":"7","guild":"0-5"}', JSON.stringify(pp('TELEMETRY onboarding runs 7d guild 0-5')));
+check('…a split and a bare guild id', JSON.stringify(pp('TELEMETRY 0-5 split interface')) === '{"guild":"0-5","compare":"interface"}', JSON.stringify(pp('TELEMETRY 0-5 split interface')));
+check('…and a word it does not know is not a command', T.parse('TELEMETRY banana') === null);
 
 // ── Pure pieces ──
 const O = T.onboarding;
@@ -51,15 +57,31 @@ check('a trend change is by date, and needs a point that far back', O.trendChang
 check('…a missing day does not shift the week: the newest point on or before it counts', O.trendChange([['2026-11-01', 1], ['2026-11-05', 2], ['2026-11-09', 9]], 7, 'level') === 8);
 check('…but a record that missed the window\'s first days has no change for it', O.trendChange([['2026-10-20', 1], ['2026-11-09', 9]], 7, 'level') === null);
 check('…and a daily count sums over the window instead', O.trendChange([['2026-11-01', 1], ['2026-11-05', 2], ['2026-11-09', 3]], 7, 'daily') === 5);
-check('each page names the controls it reads; the active window follows the activity split', O.uses('trends', 'guild') && !O.uses('trends', 'reps') && !O.uses('signup', 'reps') && O.uses('retention', 'active') && !O.uses('tutorial', 'active') && O.uses('tutorial', 'active', { activity: 'active' }));
+check('a delta compares the last window with the one before it', JSON.stringify(O.deltaOf([1, 1, 1, 2, 2, 2], 3, 'daily')) === '{"now":6,"then":3,"change":3}' && O.deltaOf([1, 2], 3, 'daily') === null && O.deltaOf([5, 6, 9], 1, 'level').change === 3);
+check('each section names the controls it reads', O.uses('trends', 'guild') && !O.uses('trends', 'reps') && !O.uses('acquisition', 'reps') && !O.uses('acquisition', 'activity') && O.uses('engagement', 'reps') && !O.uses('data', 'guild'));
 check('a running server total sparks as its daily increase', JSON.stringify(O.sparkOf({ history_series: { series: { signups_started: [null, 5, 7, 7, 10] } } }, {}, 'h:signups_started', true)) === '[2,0,3]');
 check('the daily record only sparks for the plain population', O.sparkOf({ history_series: { series: { mau: [1, 2, 3] } } }, {}, 'h:mau', false) === null);
 check('percentages: whole above 10%, one decimal below, a dash for nothing', O.pct(0.364) === '36%' && O.pct(0.029) === '2.9%' && O.pct(null) === '—' && O.pct(1) === '100%');
 check('the flagged steps are the largest, never a zero or a null', JSON.stringify(O.topKeys([{ key: 'a', d: 3 }, { key: 'b', d: null }, { key: 'c', d: 9 }, { key: 'e', d: 0 }], (r) => r.d, 3)) === '["c","a"]');
 check('count buckets read as whole ranges, the last open', O.bucketLabel({ lo: 0, hi: 0 }, 'count') === '0' && O.bucketLabel({ lo: 10, hi: 100 }, 'count') === '10–99' && /^≥ /.test(O.bucketLabel({ lo: 1e5, hi: null }, 'count')));
 check('refined alpha arrives in grams and is drawn on the alpha ladder', O.fmtKind('alpha', 2) === w.Board.helpers.fmtAlpha(2e6));
-const args = O.argsOf({ iface: 'structs-webapp', activity: 'inactive', compare: 'guild', active: '30', idle: '72' });
-check('the card asks with its filters', args.filters.interface === 'structs-webapp' && args.filters.activity === 'inactive' && args.filters.compare === 'guild' && args.activeDays === 30 && args.idleHours === 72, JSON.stringify(args));
+const args = O.argsOf({ iface: 'structs-webapp', activity: 'inactive', compare: 'guild', active: '30', idle: '72', page: 'guilds', win: '7' });
+check('the card asks with its filters, never its page or window', args.filters.interface === 'structs-webapp' && args.filters.activity === 'inactive' && args.filters.compare === 'guild' && args.activeDays === 30 && args.idleHours === 72 && !('page' in args) && !('win' in args), JSON.stringify(args));
+check('an unknown page or view falls back to the first', O.pageOf({ page: 'nope' }) === 'overview' && O.viewOf({ page: 'onboarding', view: 'nope' }) === 'phases' && O.viewOf({ page: 'guilds' }) === null);
+const jr = O.journeyRows({ signup: { started: 100, signed_up: 50 }, tutorial: { offered: 40, completed: 10, steps: [{ key: 'tutorial.loading', reached: 30 }] }, activation: [{ key: 'signed_up', n: 50 }, { key: 'acted', n: 40 }, { key: 'raided', n: 4 }, { key: 'active', n: 20 }] });
+const jk = jr.map((r) => r.part ? '|' + r.part : r.key).join(',');
+check('the journey is three parts, never divided into each other', jk === '|signup,opened,signed,|tutorial,offered,started,finished,|game,signed_up,acted,raided,active', jk);
+const jby = (k) => jr.find((r) => r.key === k);
+check('…each part\'s first row converts from nothing, the rest from the row above', jby('opened').prev === null && jby('signed').prev === 0.5 && jby('offered').prev === null && jby('started').prev === 0.75 && jby('acted').prev === 0.8);
+check('…and still-active is where players are, not a step after raiding', jby('active').prev === null && jby('active').first === 0.4);
+
+const NOW = Date.UTC(2026, 10, 20), DAY = 86400000;
+const wk = O.runWeeks([{ started_ms: NOW - DAY, outcome: 'completed', player_id: '1-1' }, { started_ms: NOW - 2 * DAY, outcome: 'left', player_id: null }, { started_ms: NOW - 9 * DAY, outcome: 'completed', player_id: '1-2' }], NOW, 3);
+check('runs: this week against last week, from the run list', wk && wk[0].runs === 2 && wk[0].completed === 1 && wk[0].no_player === 1 && wk[1].runs === 1, JSON.stringify(wk));
+check('…but not when the list does not reach back two weeks and holds fewer runs than there are', O.runWeeks(Array.from({ length: 100 }, (_, i) => ({ started_ms: NOW - i * 3600000, outcome: 'completed' })), NOW, 140) === null && O.runWeeks([{ started_ms: NOW - DAY }], NOW, 40) === null);
+check('the copied word reads back as the same view', JSON.stringify(O.parseArgs(O.wordOf({ page: 'onboarding', view: 'runs', win: '7', guild: '0-5', compare: 'version', activity: 'active', reps: '1', iface: 'structs-desktop', version: 'tutorial-3' }).replace(/^TELEMETRY /, ''))) === '{"page":"onboarding","view":"runs","win":"7","guild":"0-5","compare":"version","activity":"active","reps":"1","iface":"structs-desktop","version":"tutorial-3"}');
+check('a cold read reports unread sources as not read, and a finished one with nothing as failing', !O.sourceRows({ crawl: { running: true } })[0][5] && !O.sourceRows({ crawl: { running: true } })[0][4] && /Not read/.test(O.sourceRows({ crawl: { running: false, finished_ms: 1 } })[0][4]));
+check('…and the short-record notice waits for a read', !O.issuesOf({ crawl: { running: true }, history: [] }).some((x) => /Daily record/.test(x.title)) && O.issuesOf({ crawl: { running: false, finished_ms: 1 }, history: [] }).some((x) => /Daily record/.test(x.title)));
 
 // ── The card ──
 const calls = () => (w.__HARNESS_CALLS__ || []).filter((c) => c.cmd === 'terminal_onboarding');
@@ -67,258 +89,262 @@ const card = T.add('onboarding', {}, 3);
 const id = (card && card.id) || 'onboarding-1';
 const host = await until(() => {
   const c = d.querySelector('#tm-grid .tm-card[data-card="' + id + '"] .tm-body');
-  return c && c.querySelector('.ob-hud') ? c : null;
+  return c && c.querySelector('.ob-kpi') ? c : null;
 });
-check('the card renders its readouts', host !== null);
+check('the card renders', host !== null);
 if (host) {
-  // ── AARRR, the page the card opens on ──
-  const stage = (k) => host.querySelector('.ob-stages .ob-tile[data-stage="' + k + '"]');
-  const tileText = (t) => t && [...t.children].map(text).join(' ').toUpperCase();
-  check('AARRR opens first: five stages over the last 30 days', host.querySelectorAll('.ob-stages .ob-tile').length === 5 && /^288 ACQUISITION/.test(tileText(stage('acquisition'))) && /^58 ACTIVATION 10% OF NEW PLAYERS$/.test(tileText(stage('activation'))), tileText(stage('acquisition')) + ' | ' + tileText(stage('activation')));
-  check('…a window older than the daily record shows what opened since its newest reading, and says when', /^40 AWARENESS OPENED SINCE 2026-11-11$/.test(tileText(stage('awareness'))), tileText(stage('awareness')));
-  check('…referral is not tracked', /^— REFERRAL NOT TRACKED$/.test(tileText(stage('referral'))));
+  const go = async (label, view) => {
+    [...host.querySelectorAll('.ob-sections .sui-screen-nav-item')].find((a) => text(a) === label).click();
+    if (view) {
+      await until(() => host.querySelector('.ob-subnav'));
+      [...host.querySelectorAll('.ob-subnav .sui-screen-nav-item')].find((a) => text(a) === view).click();
+    }
+    await until(() => host.querySelector('.ob[data-page="' + label.toLowerCase() + '"]'));
+  };
+  const kpiText = (k) => { const t = host.querySelector('.ob-tile[data-kpi="' + k + '"]'); return t && [...t.querySelectorAll('.ob-tile-stage, .ob-tile-scope, .ob-tile-label, .fstat-v, .ob-tile-sub, .ob-delta')].map(text).join(' ').toUpperCase(); };
+  const sections = [...host.querySelectorAll('.ob-sections .sui-screen-nav-item')].map(text);
+  check('eight sections in journey order', sections.join('|') === 'Overview|Acquisition|Onboarding|Engagement|Players|Guilds|Trends|Data', sections.join('|'));
+  check('one read, asked with the default windows and no filter, humans only', calls().length >= 1 && calls()[0].args.idleHours === 24 && calls()[0].args.activeDays === 7 && !calls()[0].args.filters.compare && calls()[0].args.filters.replicants === false, JSON.stringify(calls()[0] || null));
+  check('the scope bar: population, guild, interface, activity, version, split', [...host.querySelectorAll('.ob-scope [data-control]')].map((n) => n.dataset.control).join(',') === 'reps,guild,iface,activity,version,compare');
+
+  // ── Overview ──
+  check('OVERVIEW leads with how many play and whether that is growing, each tile captioned by what it counts', [...host.querySelectorAll('.ob-tile')].map((t) => t.dataset.kpi).join() === 'players,active,new,activated,opens,finished_signups' && /^POPULATION NOW PLAYERS 9,600 HUMANS ON CHAIN \+30/.test(kpiText('players')) && /^ACQUISITION NEW PLAYERS 225/.test(kpiText('new')) && /^ACTIVATION NEWLY ACTIVATED 40 20 JOINED IN THE WINDOW NO CHANGE VS PRIOR 30D · 40/.test(kpiText('activated')), kpiText('players') + ' | ' + kpiText('new') + ' | ' + kpiText('activated'));
+  check('…a share is a share of the number above it, never "of of"', /FINISHED SIGNUPS 12 30% OF SIGNUP OPENS/.test(kpiText('finished_signups')) && /ACTIVE THIS MONTH 576 6.0% OF PLAYERS/.test(kpiText('active')) && O.shareOf(1, 5, 'signup opens') === '1 of 5 signup opens', kpiText('finished_signups') + ' | ' + kpiText('active'));
+  check('…a windowed tile carries its change against the window before, coloured by direction', /\+62 · 38% VS PRIOR 30D/.test(kpiText('new')) && host.querySelector('.ob-tile[data-kpi="new"] .ob-delta.is-up') && host.querySelector('.ob-tile[data-kpi="activated"] .ob-delta.is-flat'), kpiText('new'));
+  check('…both ends from one series, and only when that series reproduces the figure; otherwise it says the sources differ', /≠ DAILY RECORD 149/.test(kpiText('active')) && O.deltaFor(288, [1, 1, 1, 1], 2, 'daily').mismatch && O.deltaFor(2, [1, 1, 1, 1], 2, 'daily').change === 0 && O.deltaOf([1, null, 1, 1], 2, 'daily') === null, kpiText('active'));
+  check('…a tile that ignores the window says its own scope', /^POPULATION NOW PLAYERS/.test(kpiText('players')) && /^AWARENESS SINCE NOV 11 SIGNUP OPENS 40/.test(kpiText('opens')), kpiText('players'));
+  const tsv = O.tsvOf(host.querySelector('.ob-kpi'));
+  check('…and the strip copies as a report a sheet can use: value, previous, change, %, period and its dates', /^Figure\tValue\tPrevious\tChange\tChange %\tDetail\tPeriod\tDates\n/.test(tsv) && /\nNew players\t225\t163\t62\t38\.0%\t\t30 days\t\w{3} \d+–\w{3} \d+/.test(tsv), tsv.slice(0, 300));
+  check('…and the strip states its window', !!host.querySelector('.ob-kpi-head .ob-windows .sui-mod-active') && text(host.querySelector('.ob-kpi-head .ob-windows .sui-mod-active')) === '30 days');
+  const sig = [...host.querySelectorAll('.ob-signal')];
+  check('SIGNALS: game findings first in player words, ranked by rate; the data\'s trouble one row at the end', sig.length >= 5 && /^Most signups stop at Recovery key create/.test(text(sig[0])) && /^Combat Training loses most at Offer/.test(text(sig[1])) && sig.at(-1).classList.contains('is-data') && /^2 data issues/.test(text(sig.at(-1))), sig.map(text).join(' | '));
+  check('…a cohort is named by the day its week began, not an ISO week', sig.some((s) => /Joined week of Oct 12/.test(text(s))) && !sig.some((s) => /W4\d/.test(text(s))));
+  check('…and no tutorial group is called best on twelve players', !sig.some((s) => /activate most/.test(text(s))));
+  check('…signals copy too', /^Most signups stop at Recovery key create\t/.test(O.tsvOf(host.querySelector('.ob-block[data-block="signals"]'))));
   const aar = (label) => host.querySelector('.ob-aarrr .ob-row[data-aarrr="' + label + '"]');
-  check('AARRR: every stage over 24 hours, 7 days, 30 days and all time', host.querySelectorAll('.ob-aarrr .ob-row[data-aarrr]').length === 10 && text(aar('Opened signup').children[2]) === '4' && text(aar('Opened signup').children[3]) === '21' && text(aar('Opened signup').children[4]) === '—' && text(aar('Opened signup').children[5]) === '2,140', aar('Opened signup') && text(aar('Opened signup')));
-  check('…activation is refining AND raiding, with how many of the new players got there', /^768 ?8.0%$/.test(text(aar('Activated').children[5])) && /^29 ?10%$/.test(text(aar('New players activated').children[4])), text(aar('Activated')) + ' | ' + text(aar('New players activated')));
-  check('…each stage name heads its group only once', text(aar('Refined alpha').children[0]) === 'Activation' && text(aar('Activated').children[0]) === '');
-  check('…rows with a series carry their line', !!aar('New players').querySelector('svg') && !aar('Activated and active').querySelector('svg'));
-  check('…a figure with a daily series opens as a chart', aar('Refined alpha').querySelector('a.ob-link').dataset.chart === 'refiners_7d');
-  check('…and the stickiness and time-to-activate readouts', /DAU \/ MAU/.test(text(host.querySelector('.ob-view'))) && /Time to activate/.test(text(host.querySelector('.ob-view'))));
-  [...host.querySelectorAll('.ob-windows .sui-screen-nav-item')].find((a) => text(a) === '7 days').click();
-  check('the window strip redraws the stages for 7 days without asking again', /^96 ACQUISITION 9 FINISHED SIGNUP$/.test(tileText(stage('acquisition'))) && /^21 AWARENESS/.test(tileText(stage('awareness'))), tileText(stage('acquisition')));
-  const grp = (k) => host.querySelector('.ob-impact .ob-row[data-group="' + k + '"]');
-  check('BY TUTORIAL: one row per outcome, then everyone', ['finished', 'quit', 'skipped', 'none', 'all'].every((k) => grp(k)) && /^5 ?of 12$/.test(text(grp('finished').children[5])), grp('finished') && text(grp('finished')));
-  check('…the group that activates most is marked', grp('finished').children[5].classList.contains('is-best') && !grp('none').children[5].classList.contains('is-best'));
-  check('AARRR ignores the active and quit windows, so they are switched off there', host.querySelector('.ob-controls [data-control="active"]').disabled && host.querySelector('.ob-controls [data-control="idle"]').disabled && !host.querySelector('.ob-controls [data-control="guild"]').disabled);
-  [...host.querySelectorAll('.ob .ob-rail .sui-screen-nav-item')].find((a) => text(a) === 'Overview').click();
-  const tiles = [...host.querySelectorAll('.ob-hud .ob-tile')].map((t) => [...t.children].map(text).join(' ').toUpperCase());
-  check('OVERVIEW: new, today, the window, and today against the month', /^120 NEW THIS WEEK JOINED$/.test(tiles[0]) && /^960 ACTIVE TODAY 10% OF 9,600$/.test(tiles[1]) && /^4,032 ACTIVE 7D 42% OF 9,600$/.test(tiles[2]) && /^16% TODAY \/ MONTH 960 OF 5,952$/.test(tiles[3]), JSON.stringify(tiles));
-  const titles = [...host.querySelectorAll('.ob-view .ob-title')].map(text);
-  check('OVERVIEW answers where players are, how far they got, and whether they stayed', titles.join('|') === 'Where players are now|Activation|New player path|Still acting after 1 week', titles.join('|'));
-  check('OVERVIEW: the lifecycle buckets are all there', ['today', 'week', 'month', 'gone', 'never'].every((k) => host.querySelector('.ob-key[data-life="' + k + '"]')));
-  check('OVERVIEW: the path runs from signup to finished', text(host.querySelector('.ob-path .ob-row[data-path="Started signup"]')).endsWith('2,140') && text(host.querySelector('.ob-path .ob-row[data-path="Finished"]')).endsWith('402'));
-  check('OVERVIEW: week one leaves out cohorts with nothing to show, and a small one is a count', !host.querySelector('.ob-week[data-week="W43"]') && /^3 of 12/.test(text(host.querySelector('.ob-week[data-week="W41"]'))) && /^50%/.test(text(host.querySelector('.ob-week[data-week="W40"]'))));
-  check('pages are grouped in a rail, with the status beside the filters', [...host.querySelectorAll('.ob-rail-head')].map(text).join('|') === 'Growth|Onboarding|Players|Network|Settings' && host.querySelectorAll('.ob-rail .sui-screen-nav-item').length === 14);
-  check('one read, asked with the default windows and no filter', calls().length >= 1 && calls()[0].args.idleHours === 24 && calls()[0].args.activeDays === 7 && !calls()[0].args.filters.compare, JSON.stringify(calls()[0] || null));
-  check('humans only by default', calls()[0].args.filters.replicants === false, JSON.stringify(calls()[0].args.filters));
-  check('four filter controls, the windows, and the version', host.querySelectorAll('.ob-controls select').length === 7);
-
-  const go = (label) => { [...host.querySelectorAll('.ob .ob-rail .sui-screen-nav-item')].find((a) => text(a) === label).click(); };
+  check('STAGES: every stage over 24 hours, 7 days, 30 days and all time', host.querySelectorAll('.ob-aarrr .ob-row[data-aarrr]').length === 10 && text(aar('Signup opens').children[2]) === '4' && text(aar('Signup opens').children[3]) === '21' && /^40 ?since 2026-11-11$/.test(text(aar('Signup opens').children[4])) && text(aar('Signup opens').children[5]) === '2,140', aar('Signup opens') && text(aar('Signup opens')));
+  check('…activation is refining AND raiding, with how many of the new players got there', /^768 ?8.0%$/.test(text(aar('Activated').children[5])) && /^20 ?8.9%$/.test(text(aar('New players activated').children[4])), text(aar('Activated')) + ' | ' + text(aar('New players activated')));
+  check('…each stage name heads its group only once', text(aar('Refined alpha').children[0]) === 'Activation' && text(aar('Activated').children[0]) === '' && !!aar('Launched a raid'));
+  check('…rows with a series carry their line, and open as a chart', !!aar('New players').querySelector('svg') && !aar('Activated and active').querySelector('svg') && aar('Refined alpha').querySelector('a.ob-link').dataset.chart === 'refiners_7d');
+  const jrow = (k) => host.querySelector('.ob-journey-table .ob-row[data-journey="' + k + '"]');
+  check('JOURNEY: signup sessions, Combat Training, then the game, each part with its size', [...host.querySelectorAll('.ob-journey-table .ob-row.is-part')].map(text).join('|') === 'Signup · sessions · 2,140|Combat Training · sample of new signups · 1,102|In game · players · 9,600' && text(jrow('opened').children[2]) === '2,140' && text(jrow('signed').children[3]) === '51%', [...host.querySelectorAll('.ob-journey-table .ob-row.is-part')].map(text).join('|'));
+  check('…activation follows refining; a raid, a planet and being active are not steps after it', text(jrow('activated').children[3]) === '20%' && ['raided', 'planet', 'active'].every((k) => jrow(k).classList.contains('is-aside') && text(jrow(k).children[3]) === '—'), text(jrow('activated')) + ' | ' + text(jrow('raided')));
+  check('…and every block states its scope', text(host.querySelector('.ob-block[data-block="journey"] .ob-chip')) === 'All time' && text(host.querySelector('.ob-block[data-block="signals"] .ob-chip')) === 'Now' && text(host.querySelector('.ob-block[data-block="stages"] .ob-chip')) === 'Every window');
   const before = calls().length;
-  go('Signup');
+  host.querySelectorAll('.ob-kpi-head .ob-windows .sui-screen-nav-item')[1].click();
+  await until(() => /NEW PLAYERS 54/.test(kpiText('new') || ''));
+  check('the window is a param: 7 days redraws without asking again', /NEW PLAYERS 54/.test(kpiText('new')) && /SIGNUP OPENS 21/.test(kpiText('opens')) && /ACTIVE THIS WEEK/.test(kpiText('active')) && calls().length === before, kpiText('new'));
+  check('…and the copied word reopens it', O.wordOf({ win: '7' }) === 'TELEMETRY 7d' && host.querySelector('.ob-act[data-act="word"]').title === 'TELEMETRY 7d');
+
+  // ── Acquisition ──
+  await go('Acquisition');
+  check('sections switch from the last read, without asking again', calls().length === before);
+  check('the card is titled by its section', /Telemetry · Acquisition/.test(text(d.querySelector('#tm-grid .tm-card[data-card="' + id + '"] .tm-title'))), text(d.querySelector('#tm-grid .tm-card[data-card="' + id + '"] .tm-title')));
+  check('ACQUISITION: the same signup and new-player figures on the same window, then the all-time funnel figures', /SIGNUP OPENS 21/.test(kpiText('opens')) && /^ALL TIME NEVER FINISHED 1,049 49% OF 2,140 OPENS/.test(kpiText('dropoff')) && /SIGNUP TAKES 4 MIN/.test(kpiText('signup_time')) && /NEW PLAYERS 54/.test(kpiText('new')), kpiText('dropoff') + ' | ' + kpiText('signup_time'));
   const steps = [...host.querySelectorAll('.ob-funnel .ob-row[data-step]')];
-  check('SIGNUP lists every step', steps.some((r) => r.dataset.step === 'signup.connecting') && steps.some((r) => r.dataset.step === 'signup.employee_record'), steps.length);
-  const create = host.querySelector('.ob-funnel .ob-row[data-step="signup.recovery_key_create"]');
-  check('the step most players quit at is flagged, by count and by rate', create && create.querySelectorAll('.is-bad').length === 2, create && text(create));
-  check('drop-off individually and cumulatively', create && /\b16%/.test(text(create.children[6])) && /%$/.test(text(create.children[4])), create && text(create));
-  const last = host.querySelector('.ob-funnel .ob-row[data-step="signup.employee_record"]');
-  check('a last step has no quit figure, a dash and not a zero', last && text(last.children[5]) === '—', last && text(last.children[5]));
-  check('views switch from the last read, without asking again', calls().length === before);
+  check('…the signup funnel lists every step', steps.some((r) => r.dataset.step === 'signup.connecting') && steps.some((r) => r.dataset.step === 'signup.employee_record'), steps.length);
+  const create = steps.find((r) => r.dataset.step === 'signup.recovery_key_create');
+  check('…the worst stop rates are flagged, count and rate, to one decimal', create && create.querySelectorAll('.is-bad').length === 2 && text(create.children[5]) === '16.0%', create && text(create));
+  check('…and only a real excess over the typical step is flagged', JSON.stringify(O.worstRates([{ key: 'a', r: 100, s: 10 }, { key: 'b', r: 100, s: 11 }, { key: 'c', r: 100, s: 30 }, { key: 'd', r: 100, s: 9 }], (x) => x.r, (x) => x.s, 3)) === '["c"]');
+  const last = steps.find((r) => r.dataset.step === 'signup.employee_record');
+  check('…a last step has no stop figure, a dash and not a zero', last && text(last.children[4]) === '—' && text(last.children[5]) === '—', last && text(last));
+  const faq = steps.findIndex((r) => r.dataset.step === 'signup.recovery_key_faq');
+  check('…a side branch sits under the step it branches from, and is not a step', faq > 0 && steps[faq - 1].dataset.step.startsWith('signup.recovery_key') && steps[faq].classList.contains('is-aside') && text(steps[faq].children[3]) === '—', steps.map((r) => r.dataset.step).join(','));
+  check('…with its own figures over time', !!host.querySelector('.ob-block[data-block="trends"] .ob-trends .ob-row[data-trend="signed_up"]'));
+  check('ACQUISITION ignores replicants and activity: dimmed, not hidden', host.querySelector('.ob-scope [data-control="reps"]').classList.contains('is-off') && host.querySelector('.ob-scope [data-control="activity"]').disabled && !host.querySelector('.ob-scope [data-control="guild"]').disabled);
 
-  go('Tutorial');
-  check('TUTORIAL has the outcome strip', host.querySelectorAll('.ob-stack .ob-seg').length === 4);
-  const tt = [...host.querySelectorAll('.ob-view .ob-title')].map(text);
-  check('TUTORIAL leads with phases, then unique players, then the sample', /^Phases · /.test(tt[0]) && /^Unique players · 920$/.test(tt[1]) && host.querySelectorAll('.ob-steps .ob-row[data-step]').length > 5 && [...host.querySelectorAll('.ob-title')].some((t) => /^New signups · sample of 1,102$/.test(text(t))));
-  const phaseRow = (n) => host.querySelector('.ob-phases .ob-row[data-phase="' + n + '"]');
-  check('TUTORIAL: a phase shows who is left, what it lost and how long it took', phaseRow('Offer') && text(phaseRow('Offer').children[2]) === '705' && text(phaseRow('Offer').children[3]) === '-397' && phaseRow('Offer').children[3].classList.contains('is-bad'), phaseRow('Offer') && text(phaseRow('Offer')));
-  check('…a skip is not a stop', phaseRow('Offer').querySelector('.ob-skip').style.width !== '0%' && phaseRow('Offer').querySelector('.ob-stop').style.width !== '0%');
+  // ── Onboarding ──
+  await go('Onboarding');
+  check('ONBOARDING: players, take-up, finished, skipped, quit, time', ['players', 'takeup', 'finished', 'skipped', 'quit', 'time'].every((k) => host.querySelector('.ob-tile[data-kpi="' + k + '"]')) && /^TAKE-UP 83%/.test(kpiText('takeup')), kpiText('takeup'));
+  check('…views: phases, steps, runs, timing, by outcome — above the figures', [...host.querySelectorAll('.ob-subnav .sui-screen-nav-item')].map(text).join('|') === 'Phases|Steps|Runs|Timing|By outcome' && host.querySelector('.ob-subnav').compareDocumentPosition(host.querySelector('.ob-kpi')) & 4);
+  check('PHASES: the outcome strip', host.querySelectorAll('.ob-stack .ob-seg').length === 4);
+  const phaseRow = (l) => host.querySelector('.ob-phases .ob-row[data-phase="' + l + '"]');
+  check('…a phase reads like every funnel: reached, kept, stopped, stop rate, skipped', phaseRow('Offer') && text(phaseRow('Offer').children[2]) === '1,102' && text(phaseRow('Offer').children[4]) === '215' && text(phaseRow('Offer').children[5]) === '19.5%' && phaseRow('Offer').children[5].classList.contains('is-bad') && text(phaseRow('Offer').children[6]) === '182', phaseRow('Offer') && text(phaseRow('Offer')));
   check('…a phase the design lacks is not drawn', !phaseRow('Free play') && !!phaseRow('First attack'));
-  phaseRow('First attack').querySelector('a.ob-link').click();
-  check('…and a phase that lost players opens them', /Kestrel/.test(text(host.querySelector('.ob-phases .ob-who'))));
-  phaseRow('First attack').querySelector('a.ob-link').click();
+  phaseRow('First attack').querySelector('a.ob-drill').click();
+  const inner = host.querySelector('.ob-phases .ob-subtable');
+  check('…a phase opens into its steps', inner && inner.querySelector('.ob-row[data-step="tutorial.first_attack.combat"]'));
+  inner.querySelector('.ob-row[data-step="tutorial.first_attack.combat"] a.ob-drill').click();
+  check('…and a step into the players who stopped there, with a door to all of them', /Kestrel/.test(text(host.querySelector('.ob-phases .ob-subtable .ob-who'))) && !!host.querySelector('.ob-phases .ob-who .ob-act[data-act="all_stopped"]'));
+  host.querySelector('.ob-phases .ob-subtable .ob-row[data-step="tutorial.first_attack.combat"] a.ob-drill').click();
+  phaseRow('First attack').querySelector('a.ob-drill').click();
+  await go('Onboarding', 'Steps');
+  check('STEPS lead with unique players', /Steps · 920 unique players/.test(text(host.querySelector('.ob-block[data-block="steps"] .ob-title'))));
   const combat = host.querySelector('.ob-steps .ob-row[data-step="tutorial.first_attack.combat"]');
-  check('a step with known leavers can be opened, one without cannot', combat && combat.querySelector('a.ob-link') && !host.querySelector('.ob-steps .ob-row[data-step="tutorial.loading"] a.ob-link'));
-  combat.querySelector('a.ob-link').click();
+  check('…a step with known leavers can be opened, one without cannot', combat && combat.querySelector('a.ob-drill') && !host.querySelector('.ob-steps .ob-row[data-step="tutorial.loading"] a.ob-drill'));
+  combat.querySelector('a.ob-drill').click();
   const who = host.querySelector('.ob-steps .ob-who');
-  check('opening a step lists who stopped there, and how many more', who && who.querySelector('[data-player="1-9584"]') && /Kestrel/.test(text(who)) && /51 more/.test(text(who)), who && text(who));
-  check('…each name a door to the player', who && who.querySelector('[data-player="1-9560"] a.ob-link') && /1-9560/.test(text(who.querySelector('[data-player="1-9560"]'))));
-  go('Overview'); go('Tutorial');
-  check('an opened step stays open across a redraw', !!host.querySelector('.ob-steps .ob-who'));
-  host.querySelector('.ob-steps .ob-row[data-step="tutorial.first_attack.combat"] a.ob-link').click();
-  check('…and closes again', !host.querySelector('.ob-steps .ob-who'));
-  const offer = host.querySelector('.ob-funnel-skips .ob-row[data-step="orientation.tutorial_offer"]');
-  check('TUTORIAL: skips per step and so far', offer && text(offer.children[7]) === '182' && text(offer.children[8]) === '17%' && text(offer.children[9]) === '17%', offer && text(offer));
-
-  go('Runs');
-  const runTiles = [...host.querySelectorAll('.ob-hud .ob-tile')].map((t) => [...t.children].map(text).join(' ').toUpperCase());
-  check('RUNS leads on players, then runs and repeats', /^31 PLAYERS$/.test(runTiles[0]) && /^40 RUNS 9 REPEAT$/.test(runTiles[1]), JSON.stringify(runTiles));
-  check('RUNS: finished as a share of runs, and the runs with no player', runTiles.some((t) => /^24 FINISHED 60%$/.test(t)) && runTiles.some((t) => /^2 NO PLAYER$/.test(t)), JSON.stringify(runTiles));
+  check('…opening a step lists who stopped there, and says how many the servers did not list', who && who.querySelector('[data-player="1-9584"]') && /2 listed of 53 stopped/.test(text(who)), who && text(who));
+  [...host.querySelectorAll('.ob-count .sui-screen-nav-item')].find((a) => text(a) === 'New signups').click();
+  await until(() => host.querySelector('.ob-funnel'));
+  const offer = host.querySelector('.ob-funnel .ob-row[data-step="orientation.tutorial_offer"]');
+  check('…the new-signup sample, with skips per step', offer && text(offer.children[6]) === '182' && text(offer.children[7]) === '17%', offer && text(offer));
+  check('…an opened step stays open across a redraw', !!host.querySelector('.ob-funnel .ob-who'));
+  await go('Onboarding', 'Runs');
+  check('RUNS: players, runs, finished, quit, no player', /^PLAYERS 31/.test(kpiText('run_players')) && /^RUNS 40 9 REPEAT/.test(kpiText('runs')) && /^FINISHED 24 60% OF RUNS/.test(kpiText('run_finished')) && /^NO PLAYER 2/.test(kpiText('no_player')), kpiText('runs'));
   const logged = host.querySelector('.ob-runs .ob-row[data-session="aaaa"]');
-  check('a long-standing player\'s run is listed by interface, kind, outcome and time', logged && /1-194/.test(text(logged.children[0])) && text(logged.children[2]) === 'structs-desktop' && text(logged.children[5]) === 'Existing' && text(logged.children[6]) === 'Finished' && /10m/.test(text(logged.children[8])), logged && text(logged));
-  check('a player with no name shows the id once', logged && text(logged.children[0]) === '1-194', logged && text(logged.children[0]));
-  const replay = host.querySelector('.ob-runs .ob-row[data-session="bbbb"]');
-  check('a replay reads as one, with its run number', replay && text(replay.children[5]) === 'Replay' && text(replay.children[4]) === '2', replay && text(replay));
+  check('…a run is listed by interface, kind, outcome and time', logged && /1-194/.test(text(logged.children[0])) && text(logged.children[2]) === 'Desktop app' && text(logged.children[5]) === 'Existing' && text(logged.children[6]) === 'Finished' && /10m/.test(text(logged.children[8])), logged && text(logged));
   const nameless = host.querySelector('.ob-runs .ob-row[data-session="cccc"]');
-  check('a run nobody is attached to says so and offers no player link', nameless && text(nameless.children[0]) === 'No player' && !nameless.querySelector('a') && text(nameless.children[5]) === '—', nameless && text(nameless));
-
-  go('Runs');
+  check('…a run nobody is attached to says so and offers no player link', nameless && text(nameless.children[0]) === 'No player' && !nameless.querySelector('a'), nameless && text(nameless));
   const byRun = [...host.querySelectorAll('.ob-run-compare .ob-row[data-run]')];
-  check('RUNS compares first runs with later ones', byRun.length === 2 && text(byRun[1].children[0]) === '2' && text(byRun[1].children[2]) === '6 of 10' && /^(25h|1d)/.test(text(byRun[1].children[5])), byRun.map(text).join(' | '));
+  check('…first runs beside later ones', byRun.length === 2 && text(byRun[0].children[0]) === 'First run' && text(byRun[1].children[2]) === '6 of 10', byRun.map(text).join(' | '));
+  await go('Onboarding', 'Timing');
+  check('TIMING ranks steps by median time', host.querySelector('.ob-slow .ob-row[data-step]').dataset.step === 'signup.recovery_key_create' && host.querySelectorAll('.ob-durations .ob-row[data-metric]').length === 6);
+  await go('Onboarding', 'By outcome');
+  const grp = (k) => host.querySelector('.ob-impact .ob-row[data-group="' + k + '"]');
+  check('BY OUTCOME: one row per tutorial outcome, then everyone; only a group of twenty or more can be marked best', ['finished', 'quit', 'skipped', 'none', 'all'].every((k) => grp(k)) && /^5 ?of 12$/.test(text(grp('finished').children[5])) && !grp('finished').querySelector('.is-best') && grp('none').children[5].classList.contains('is-best') && grp('finished').classList.contains('is-small'), grp('finished') && text(grp('finished')));
 
-  go('Players');
-  const blocks = [...host.querySelectorAll('.ob-view .ob-block')];
-  check('PLAYERS: five distributions', blocks.length === 5 && /Ore mined/.test(text(blocks[0])) && /Raids won/.test(text(blocks[4])), blocks.map((b) => text(b.firstChild)).join(' | '));
-  check('a distribution has its histogram', blocks[0] && blocks[0].querySelectorAll('.ob-hist .ob-row').length === 10);
-
-  go('Retention');
+  // ── Engagement ──
+  await go('Engagement');
+  check('ENGAGEMENT: the same active and activated figures as Overview, then the all-time ones, each saying so', ['active', 'stickiness', 'activated', 'activated_ever', 'tta', 'never'].every((k) => host.querySelector('.ob-tile[data-kpi="' + k + '"]')) && /ACTIVE THIS WEEK 192/.test(kpiText('active')) && /^ALL TIME TIME TO ACTIVATE 3 DAYS/.test(kpiText('tta')), kpiText('active') + ' | ' + kpiText('tta'));
+  check('…where players are now, on every view', ['today', 'week', 'month', 'gone', 'never'].every((k) => host.querySelector('.ob-key[data-life="' + k + '"]')));
   const miles = [...host.querySelectorAll('.ob-activation .ob-row[data-milestone]')];
-  check('RETENTION: activation from signup to still active', miles.length === 7 && /Acted/.test(text(miles[1])) && /90%/.test(text(miles[1])) && /Active 7d/.test(text(miles[6])), miles.map(text).join(' | '));
+  check('ACTIVATION: milestones from signing up to activated, with a raid, a planet and being active set aside', miles.map((r) => r.dataset.milestone).join() === 'signed_up,acted,mined,refined,raided,activated,planet,active' && /90%/.test(text(miles[1])) && /^Activated ?768/.test(text(miles[5])) && miles[4].classList.contains('is-aside') && /Active this week/.test(text(miles[7])), miles.map(text).join(' | '));
+  await go('Engagement', 'Retention');
   const week = (k) => host.querySelector('.ob-cohort[data-week="2026-' + k + '"]');
-  check('RETENTION: a cohort is a row of shaded weeks', week('W40') && text(week('W40').children[3]) === '50%' && week('W40').children[3].classList.contains('ob-heat-2') && text(week('W40').children[1]) === '400', week('W40') && text(week('W40')));
-  check('RETENTION: a small cohort shows counts, an unlived week is blank', text(week('W41').children[3]) === '3' && text(week('W41').children[5]) === '' && week('W41').children[5].classList.contains('ob-heat-none'), week('W41') && text(week('W41')));
-  check('RETENTION: never acted is apart from churn', /Never acted/.test(text(host.querySelector('.ob-view'))));
-  check('RETENTION: churn and the play length of inactive players', /Churn/.test(text(host.querySelector('.ob-view'))) && /Play length of inactive players after signup/.test(text(host.querySelector('.ob-view'))));
+  check('RETENTION: a cohort is a row of shaded weeks', week('W40') && text(week('W40').children[3]) === '50%' && week('W40').children[3].classList.contains('ob-heat-2'), week('W40') && text(week('W40')));
+  check('…a small cohort shows quiet counts, an unlived week is blank, rows are named by date', text(week('W41').children[3]) === '3' && week('W41').children[3].classList.contains('ob-heat-count') && week('W41').children[5].classList.contains('ob-heat-none') && text(week('W40').children[0]) === 'Sep 28');
+  check('…week one leaves out cohorts with nothing to show', !host.querySelector('.ob-week[data-week="W43"]') && /^3 of 12/.test(text(host.querySelector('.ob-week[data-week="W41"]'))));
+  check('…churn apart from never acted, and the play length of the inactive', /Never acted/.test(text(host.querySelector('.ob-block[data-block="churn"]'))) && /Play length of inactive players after signup/.test(text(host.querySelector('.ob-view'))));
+  await go('Engagement', 'Distributions');
+  const blocks = [...host.querySelectorAll('.ob-block[data-block="dist"]')];
+  check('DISTRIBUTIONS: five, each with its histogram', blocks.length === 5 && /Ore mined/.test(text(blocks[0])) && /Raids won/.test(text(blocks[4])) && blocks[0].querySelectorAll('.ob-hist .ob-row:not(.ob-head)').length === 7 && blocks[2].querySelectorAll('.ob-hist .ob-row:not(.ob-head)').length === 3, [...blocks].map((b) => b.querySelectorAll('.ob-hist .ob-row:not(.ob-head)').length).join());
 
-  go('Timing');
-  check('TIMING ranks steps by median time', host.querySelector('.ob-slow .ob-row[data-step]').dataset.step === 'signup.recovery_key_create');
-  go('Trends');
-  const tr = (k) => host.querySelector('.ob-trends .ob-row[data-trend="' + k + '"]');
-  check('TRENDS: each figure with its line, now, a week and a month', tr('humans') && tr('humans').querySelector('svg') && text(tr('humans').children[2]) === '478' && text(tr('humans').children[3]) === '+14' && text(tr('humans').children[4]) === '+60', tr('humans') && text(tr('humans')));
-  check('TRENDS: a server figure starts when the record does', tr('signed_up') && text(tr('signed_up').children[2]) === '119' && text(tr('signed_up').children[4]) === '—', tr('signed_up') && text(tr('signed_up')));
-  check('TRENDS: when a series starts is on hover, not a line under every name', !host.querySelector('.ob-trends .ob-row[data-trend] .ob-sub') && /^Since \d{4}-/.test(tr('humans').querySelector('a.ob-link').title));
-  check('TRENDS: a rebuilt series reaches back past the record, and is labelled for what it counts', tr('refiners_7d') && /^Refined in 7 days/.test(text(tr('refiners_7d').children[0])) && !tr('refiners') && /^Ever refined/.test(text(tr('refined').children[0])));
-  check('TRENDS: a daily count sums over the window', tr('new') && !/^\+/.test(text(tr('new').children[3])));
-  check('TRENDS reads the guild alone: replicants and the windows are off', !host.querySelector('.ob-controls [data-control="guild"]').disabled && host.querySelector('.ob-controls [data-control="reps"]').classList.contains('is-off') && host.querySelector('.ob-controls [data-control="active"]').disabled);
-  const cards = () => d.querySelectorAll('#tm-grid .tm-card[data-type="chart"]').length;
-  const beforeCharts = cards();
-  tr('humans').querySelector('a.ob-link').click();
-  check('TRENDS: a figure opens as a chart', !!(await until(() => cards() > beforeCharts)));
-  tr('active_7d').querySelector('a.ob-link').click();
-  check('…and another figure opens another chart, not the first again', !!(await until(() => cards() > beforeCharts + 1)));
+  // ── Players ──
+  await go('Players');
+  const p = () => host.querySelector('.ob-recent .ob-row[data-player="1-9580"]');
+  check('PLAYERS: new signups with outcome and time in the tutorial', p() && /Finished/.test(text(p())) && /13m/.test(text(p())), p() && text(p()));
+  const dots = (pid) => host.querySelector('.ob-recent .ob-row[data-player="' + pid + '"]').querySelectorAll('.ob-dot');
+  check('…a journey is a square per phase, filled to the last reached', dots('1-9584').length === 11 && dots('1-9584')[5].classList.contains('is-done') && dots('1-9584')[6].classList.contains('ob-badge-playing'));
+  host.querySelector('.ob-pill[data-outcome="declined"]').click();
+  check('…an outcome narrows the list', [...host.querySelectorAll('.ob-recent .ob-row[data-player]')].map((r) => r.dataset.player).join() === '1-9571');
+  host.querySelector('.ob-pill[data-outcome="all"]').click();
+  [...host.querySelectorAll('.ob-subnav .sui-screen-nav-item')].find((a) => text(a) === 'Stopped').click();
+  await until(() => host.querySelector('.ob-stopped'));
+  check('PLAYERS ▸ STOPPED: every named player, with the step they stopped at said once', host.querySelectorAll('.ob-stopped .ob-row[data-player]').length === 2 && text(host.querySelector('.ob-stopped .ob-row[data-player="1-9584"]').children[1]) === 'First attack · Combat');
+  [...host.querySelectorAll('.ob-subnav .sui-screen-nav-item')].find((a) => text(a) === 'New signups').click();
+  await until(() => host.querySelector('.ob-recent'));
+  const q = host.querySelector('.ob-search input');
+  q.value = 'kest'; q.dispatchEvent(new w.Event('input'));
+  await until(() => host.querySelectorAll('.ob-recent .ob-row[data-player]').length === 1);
+  check('…a name finds a player', [...host.querySelectorAll('.ob-recent .ob-row[data-player]')].map((r) => r.dataset.player).join() === '1-9584');
+  host.querySelector('.ob-search input').value = ''; host.querySelector('.ob-search input').dispatchEvent(new w.Event('input'));
+  await until(() => host.querySelectorAll('.ob-recent .ob-row[data-player]').length === 3);
+  host.querySelector('.ob-recent .ob-sort[data-sort="player"]').click();
+  check('…a caption sorts, the same way in every list', [...host.querySelectorAll('.ob-recent .ob-row[data-player]')].map((r) => r.dataset.player).join() === '1-9580,1-9584,1-9571', [...host.querySelectorAll('.ob-recent .ob-row[data-player]')].map((r) => r.dataset.player).join());
 
-  go('Health');
-  const srcs = [...host.querySelectorAll('.ob-sources .ob-src[data-source]')];
-  check('HEALTH: every source and what it holds', srcs.length === 8 && /7,667 granted · 1,500 likely/.test(text(srcs[1])) && /guild/.test(text(srcs[1])), srcs.map(text).join(' | '));
-  const iss = [...host.querySelectorAll('.ob-issues .ob-issue')].map((r) => r.dataset.issue);
-  check('HEALTH leads with what is wrong, worst first', iss.join('|') === 'Replicants read from the guild|Runs with no player|Guilds with no API', iss.join('|'));
-  check('…a guild-sourced replicant list is an issue: it undercounts them', host.querySelector('.ob-issue[data-issue="Replicants read from the guild"]').classList.contains('is-issue'));
-  check('…lost beacons name the guild, with the count', /SN\.C/.test(text(host.querySelector('.ob-issue[data-issue="Runs with no player"]'))) && /2 of 40 runs/.test(text(host.querySelector('.ob-issue[data-issue="Runs with no player"]'))), text(host.querySelector('.ob-issue[data-issue="Runs with no player"]')));
-  check('…a guild with no API is a notice', host.querySelector('.ob-issue[data-issue="Guilds with no API"]').classList.contains('is-notice') && /72 players/.test(text(host.querySelector('.ob-issue[data-issue="Guilds with no API"]'))));
-  check('the status link counts issues, not notices', /^2 issues/.test(text(host.querySelector('.ob-status'))), text(host.querySelector('.ob-status')));
-  check('HEALTH: coverage adds up to the players', /Reporting guilds ?9,340/.test(text(host.querySelector('.ob-key[data-coverage="ok"]'))) && /No API ?72/.test(text(host.querySelector('.ob-key[data-coverage="dark"]'))) && /No guild ?188/.test(text(host.querySelector('.ob-key[data-coverage="none"]'))));
-
-  go('Guilds');
+  // ── Guilds ──
+  await go('Guilds');
   const g = [...host.querySelectorAll('.ob-guilds .ob-row[data-guild]')];
   const sn = g.find((r) => r.dataset.guild === '0-5');
-  check('GUILDS: biggest first, with no guild as its own quiet row', g.map((r) => r.dataset.guild).join(',') === '0-5,0-1,0-2,none' && g.find((r) => r.dataset.guild === 'none').classList.contains('is-quiet') && text(g.find((r) => r.dataset.guild === 'none').children[2]) === '188', g.map((r) => r.dataset.guild + ' ' + text(r)).join(' | '));
-  check('GUILDS: signups read as a share, a guild with no API as a dash', text(sn.children[4]) === '1,101 of 2,136' && text(g.find((r) => r.dataset.guild === '0-2').children[4]) === '—' && /No API/.test(text(g.find((r) => r.dataset.guild === '0-2').children[0])), sn && text(sn));
-  sn.querySelector('a.ob-link').click();
+  check('GUILDS: biggest first, with no guild as its own quiet row', g.map((r) => r.dataset.guild).join(',') === '0-5,0-1,0-2,none' && g.find((r) => r.dataset.guild === 'none').classList.contains('is-quiet') && text(g.find((r) => r.dataset.guild === 'none').children[2]) === '188', g.map((r) => r.dataset.guild).join(','));
+  check('…signup and tutorial finish rates, with their counts; a guild with no API is a dash', /^52% ?1,101 of 2,136$/.test(text(sn.children[5])) && /^37% ?402 of 1,101$/.test(text(sn.children[6])) && text(g.find((r) => r.dataset.guild === '0-2').children[5]) === '—', sn && text(sn));
+  check('…each reporting guild has a Focus door and a Stopped door', !!sn.querySelector('[data-act="focus"]') && !!sn.querySelector('[data-act="stopped"]') && !g.find((r) => r.dataset.guild === '0-2').querySelector('[data-act="stopped"]'));
+  sn.querySelector('a.ob-drill').click();
   const more = () => host.querySelector('.ob-guilds .ob-more[data-more="0-5"]');
-  check('GUILDS: a row opens the rest, replicants not counted as sessions left to read', more() && /Runs ?37/.test(text(more())) && /3,810 \/ 3,810/.test(text(more())), more() && text(more()));
-  sn.querySelector('a.ob-link').click();
+  check('…a row opens the rest, with the same drill', more() && /Runs ?37/.test(text(more())) && /3,810 \/ 3,810/.test(text(more())), more() && text(more()));
+  host.querySelector('.ob-guilds .ob-row[data-guild="0-5"] a.ob-drill').click();
   check('…and closes again', !more());
-  g.find((r) => r.dataset.guild === '0-2').querySelector('a.ob-link').click();
-  check('…a guild with no API says why', /no guild API published/.test(text(host.querySelector('.ob-more[data-more="0-2"]'))));
-  g.find((r) => r.dataset.guild === '0-2').querySelector('a.ob-link').click();
-  go('Recent');
-  const p = host.querySelector('.ob-recent .ob-row[data-player="1-9580"]');
-  check('RECENT shows outcome and time in the tutorial', p && /Finished/.test(text(p)) && /13m/.test(text(p)), text(p));
-  const dots = (id) => host.querySelector('.ob-recent .ob-row[data-player="' + id + '"]').querySelectorAll('.ob-dot');
-  check('RECENT: a journey is a square per phase, filled to the last reached', dots('1-9584').length === 11 && dots('1-9584')[5].classList.contains('is-done') && dots('1-9584')[6].classList.contains('ob-badge-playing') && !dots('1-9584')[7].classList.contains('is-done'));
-  host.querySelector('.ob-pill[data-outcome="declined"]').click();
-  check('RECENT: an outcome narrows the list', [...host.querySelectorAll('.ob-recent .ob-row[data-player]')].map((r) => r.dataset.player).join() === '1-9571');
-  host.querySelector('.ob-pill[data-outcome="all"]').click();
-  check('…and All brings it back', host.querySelectorAll('.ob-recent .ob-row[data-player]').length === 3);
 
-  // ── Exclusions ──
-  go('Exclusions');
+  // ── Trends ──
+  await go('Trends');
+  const tr = (k) => host.querySelector('.ob-trends .ob-row[data-trend="' + k + '"]');
+  check('TRENDS: each figure with its line, latest, a week and a month: a change signed, a count not', tr('humans') && tr('humans').querySelector('svg') && text(tr('humans').children[2]) === '478' && text(tr('humans').children[3]) === '+14' && text(tr('humans').children[4]) === '+60' && text(tr('new').children[3]) === '54' && /^Added/.test(tr('new').children[3].title), tr('humans') && text(tr('humans')) + ' | ' + text(tr('new')));
+  check('…grouped by the stage they measure', [...host.querySelectorAll('.ob-trends .ob-row.is-part')].map(text).join('|') === 'Acquisition|Onboarding|Activation|Retention|Population', [...host.querySelectorAll('.ob-trends .ob-row.is-part')].map(text).join('|'));
+  check('…a server figure starts when the record does', tr('signed_up') && text(tr('signed_up').children[2]) === '119' && text(tr('signed_up').children[4]) === '—', tr('signed_up') && text(tr('signed_up')));
+  const charts = () => d.querySelectorAll('#tm-grid .tm-card[data-type="chart"]').length;
+  const c0 = charts();
+  tr('humans').querySelector('a.ob-link').click();
+  check('…a figure opens as a chart', !!(await until(() => charts() > c0)));
+  const pick = (k) => { const b = tr(k).querySelector('.ob-pick input'); b.checked = true; b.dispatchEvent(new w.Event('change')); };
+  pick('humans'); await until(() => tr('humans').classList.contains('is-picked'));
+  pick('active_7d'); await until(() => tr('active_7d').classList.contains('is-picked'));
+  const many = host.querySelector('.ob-act[data-act="chart_picked"]');
+  check('…ticked figures chart together', many && text(many) === 'Chart 2');
+  many.click();
+  const lastChart = await until(() => { const cs = [...d.querySelectorAll('#tm-grid .tm-card[data-type="chart"]')]; return cs.length > c0 + 1 ? cs[cs.length - 1] : null; });
+  const layoutCard = lastChart && T.state && T.state.layout ? T.state.layout.cards.find((c) => c.id === lastChart.dataset.card) : null;
+  check('…as one chart card with both series', !!lastChart && (!layoutCard || JSON.parse(layoutCard.params.series).map((s) => s.metric).join() === 'humans,active_7d'));
+  check('TRENDS reads the guild alone: replicants are off', !host.querySelector('.ob-scope [data-control="guild"]').disabled && host.querySelector('.ob-scope [data-control="reps"]').classList.contains('is-off'));
+  await go('Trends', 'Daily');
+  check('DAILY: a row per sampled day, newest first', host.querySelectorAll('.ob-daily .ob-row[data-day]').length === 6);
+
+  // ── Data ──
+  await go('Data');
+  const srcs = [...host.querySelectorAll('.ob-sources .ob-row[data-source]')];
+  check('DATA: every source and what it holds', srcs.length === 8 && /7,667 confirmed · 1,500 suspected/.test(text(srcs[1])) && /from the guild/.test(text(srcs[1])), srcs.map(text).join(' | '));
+  check('…a guild read per guild', host.querySelectorAll('.ob-guild-reads .ob-row[data-guild]').length === 3 && /3,810 \/ 3,810/.test(text(host.querySelector('.ob-guild-reads .ob-row[data-guild="0-5"]'))));
+  const iss = [...host.querySelectorAll('.ob-issues .ob-issue')].map((r) => r.dataset.issue);
+  check('…leads with what is wrong, worst first, and says when the sources disagree', iss.join('|') === 'Replicants read from the guild|Runs with no player|Guilds with no API|Sources disagree', iss.join('|'));
+  const rec = (k) => host.querySelector('.ob-reconcile .ob-row[data-figure="' + k + '"]');
+  check('…the chain and the daily record side by side, a disagreement marked', rec('New players, 30 days') && /agree/.test(text(rec('New players, 30 days'))) && /^Active this month ?576 ?149 ?-427$/.test(text(rec('Active this month'))), rec('Active this month') && text(rec('Active this month')));
+  check('…lost beacons name the guild, with the count', /SN\.C/.test(text(host.querySelector('.ob-issue[data-issue="Runs with no player"]'))) && /2 of 40 runs/.test(text(host.querySelector('.ob-issue[data-issue="Runs with no player"]'))));
+  check('the status link counts issues, not notices, and opens Data', /^2 issues/.test(text(host.querySelector('.ob-status'))), text(host.querySelector('.ob-status')));
+  check('…coverage counts players, split by why they are unseen', /In reporting guilds ?9,340/.test(text(host.querySelector('.ob-key[data-coverage="ok"]'))) && /In guilds with no API ?72/.test(text(host.querySelector('.ob-key[data-coverage="dark"]'))) && /In no guild ?188/.test(text(host.querySelector('.ob-key[data-coverage="none"]'))));
+  check('…an issue is a door, with what fixes it on hover', host.querySelector('.ob-issue[data-issue="Runs with no player"]').tagName === 'A' && /launch message was lost/.test(host.querySelector('.ob-issue[data-issue="Runs with no player"]').title));
+  check('…every definition, listed once', host.querySelectorAll('.ob-defs .ob-row[data-term]').length >= 15);
+  check('…the footer counts humans and names the replicants set aside', /of 445 humans/.test(text(host.querySelector('.ob-foot'))) && /9,167 replicants under 9 primaries/.test(text(host.querySelector('.ob-foot'))), text(host.querySelector('.ob-foot')));
+  const sel = (k) => host.querySelector('[data-control="' + k + '"]');
+  sel('active').value = '30'; sel('active').dispatchEvent(new w.Event('change'));
+  check('SETTINGS: the active window is a param and re-reads', !!(await until(() => calls().find((c) => c.args.activeDays === 30))));
+  await until(() => sel('idle'));
+  sel('idle').value = '72'; sel('idle').dispatchEvent(new w.Event('change'));
+  check('…and so is the quit window', !!(await until(() => calls().find((c) => c.args.idleHours === 72))));
+  await until(() => host.querySelector('.ob-ex-switch input'));
   const exSw = () => host.querySelector('.ob-ex-switch input');
-  check('EXCLUSIONS is one switch, off: the guilds leave their excluded players out', exSw() && !exSw().checked && host.querySelectorAll('.ob-main input').length === 1);
-  check('…and every read says so', calls().at(-1).args.filters.include_excluded === false);
+  check('…excluded players are left out unless asked for', exSw() && !exSw().checked && calls().at(-1).args.filters.include_excluded === false);
   exSw().checked = true; exSw().dispatchEvent(new w.Event('change'));
-  const incl = await until(() => calls().find((c) => c.args.filters.include_excluded === true));
-  check('the switch is a param and re-reads with everyone', !!incl);
+  check('…the switch re-reads with everyone', !!(await until(() => calls().find((c) => c.args.filters.include_excluded === true))));
   await until(() => exSw() && exSw().checked);
-  check('…and every page says excluded players are in', /Excluded players included/.test(text(host.querySelector('.ob-status'))));
+  check('…and every page then says excluded players are in, beside the non-default windows', /excluded in · active 30d · quit 3d/.test(text(host.querySelector('.ob-status'))), text(host.querySelector('.ob-status')));
   exSw().checked = false; exSw().dispatchEvent(new w.Event('change'));
   await until(() => calls().at(-1).args.filters.include_excluded === false && exSw() && !exSw().checked);
-  check('…and back off', !/Excluded players included/.test(text(host.querySelector('.ob-status'))));
 
-  // ── Compare ──
-  const sel = () => [...host.querySelectorAll('.ob-controls select')];
-  sel()[3].value = 'activity'; sel()[3].dispatchEvent(new w.Event('change'));
-  const asked = await until(() => calls().find((c) => c.args.filters.compare === 'activity'));
-  check('Compare is a param and re-reads', !!asked);
-  await until(() => host.querySelector('.ob-compare'));
-  go('Overview');
-  const head = [...host.querySelectorAll('.ob-compare .ob-head .ob-c')].map(text);
-  check('OVERVIEW compares one column per segment', head.join('|') === '|Active|Inactive', head.join('|'));
-  go('Retention');
-  check('the active window is live wherever the activity split is', !host.querySelector('.ob-controls [data-control="active"]').disabled);
-  go('Signup');
-  check('signup ignores replicants, so the box is off there', host.querySelector('.ob-controls [data-control="reps"]').classList.contains('is-off'));
-  check('signup cannot be split by activity, and says so', /only known once signup finishes/.test(text(host.querySelector('.ob-view'))));
-  go('Players');
-  const segRows = [...host.querySelectorAll('.ob-dist .ob-row[data-seg]')].map((r) => r.dataset.seg);
-  check('PLAYERS compares a row per segment', segRows.slice(0, 2).join(',') === 'active,inactive', segRows.join(','));
-
-  sel()[3].value = 'guild'; sel()[3].dispatchEvent(new w.Event('change'));
-  await until(() => calls().find((c) => c.args.filters.compare === 'guild'));
-  await until(() => /OH/.test(text(host.querySelector('.ob-dist'))));
-  go('Tutorial');
-  const th = text(host.querySelectorAll('.ob-compare')[1].querySelector('.ob-head'));
-  check('TUTORIAL compares kept, drop and skip per guild', /OH · Kept/.test(th) && /SN\.C · Kept/.test(th) && /Skip/.test(th), th);
-
-  go('Runs');
-  const rc = [...host.querySelectorAll('.ob-compare .ob-row[data-metric]')].map((r) => r.dataset.metric);
-  check('RUNS compares a column per segment, on the same figures', rc.join(',') === 'runs,players,completed,left,playing,repeat,replays,existing,no_player' && /OH/.test(text(host.querySelector('.ob-compare .ob-head'))), rc.join(','));
-
-  sel()[0].value = 'structs-webapp'; sel()[0].dispatchEvent(new w.Event('change'));
-  const filtered = await until(() => calls().find((c) => c.args.filters.interface === 'structs-webapp'));
-  check('a filter is a param too', !!filtered);
-
-  // ── Versions ──
-  sel()[3].value = 'version'; sel()[3].dispatchEvent(new w.Event('change'));
-  check('Compare: tutorial version', !!(await until(() => calls().find((c) => c.args.filters.compare === 'version'))));
-  await until(() => /tutorial-3/.test(text(host.querySelector('.ob-compare .ob-head'))));
-  go('Overview');
-  check('OVERVIEW compares designs side by side', [...host.querySelectorAll('.ob-compare .ob-head .ob-c')].map(text).join('|') === '|tutorial-4|tutorial-3');
-  go('Runs');
-  check('RUNS: each design has its own rows by run', host.querySelectorAll('.ob-run-compare .ob-row[data-run]').length === 4 && /^tutorial-3 · 1/.test(text(host.querySelectorAll('.ob-run-compare .ob-row[data-run]')[2])));
-
-  // ── Compare by tutorial outcome ──
-  sel()[3].value = 'tutorial'; sel()[3].dispatchEvent(new w.Event('change'));
-  check('Compare: tutorial outcome', !!(await until(() => calls().find((c) => c.args.filters.compare === 'tutorial'))));
-  go('AARRR');
-  await until(() => /No record/.test(text(host.querySelector('.ob-aarrr-compare .ob-head'))));
-  go('Signup');
+  // ── Split ──
+  const split = async (v) => { sel('compare').value = v; sel('compare').dispatchEvent(new w.Event('change')); await until(() => calls().find((c) => c.args.filters.compare === (v || null)) && (!v || host.querySelector('.ob-seglabel'))); };
+  await go('Overview');
+  await split('activity');
+  check('a split is a param, re-reads, and marks the scope bar', calls().at(-1).args.filters.compare === 'activity' && sel('compare').classList.contains('is-set') && !!host.querySelector('.ob-reset'));
+  await until(() => host.querySelector('.ob-kpi-table'));
+  const head = [...host.querySelectorAll('.ob-kpi-table .ob-head .ob-c')].map(text);
+  check('OVERVIEW splits the KPI strip into one column per segment, each with its swatch', head.join('|') === '|Active|Inactive|Sum' && host.querySelectorAll('.ob-kpi-table .ob-head .ob-swatch').length === 2, head.join('|'));
+  check('…signals name the segment they are about', [...host.querySelectorAll('.ob-signal')].some((s) => /· Active$/.test(text(s.querySelector('.ob-step').firstChild))));
+  check('…a split\'s KPI rows keep their names', [...host.querySelectorAll('.ob-kpi-table .ob-row[data-kpi]')].map((r) => text(r.children[0])).join('|') === 'Players · now|Active this week|New players|Newly activated|Signup opens|Finished signups', [...host.querySelectorAll('.ob-kpi-table .ob-row[data-kpi]')].map((r) => text(r.children[0])).join('|'));
+  await go('Acquisition');
+  check('…signup cannot be split by activity, and says so', /only known once signup finishes/.test(text(host.querySelector('.ob-view'))));
+  await go('Engagement', 'Distributions');
+  check('…distributions get a row per segment', [...host.querySelectorAll('.ob-dist .ob-row[data-seg]')].slice(0, 2).map((r) => r.dataset.seg).join(',') === 'active,inactive');
+  await split('guild');
+  await go('Onboarding', 'Steps');
+  const th = text(host.querySelector('.ob-funnel-compare .ob-head'));
+  check('ONBOARDING splits kept and stop rate per guild, with the signed difference', /OH · Kept/.test(th) && /SN\.C · Stop rate/.test(th) && /Δ stop rate OH − SN\.C/.test(th), th);
+  await go('Onboarding', 'Phases');
+  check('…and the phases split the same way', !!host.querySelector('.ob-block[data-block="phases"] .ob-funnel-compare .ob-row[data-step="phase:2"]'));
+  await go('Onboarding', 'Runs');
+  check('RUNS split: the KPI table has a column per guild', /OH/.test(text(host.querySelector('.ob-kpi-table .ob-head'))) && host.querySelectorAll('.ob-kpi-table .ob-row[data-kpi]').length === 5);
+  await split('replicant');
+  check('splitting by replicant locks the population to both', sel('reps').disabled && sel('reps').value === '1');
+  await go('Acquisition');
+  check('…replicants have no signup funnel, so Acquisition shows the humans alone', host.querySelector('.ob-view .ob-funnel') && !host.querySelector('.ob-view .ob-compare'));
+  await split('tutorial');
   check('split by tutorial outcome, signup names why it has nothing', /The tutorial comes after signup/.test(text(host.querySelector('.ob-view'))));
-  go('AARRR');
-  check('AARRR compares the stages by tutorial outcome', [...host.querySelectorAll('.ob-aarrr-compare .ob-head .ob-c')].map(text).join('|') === 'Stage||Finished|Quit|Skipped|No record', [...host.querySelectorAll('.ob-aarrr-compare .ob-head .ob-c')].map(text).join('|'));
-
-  // ── A population the servers cannot count ──
-  sel()[3].value = ''; sel()[3].dispatchEvent(new w.Event('change'));
-  await until(() => !calls().at(-1).args.filters.compare);
-  sel()[2].value = 'active'; sel()[2].dispatchEvent(new w.Event('change'));
-  await until(() => calls().find((c) => c.args.filters.activity === 'active'));
-  go('Overview');
-  await until(() => /sample of/.test(text(host.querySelector('.ob-view'))));
-  const at = [...host.querySelectorAll('.ob-view .ob-title')].map(text);
-  check('split by activity, the path falls back to the sample and says so, and signup steps aside', at.some((t) => /^New player path · sample of/.test(t)) && !host.querySelector('.ob-path .ob-row[data-path="Started signup"]'), at.join('|'));
-  sel()[2].value = ''; sel()[2].dispatchEvent(new w.Event('change'));
-  await until(() => host.querySelector('.ob-path .ob-row[data-path="Started signup"]'));
-  // ── Replicants ──
-  const box = () => host.querySelector('.ob-controls .sui-checkbox-container input');
-  check('a Replicants checkbox, unticked', box() && box().checked === false && !box().disabled);
-  go('Health');
-  check('the footer counts humans and names the replicants set aside', /of 445 humans/.test(text(host.querySelector('.ob-foot'))) && /9,167 replicants under 9 primaries/.test(text(host.querySelector('.ob-foot'))), text(host.querySelector('.ob-foot')));
-  box().checked = true; box().dispatchEvent(new w.Event('change'));
-  check('ticking it asks with replicants', !!(await until(() => calls().find((c) => c.args.filters.replicants === true))));
-  await until(() => box() && box().checked);
+  host.querySelector('.ob-reset').click();
+  await until(() => !calls().at(-1).args.filters.compare && !host.querySelector('.ob-reset'));
+  await go('Guilds');
+  host.querySelector('.ob-guilds .ob-row[data-guild="0-5"] [data-act="stopped"]').click();
+  await until(() => calls().find((c) => c.args.filters.guild === '0-5') && host.querySelector('.ob-stopped'));
+  check('a guild\'s Stopped door opens its stopped players, and only theirs', [...host.querySelectorAll('.ob-stopped .ob-row[data-player]')].map((r) => r.dataset.player).join() === '1-9584' && /SN\.C/.test(text(host.querySelector('.ob-block[data-block="players"] .ob-chip.is-set'))));
+  check('…and the card title names the guild', /Telemetry · Players · 0-5/.test(text(d.querySelector('#tm-grid .tm-card[data-card="' + id + '"] .tm-title'))));
+  host.querySelector('.ob-reset').click();
+  await until(() => !calls().at(-1).args.filters.compare && !host.querySelector('.ob-reset'));
+  check('Reset clears every filter and the split', !calls().at(-1).args.filters.compare && !host.querySelector('.ob-reset'));
+  sel('reps').value = '1'; sel('reps').dispatchEvent(new w.Event('change'));
+  check('the population is a param: humans + replicants', !!(await until(() => calls().find((c) => c.args.filters.replicants === true))));
+  await go('Data');
   await until(() => /of 9,612 players/.test(text(host.querySelector('.ob-foot'))));
   check('…and the footer then counts every player', /of 9,612 players/.test(text(host.querySelector('.ob-foot'))), text(host.querySelector('.ob-foot')));
-  sel()[3].value = 'replicant'; sel()[3].dispatchEvent(new w.Event('change'));
-  check('Compare: Human / replicant', !!(await until(() => calls().find((c) => c.args.filters.compare === 'replicant'))));
-  await until(() => /Replicants/.test(text(host.querySelector('.ob-compare .ob-head'))) || /Replicants/.test(text(host.querySelector('.ob-dist'))));
-  check('comparing them ticks and locks the box', box() && box().checked && box().disabled);
-  go('Overview');
-  const rh = [...host.querySelectorAll('.ob-compare .ob-head .ob-c')].map(text).join('|');
-  check('OVERVIEW compares humans with replicants', rh === '|Humans|Replicants', rh);
-  go('Signup');
-  check('replicants have no signup funnel, so Signup shows the humans alone', host.querySelector('.ob-view .ob-funnel') && !host.querySelector('.ob-view .ob-compare'));
-
-  check('the card is titled Telemetry', /^Telemetry\b/.test(text(d.querySelector('#tm-grid .tm-card[data-card="' + id + '"] .tm-title'))), text(d.querySelector('#tm-grid .tm-card[data-card="' + id + '"] .tm-title')));
-  check('while the crawl runs the status says so with the in-progress glyph', !!host.querySelector('.ob-status .icon-in-progress') && /Reading…/.test(text(host.querySelector('.ob-status'))));
+  check('while the crawl runs the status says so with the in-progress glyph', !!host.querySelector('.ob-status .icon-in-progress') && /Reading · read \d/.test(text(host.querySelector('.ob-status'))), text(host.querySelector('.ob-status')));
+  check('every block can copy what it shows', /^Source\tHolds/.test(O.tsvOf(host.querySelector('.ob-block[data-block="sources"]'))), O.tsvOf(host.querySelector('.ob-block[data-block="sources"]')).slice(0, 60));
 }
 
 // ── Cold start: nothing read yet ──
@@ -329,34 +355,31 @@ const coldHost = await until(() => {
   const c = d.querySelector('#tm-grid .tm-card[data-card="' + coldId + '"] .tm-body');
   return c && c.querySelector('.ob') ? c : null;
 });
-const coldView = () => coldHost && coldHost.querySelector('.ob-view, .ob-main > .sui-message-inline-alert');
 check('with nothing read and the crawl running, the page is a loading block, not zero tiles',
-  coldHost && !coldHost.querySelector('.ob-hud') && coldHost.querySelector('.ob-main > .sui-message-inline-alert .icon-in-progress') && /Reading every guild/.test(text(coldView())), coldHost && text(coldHost));
-const cgo = (label) => { [...coldHost.querySelectorAll('.ob .sui-screen-nav-item')].find((a) => text(a) === label).click(); };
-cgo('Runs');
-check('Runs still draws: it comes from the servers, not the crawl', coldHost && coldHost.querySelector('.ob-runs .ob-row[data-session]'));
-cgo('Signup');
-check('Signup still draws: it comes from the servers, not the crawl', coldHost && coldHost.querySelector('.ob-funnel .ob-row[data-step]'));
+  coldHost && !coldHost.querySelector('.ob-hud') && coldHost.querySelector('.ob-main > .sui-message-inline-alert .icon-in-progress') && /Reading every guild/.test(text(coldHost.querySelector('.ob-main'))), coldHost && text(coldHost));
+const cgo = async (label) => { [...coldHost.querySelectorAll('.ob-sections .sui-screen-nav-item')].find((a) => text(a) === label).click(); await until(() => coldHost.querySelector('.ob[data-page="' + label.toLowerCase() + '"]')); };
+await cgo('Acquisition');
+check('Acquisition still draws: it comes from the servers, not the crawl', coldHost && coldHost.querySelector('.ob-funnel .ob-row[data-step]'));
+await cgo('Players');
+[...coldHost.querySelectorAll('.ob-subnav .sui-screen-nav-item')].find((a) => text(a) === 'Tutorial runs').click();
+await until(() => coldHost.querySelector('.ob-runs'));
+check('Players ▸ runs still draws: they come from the servers', coldHost && coldHost.querySelector('.ob-runs .ob-row[data-session]'));
 w.__HARNESS_OB_COLD__ = 'done';
+await cgo('Onboarding');
 T.refresh(coldId, true);
-cgo('Tutorial');
-const settled = await until(() => coldHost.querySelector('.ob-view .sui-message-inline-alert .icon-info') ? coldHost : null);
-check('once the crawl finished empty-handed, the page says there is nothing', settled && /No tutorial sessions yet/.test(text(coldHost.querySelector('.ob-view'))), coldHost && text(coldHost.querySelector('.ob-view')));
+const settled = await until(() => /No tutorial sessions yet/.test(text(coldHost.querySelector('.ob-main'))) ? coldHost : null);
+check('once the crawl finished empty-handed, the page says there is nothing', !!settled, coldHost && text(coldHost.querySelector('.ob-main')));
 delete w.__HARNESS_OB_COLD__;
 
 // ── A popped-out card: every chart door opens its own window ──
-// In a solo window `T.add` cannot place a card beside this one, so it asks
-// Rust for a new window (`open_terminal_card_new`); Rust re-focuses only a card
-// with the SAME params (terminal.rs same_card, unit-tested there).
 const solo = await JSDOM.fromFile(harness, {
   url: pathToFileURL(harness).href + '?view=terminal&card=onboarding-solo', runScripts: 'dangerously', resources: 'usable', pretendToBeVisual: true,
-  beforeParse(win) { win.__HARNESS_LAYOUT__ = { version: 3, cards: [{ id: 'onboarding-solo', type: 'onboarding', params: {}, w: 3 }] }; },
+  beforeParse(win) { win.__HARNESS_LAYOUT__ = { version: 3, cards: [{ id: 'onboarding-solo', type: 'onboarding', params: { page: 'trends' }, w: 3 }] }; },
 });
 const sw = solo.window, sd = sw.document;
-const soloHost = await until(() => sd.querySelector('#tm-grid .tm-card[data-card="onboarding-solo"] .ob-rail') ? sd.querySelector('#tm-grid .tm-card[data-card="onboarding-solo"]') : null, 10000);
-check('a popped-out Telemetry card draws on its own', !!soloHost);
+const soloHost = await until(() => sd.querySelector('#tm-grid .tm-card[data-card="onboarding-solo"] .ob-trends') ? sd.querySelector('#tm-grid .tm-card[data-card="onboarding-solo"]') : null, 10000);
+check('a popped-out Telemetry card opens on the page it was saved on', !!soloHost);
 if (soloHost) {
-  [...soloHost.querySelectorAll('.ob-rail .sui-screen-nav-item')].find((a) => text(a) === 'Trends').click();
   const door = (k) => soloHost.querySelector('.ob-trends .ob-row[data-trend="' + k + '"] a.ob-link');
   door('humans').click();
   door('refiners_7d').click();
@@ -380,7 +403,8 @@ check('the desktop build reports its own interface, guarded against upstream dri
 const refresh = read('src-tauri/src/mcp/onboarding_players.rs').split('pub async fn refresh_replicants')[1] || '';
 check('replicants come from the chain first: the guild\'s list runs short', refresh.indexOf('read_replicants()') >= 0 && refresh.indexOf('read_replicants()') < refresh.indexOf('/api/permission/all'));
 check('every outcome in the strip has a colour', ['completed', 'declined', 'left', 'playing'].every((k) => new RegExp('\\.ob-seg-' + k + ' \\{ background').test(read('frontend/onboarding.css'))));
-check('Rust opens a new chart window unless one with the same params exists', /want\.is_some\(\) \|\| bare \|\| c\.params == \*params/.test(read('src-tauri/src/mcp/terminal.rs')) && /a chart of another series is another chart|A chart of another series is another chart/.test(read('src-tauri/src/mcp/terminal.rs')));
+check('every segment swatch has a colour', [0, 1, 2, 3, 4, 5].every((i) => new RegExp('\\.ob-sw-' + i + ' \\{ background').test(read('frontend/onboarding.css'))));
+check('Rust opens a new chart window unless one with the same params exists', /want\.is_some\(\) \|\| bare \|\| c\.params == \*params/.test(read('src-tauri/src/mcp/terminal.rs')));
 check('the Chart card can plot the daily record', /"source": "telemetry"/.test(read('src-tauri/src/mcp/charts.rs')) && /"telemetry" =>/.test(read('src-tauri/src/mcp/charts.rs')));
 check('the record keeps going at launch for a player who has one', /resume_history_ticker\(\)/.test(read('src-tauri/src/game_state.rs')));
 check('board.html loads the script and the sheet', /board-terminal-onboarding\.js/.test(read('frontend/board.html')) && /onboarding\.css/.test(read('frontend/board.html')));

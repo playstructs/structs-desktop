@@ -1,106 +1,165 @@
-/* The onboarding telemetry card (board-terminal-onboarding.js). Tokens only. */
-.ob { text-align: left; display: flex; flex-direction: column; gap: var(--spacing-md); }
-.ob-controls { display: flex; flex-wrap: wrap; gap: var(--spacing-sm) var(--spacing-xxl); align-items: flex-end; }
-#board-layout .ob-controls label.sui-input-text.cfg-field {
-  flex-direction: column; align-items: stretch; justify-content: flex-start; gap: var(--spacing-xs); width: auto; min-width: 0; padding: 0;
-}
+/* The Telemetry card (board-terminal-onboarding.js). Tokens only.
+   One grammar on every section: the section strip and status, the scope bar,
+   a KPI strip, then blocks of tables that share one row component. */
+.ob { text-align: left; display: flex; flex-direction: column; gap: var(--spacing-lg); container: ob / inline-size; }
 /* Every label reads at the body size: 8px pixel type is for the game's own HUD. */
 .ob .fstat-l { font-family: 'DirectiveZero', sans-serif; font-size: 16px; line-height: var(--spacing-xxl); text-transform: none; letter-spacing: 0; }
-.ob .fstat-l2 { opacity: 1; }
-/* The readouts: one card per figure, caption over a large value. */
-.ob-hud { display: grid; grid-template-columns: repeat(auto-fit, minmax(13ch, 1fr)); gap: var(--spacing-xl); }
-.ob-hud .ob-tile { align-items: flex-start; background: var(--page-background); border: 1px solid var(--border-subtle); padding: var(--spacing-lg) var(--spacing-xl); }
-.ob-hud .ob-tile .fstat-l { order: 0; }
-.ob-hud .ob-tile .fstat-v { order: 1; font-family: 'ExtremeHazard', sans-serif; font-size: 32px; line-height: calc(var(--spacing-xxxl) + var(--spacing-md)); color: var(--text-body); }
+.ob .fstat-l2 { opacity: 1; color: var(--text-hint); }
+.ob-v { color: var(--accent-primary-active); }
+.ob-sub { color: var(--text-hint); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* ── The frame ── */
+.ob-top { display: flex; align-items: center; gap: var(--spacing-lg); }
+.ob-top .ob-act { flex: none; }
+.ob-top .ob-sections { flex: 1 1 auto; min-width: 0; margin: 0; }
+.ob .subnav { margin: 0; }
+.ob-status { flex: none; display: inline-flex; align-items: center; gap: var(--spacing-md); text-decoration: none; color: var(--text-body); }
+/* Only the mark is red: the data's trouble should not be the first colour a player sees. */
+.ob-status.is-bad { color: var(--text-body); }
+.ob-status.is-bad .ob-src-mark { background: var(--accent-destructive); }
+.ob-scope { display: flex; align-items: flex-start; gap: var(--spacing-lg); padding-bottom: var(--spacing-md); border-bottom: 1px solid var(--border-subtle); }
+.ob-scope-body { flex: 1 1 auto; min-width: 0; }
+.ob-scope-side { flex: none; display: flex; flex-wrap: wrap; align-items: center; gap: var(--spacing-md); margin-left: auto; }
+.ob-scope-body { display: flex; flex-wrap: wrap; gap: var(--spacing-sm) var(--spacing-lg); align-items: center; }
+/* The fold button only exists for a narrow card. */
+#board-layout .ob a.ob-scope-toggle { display: none; align-items: center; gap: var(--spacing-xs); color: var(--text-body); text-decoration: none; }
+#board-layout .ob a.ob-scope-toggle.is-set { color: var(--accent-primary-active); }
+#board-layout .ob-scope select { width: auto; min-width: 0; max-width: 32ch; }
+#board-layout .ob-scope select.is-set { border-color: var(--accent-primary); background: var(--accent-primary); color: var(--text-player-inverted); }
+.ob-chip.is-set { border-color: var(--accent-primary); color: var(--accent-primary-active); }
+/* A control the page does not read: visible, so its value is known, but inert. */
+.ob-scope .is-off { opacity: .4; pointer-events: none; }
+#board-layout .ob a.ob-reset { color: var(--accent-primary-active); text-decoration: none; }
+.ob-main { display: flex; flex-direction: column; min-width: 0; }
+.ob-view { display: flex; flex-direction: column; gap: var(--spacing-xl); }
+.ob-subnav { align-self: stretch; }
+
+/* ── KPI strip: one card per figure, caption over a large value ── */
+.ob-kpi { display: flex; flex-direction: column; gap: var(--spacing-sm); }
+.ob-kpi-head { display: flex; justify-content: flex-end; align-items: center; gap: var(--spacing-md); }
+.ob-kpi-head .subnav .sui-screen-nav { padding: 0; }
+#board-layout .ob-kpi-head .ob-windows { flex: 0 1 auto; width: auto; min-width: 0; margin-right: auto; }
+.ob-chip { color: var(--text-hint); border: 1px solid var(--border-subtle); padding: 0 var(--spacing-md); }
+.ob-hud { display: grid; grid-template-columns: repeat(auto-fill, minmax(28ch, 1fr)); gap: var(--spacing-lg); }
+.ob-hud .ob-tile { container: obtile / inline-size; position: relative; align-items: flex-start; justify-content: flex-start; background: var(--page-background); border: 1px solid var(--border-subtle); padding: var(--spacing-lg) var(--spacing-xl); min-width: 0; }
+.ob-hud .ob-tile { display: flex; flex-direction: column; gap: var(--spacing-xs); text-align: left; }
+.ob-tile-top { display: flex; flex-wrap: wrap; justify-content: space-between; gap: var(--spacing-sm); color: var(--text-hint); min-height: var(--spacing-xl); }
+.ob-tile-stage { font-family: 'ExtremeHazard', sans-serif; font-size: 8px; line-height: var(--spacing-xl); text-transform: uppercase; }
+.ob-tile-scope { border: 1px solid var(--border-subtle); padding: 0 var(--spacing-xs); white-space: nowrap; }
+.ob-hud .ob-tile .fstat-l { order: 0; justify-content: flex-start; }
+.ob-hud .ob-tile .fstat-v { order: 1; justify-content: flex-start; font-family: 'ExtremeHazard', sans-serif; font-size: 32px; line-height: calc(var(--spacing-xxxl) + var(--spacing-md)); color: var(--text-body); }
 .ob-hud .ob-tile.ok .fstat-v { color: var(--text-player-primary); }
 .ob-hud .ob-tile.bad .fstat-v { color: var(--text-enemy-primary); }
-.ob-hud .ob-tile .fstat-l2 { order: 2; }
-/* Filters, then the page beside its rail. */
-.ob-controls { align-items: center; }
-#board-layout .ob .sui-checkbox-container.has-label label { margin-left: calc(var(--form-input-height-total) + var(--spacing-md)); }
-.ob-status { margin-left: auto; display: inline-flex; align-items: center; gap: var(--spacing-md); text-decoration: none; color: var(--text-body); }
-.ob-status.is-bad { color: var(--text-warning); }
-.ob-status.is-bad .ob-src-mark { background: var(--text-warning); }
-.ob-shell { display: flex; align-items: stretch; gap: var(--spacing-xl); }
-.ob-main { flex: 1 1 0; min-width: 0; display: flex; flex-direction: column; gap: var(--spacing-md); }
-.ob-rail { flex: none; width: 16ch; display: flex; flex-direction: column; align-items: stretch; background: none; }
-.ob-rail-head { font-family: 'ExtremeHazard', sans-serif; font-size: 8px; line-height: var(--spacing-xl); color: var(--text-hint); padding: var(--spacing-lg) var(--spacing-md) var(--spacing-xs); text-transform: uppercase; }
-.ob-rail-head:first-child { padding-top: 0; }
-#board-layout .ob-rail a.sui-screen-nav-item { display: block; padding: var(--spacing-sm) var(--spacing-md); font-family: 'DirectiveZero', sans-serif; font-size: 16px; line-height: var(--spacing-xxl); text-transform: none; text-align: left; color: var(--text-body); border: 0; box-shadow: none; height: auto; }
-#board-layout .ob-rail a.sui-screen-nav-item.sui-mod-active { background: var(--accent-primary); color: var(--text-player-inverted); }
-.ob-two { display: grid; grid-template-columns: repeat(auto-fit, minmax(40ch, 1fr)); gap: var(--spacing-xl); }
-.ob-view { display: flex; flex-direction: column; gap: var(--spacing-xl); }
-.ob-block { display: flex; flex-direction: column; gap: var(--spacing-md); background: var(--page-background); border: 1px solid var(--border-subtle); padding: var(--spacing-xl); }
-.ob-title { color: var(--text-body); }
-.ob-v { color: var(--accent-primary-active); }
+.ob-hud .ob-tile.is-off .fstat-v { color: var(--text-hint); }
+.ob-hud .ob-tile .fstat-l2 { order: 2; white-space: normal; }
+.ob-delta { order: 3; display: flex; align-items: center; gap: var(--spacing-xs); color: var(--text-hint); }
+.ob-delta.is-up { color: var(--text-player-primary); }
+.ob-delta.is-down { color: var(--text-enemy-primary); }
+.ob-delta.is-mismatch { color: var(--text-warning); }
+.ob-tile-spark { order: 4; align-self: stretch; margin-top: var(--spacing-sm); }
+.ob-tile.is-door { cursor: pointer; }
+/* A tile too narrow for the display face's figure drops it to the body size. */
+@container obtile (max-width: 160px) { .ob-hud .ob-tile .fstat-v { font-size: 16px; line-height: var(--spacing-xxl); } }
+.ob-inline .ob-of { display: inline; margin-left: var(--spacing-xs); }
+.ob-signal-inline { display: none; }
+.ob-doors { display: flex; justify-content: flex-end; gap: var(--spacing-md); }
+.ob-tile.is-door:hover, .ob-tile.is-door:focus { border-color: var(--accent-primary); outline: none; }
+.ob-kpi-table .ob-c.is-door { color: var(--accent-primary-active); cursor: pointer; }
+.ob-kpi-table .ob-of { white-space: normal; }
 
-/* Tables are rows of cells on one grid per table, so the columns line up
-   without a <table> (and wrap as rows of their own when the card is narrow). */
-.ob-table { display: flex; flex-direction: column; }
-.ob-row { display: grid; align-items: center; gap: var(--spacing-md); padding: var(--spacing-xs) var(--spacing-xs); border-bottom: 1px solid var(--border-subtle); }
-.ob-head { border-bottom: 1px solid var(--border-strong); }
-.ob-funnel .ob-row { grid-template-columns: minmax(18ch, 1.6fr) minmax(8ch, 1fr) repeat(7, minmax(6ch, .5fr)); }
-.ob-funnel-skips .ob-row { grid-template-columns: minmax(18ch, 1.6fr) minmax(8ch, 1fr) repeat(10, minmax(6ch, .5fr)); }
-/* Comparison and distribution tables set their own columns (one or more per
-   segment) on the table; every row takes them. */
-.ob-compare .ob-row, .ob-dist .ob-row { grid-template-columns: var(--ob-cols); }
-.ob-hist .ob-row { grid-template-columns: minmax(12ch, 1.2fr) minmax(10ch, 2fr) repeat(2, minmax(6ch, .5fr)); }
-.ob-slow .ob-row { grid-template-columns: var(--ob-cols, minmax(20ch, 1.6fr) minmax(10ch, 1.4fr) repeat(3, minmax(6ch, .5fr))); }
-.ob-daily .ob-row { grid-template-columns: minmax(11ch, 1fr) repeat(4, minmax(6ch, .5fr)) minmax(8ch, 1fr) minmax(6ch, .5fr); }
-.ob-guilds .ob-row { grid-template-columns: minmax(18ch, 1.2fr) minmax(12ch, 2fr) minmax(8ch, .4fr) minmax(7ch, .4fr) minmax(13ch, .6fr) minmax(9ch, .4fr); }
-.ob-recent .ob-row { grid-template-columns: minmax(15ch, 1.1fr) minmax(9ch, .5fr) minmax(24ch, 2fr) minmax(7ch, .4fr) minmax(9ch, .4fr) minmax(6ch, .4fr); }
-.ob-phases .ob-row { grid-template-columns: minmax(14ch, 1fr) minmax(12ch, 3fr) repeat(3, minmax(6ch, .4fr)); }
-.ob-path .ob-row { grid-template-columns: minmax(16ch, 1fr) minmax(8ch, 2fr) minmax(5ch, .4fr); border-bottom: 0; }
-.ob-runs .ob-row { grid-template-columns: minmax(15ch, 1.2fr) minmax(5ch, .4fr) minmax(14ch, .8fr) minmax(6ch, .5fr) minmax(3ch, .25fr) minmax(8ch, .5fr) minmax(7ch, .5fr) minmax(15ch, 1.3fr) minmax(6ch, .4fr); }
-.ob-steps .ob-row { grid-template-columns: minmax(18ch, 1.6fr) minmax(8ch, 1fr) repeat(3, minmax(6ch, .5fr)); }
-.ob-trends .ob-row { grid-template-columns: minmax(16ch, 1.2fr) minmax(10ch, 1fr) repeat(3, minmax(6ch, .5fr)); }
-.ob-who { display: flex; flex-direction: column; gap: var(--spacing-xs); padding: var(--spacing-xs) var(--spacing-xs) var(--spacing-sm) var(--spacing-xl); border-bottom: 1px solid var(--border-subtle); text-align: left; }
-.ob-who-row { display: grid; grid-template-columns: minmax(15ch, 1.2fr) minmax(5ch, .4fr) minmax(6ch, .5fr) minmax(7ch, .5fr); align-items: center; gap: var(--spacing-md); }
-.ob-spark { color: var(--accent-primary); }
-.ob-spark svg { display: block; width: 100%; height: var(--spacing-xl); }
-.ob-funnel.is-small .ob-row:not(.ob-head) > .ob-n { color: var(--text-hint); }
-.ob-row.is-open { background: var(--surface-default); }
+/* ── Blocks: title left, the same actions right ── */
+.ob-block { display: flex; flex-direction: column; gap: var(--spacing-md); background: var(--page-background); border: 1px solid var(--border-subtle); padding: var(--spacing-lg) var(--spacing-xl); min-width: 0; }
+.ob-block-head { display: flex; flex-wrap: wrap; align-items: center; gap: var(--spacing-sm) var(--spacing-md); min-height: var(--spacing-xxl); }
+.ob-actions { flex-wrap: wrap; justify-content: flex-end; }
+.ob-view > * { min-width: 0; max-width: 100%; }
+.ob-title { color: var(--text-body); flex: 1 1 auto; min-width: 0; }
+.ob-actions { display: inline-flex; align-items: center; gap: var(--spacing-sm); flex: 0 1 auto; min-width: 0; max-width: 100%; margin-left: auto; }
+.ob-actions .subnav { margin: 0; }
+.ob-two { display: grid; grid-template-columns: repeat(auto-fit, minmax(48ch, 1fr)); gap: var(--spacing-xl); align-items: start; }
+
+/* ── Tables: rows of cells on one grid per table, columns set on the table ── */
+.ob-table { display: flex; flex-direction: column; overflow-x: auto; }
+.ob-row { display: grid; align-items: center; gap: var(--spacing-md); padding: var(--spacing-xs); border-bottom: 1px solid var(--border-subtle); }
+.ob-table > .ob-row { grid-template-columns: var(--ob-cols); }
+.ob-head { border-bottom: 1px solid var(--border-strong); align-items: end; }
+.ob-head .ob-c { color: var(--text-hint); white-space: normal; }
 .ob-c { min-width: 0; color: var(--text-body); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ob-n { text-align: right; font-variant-numeric: tabular-nums; }
-.ob-head .ob-c { color: var(--text-hint); white-space: normal; }
 .ob-step { display: flex; flex-direction: column; }
-.ob-sub { color: var(--text-hint); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ob-of { display: block; }
+.ob-wrap { white-space: normal; }
 .ob-link { cursor: pointer; text-decoration: none; }
-.ob-link:hover > span:first-child { color: var(--accent-primary-active); }
-.ob-row.is-quiet .ob-c { color: var(--text-hint); }
+.ob-link:hover > span:first-child, a.ob-link.ob-c:hover { color: var(--accent-primary-active); }
+.ob-sort.is-on { color: var(--accent-primary-active); }
+.ob-row.is-open { background: var(--surface-default); }
+.ob-row.is-quiet .ob-c, .ob-row.is-total .ob-c { color: var(--text-hint); }
+.ob-row.is-part { border-bottom-color: var(--border-strong); padding-top: var(--spacing-md); }
+.ob-part { color: var(--text-hint); grid-column: 1 / -1; }
+.ob-row.is-picked { background: var(--surface-default); }
+.ob-row.is-aside .ob-c { color: var(--text-hint); }
+.ob-row.is-mine { background: var(--surface-default); box-shadow: inset var(--spacing-xs) 0 0 var(--accent-primary); }
+.ob-row.is-small .ob-c { color: var(--text-hint); }
+.ob-row.is-pending .ob-src-mark { background: var(--surface-panel); }
+.ob-c.is-good { color: var(--text-player-primary); }
+#board-layout .ob a.ob-focus { color: var(--accent-primary-active); text-decoration: none; text-align: right; }
+#board-layout .ob a.ob-focus.is-on { color: var(--text-warning); }
+.ob-trend-name { flex-direction: row; align-items: center; gap: var(--spacing-sm); }
+.ob-trend-name > a { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ob-subtable { padding: var(--spacing-sm) 0 var(--spacing-sm) var(--spacing-xxl); background: var(--surface-default); border-bottom: 1px solid var(--border-subtle); }
+.ob-who-head { display: flex; align-items: center; gap: var(--spacing-md); padding-bottom: var(--spacing-xs); }
+.ob-who-head .ob-sub { flex: 1 1 auto; }
+.ob-funnel.is-small .ob-row:not(.ob-head) > .ob-n { color: var(--text-hint); }
 .ob-c.is-bad { color: var(--text-enemy-primary); }
 .ob-c.is-slow { color: var(--text-warning); }
+.ob-c.is-skip { color: var(--accent-secondary); }
+.ob-c.is-best { color: var(--text-player-primary); }
 .ob-out-completed { color: var(--text-player-primary); }
 .ob-out-left { color: var(--text-enemy-primary); }
 .ob-out-declined { color: var(--text-hint); }
+.ob-stage-name { color: var(--text-hint); }
+.ob-aarrr .ob-row.is-stage, .ob-aarrr-compare .ob-row.is-stage { border-top: 1px solid var(--border-strong); }
+.ob-spark { color: var(--accent-primary); }
+.ob-spark svg { display: block; width: 100%; height: var(--spacing-xl); }
+/* The one drill: a caret before the label, a panel under the row. */
+.ob-drill { display: flex; flex-direction: row; align-items: center; gap: var(--spacing-xs); }
+.ob-drill > i { flex: none; color: var(--accent-primary); }
+.ob-drill-body { display: flex; flex-direction: column; min-width: 0; }
+.ob-drill-body > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ob-who { display: flex; flex-direction: column; gap: var(--spacing-xs); padding: var(--spacing-xs) var(--spacing-xs) var(--spacing-sm) var(--spacing-xxl); border-bottom: 1px solid var(--border-subtle); background: var(--surface-default); }
+.ob-who-row { display: grid; grid-template-columns: minmax(15ch, 1.2fr) minmax(5ch, .4fr) minmax(6ch, .5fr) minmax(7ch, .5fr); align-items: center; gap: var(--spacing-md); }
+.ob-more { display: grid; grid-template-columns: repeat(auto-fit, minmax(14ch, 1fr)); gap: var(--spacing-sm) var(--spacing-md); padding: var(--spacing-sm) var(--spacing-xs) var(--spacing-sm) var(--spacing-xxl); background: var(--surface-default); border-bottom: 1px solid var(--border-subtle); }
+.ob-fact { display: flex; flex-direction: column; min-width: 0; }
 
-/* A bar is the meter's track and fill (structs-cards.css .sc-meter). */
-.ob-bar { position: relative; display: block; height: var(--spacing-md); background: var(--surface-default); border: 1px solid var(--border-subtle); }
+/* ── Bars, strips, swatches ── */
+.ob-bar { position: relative; display: flex; height: var(--spacing-lg); background: var(--surface-default); border: 1px solid var(--border-subtle); min-width: 0; }
 .ob-bar-fill { position: absolute; left: 0; top: 0; bottom: 0; background: var(--accent-primary); }
 .ob-bar.is-time .ob-bar-fill { background: var(--text-warning); }
 .ob-bar.is-aside .ob-bar-fill { background: var(--accent-secondary); }
-
-/* The tutorial's outcome: one stacked strip and its key. */
-.ob-outcome { display: flex; flex-direction: column; gap: var(--spacing-xs); }
-.ob-stack { display: flex; height: var(--spacing-lg); border: 1px solid var(--border-subtle); background: var(--surface-default); }
-.ob-seg { flex: 0 1 0; min-width: var(--spacing-xs); }
-.ob-legend { display: flex; flex-wrap: wrap; gap: var(--spacing-xs) var(--spacing-xl); }
-.ob-key { display: inline-flex; align-items: center; gap: var(--spacing-xs); }
-.ob-swatch { display: inline-block; width: var(--spacing-md); height: var(--spacing-md); }
-.ob-seg-completed { background: var(--accent-primary); }
-.ob-seg-declined { background: var(--accent-secondary); }
-.ob-seg-left { background: var(--accent-destructive); }
-.ob-seg-playing { background: var(--text-warning); }
-.ob-foot { color: var(--text-hint); display: flex; align-items: center; gap: var(--spacing-xs); }
-.ob-foot [class^="icon-"] { font-size: var(--icon-sm); }
-
-/* A bar in parts: went on, stopped, skipped. */
-.ob-bar { display: flex; height: var(--spacing-lg); }
 .ob-bar .ob-keep { display: block; background: var(--accent-primary); height: 100%; }
 .ob-bar .ob-stop { display: block; background: var(--accent-destructive); height: 100%; }
 .ob-bar .ob-skip { display: block; background: var(--accent-secondary); height: 100%; }
 .ob-bar .ob-whole { display: block; background: var(--surface-panel); height: 100%; min-width: var(--spacing-xs); }
-.ob-c.is-skip { color: var(--accent-secondary); }
+.ob-outcome { display: flex; flex-direction: column; gap: var(--spacing-xs); }
+.ob-outcome + .ob-outcome { margin-top: var(--spacing-md); }
+.ob-stack { display: flex; height: var(--spacing-lg); border: 1px solid var(--border-subtle); background: var(--surface-default); }
+.ob-seg { flex: 0 1 0; min-width: var(--spacing-xs); }
+.ob-legend { display: flex; flex-wrap: wrap; gap: var(--spacing-xs) var(--spacing-xl); }
+.ob-key { display: inline-flex; align-items: center; gap: var(--spacing-sm); }
+.ob-key .ob-v { margin-left: var(--spacing-xs); }
+.ob-swatch { display: inline-block; flex: none; width: var(--spacing-md); height: var(--spacing-md); }
+.ob-seglabel { display: inline-flex; align-items: center; gap: var(--spacing-xs); min-width: 0; }
+.ob-n .ob-seglabel, .ob-head .ob-n .ob-seglabel { justify-content: flex-end; }
+/* Segment N wears swatch N everywhere: the chart card's stroke order. */
+.ob-sw-0 { background: var(--text-player-primary); }
+.ob-sw-1 { background: var(--accent-secondary); }
+.ob-sw-2 { background: var(--text-warning); }
+.ob-sw-3 { background: var(--text-enemy-primary); }
+.ob-sw-4 { background: var(--accent-primary); }
+.ob-sw-5 { background: var(--text-body); }
+.ob-seg-completed { background: var(--accent-primary); }
+.ob-seg-declined { background: var(--accent-secondary); }
+.ob-seg-left { background: var(--accent-destructive); }
+.ob-seg-playing { background: var(--text-warning); }
 .ob-life-today { background: var(--accent-primary); }
 .ob-life-week { background: var(--border-focus-friendly-dark); }
 .ob-life-month { background: var(--text-warning); }
@@ -108,17 +167,29 @@
 .ob-life-never { background: var(--surface-panel); }
 .ob-cov-ok { background: var(--accent-primary); }
 .ob-cov-dark { background: var(--text-warning); }
+.ob-cov-bad { background: var(--accent-destructive); }
 .ob-cov-none { background: var(--surface-panel); }
-.ob-key .ob-v { margin-left: var(--spacing-xs); }
 
-/* Cohorts: one row per join week, the shade is the share still acting. */
+/* ── Signals ── */
+.ob-signals { display: flex; flex-direction: column; }
+#board-layout .ob a.ob-signal { display: grid; grid-template-columns: auto minmax(0, 1fr) auto auto; gap: var(--spacing-md); align-items: center; padding: var(--spacing-sm) var(--spacing-xs); border-bottom: 1px solid var(--border-subtle); text-decoration: none; color: var(--text-body); }
+#board-layout .ob a.ob-signal:hover { background: var(--surface-default); }
+.ob-signal .ob-src-mark { margin-top: 0; }
+.ob-signal.is-bad .ob-src-mark { background: var(--accent-destructive); }
+.ob-signal.is-warn .ob-src-mark { background: var(--text-warning); }
+.ob-signal.is-good .ob-src-mark { background: var(--accent-primary); }
+.ob-signal.is-info .ob-src-mark { background: var(--accent-secondary); }
+.ob-signal > i { color: var(--text-hint); }
+
+/* ── Cohorts: one row per join week, the shade is the share still acting ── */
 .ob-cohorts { display: flex; flex-direction: column; gap: var(--spacing-xs); overflow-x: auto; }
-.ob-cohort { display: grid; grid-template-columns: 5ch 6ch repeat(9, minmax(4ch, 1fr)); gap: var(--spacing-xs); align-items: center; min-width: 48ch; }
+.ob-cohort { display: grid; grid-template-columns: 7ch 7ch repeat(9, minmax(5ch, 1fr)); gap: var(--spacing-xs); align-items: center; min-width: 48ch; padding: 0; border: 0; }
 .ob-cohort-head { color: var(--text-hint); text-align: center; }
 .ob-cohort-head > :first-child { text-align: left; }
 .ob-cohort .ob-n { padding-right: var(--spacing-sm); }
 .ob-heat { display: block; text-align: center; line-height: var(--spacing-xxl); height: var(--spacing-xxl); }
 .ob-heat-none { background: none; }
+.ob-heat-count { background: none; color: var(--text-hint); border: 1px solid var(--border-subtle); }
 .ob-heat-0 { background: var(--surface-default); color: var(--text-enemy-primary); }
 .ob-heat-1 { background: var(--surface-player-body); color: var(--text-body); }
 .ob-heat-2 { background: var(--surface-player-highlight); color: var(--text-body); }
@@ -129,7 +200,10 @@
 .ob-week-track { display: flex; align-items: flex-end; height: calc(var(--spacing-xxxl) * 3); background: var(--surface-default); }
 .ob-week-fill { display: block; width: 100%; min-height: var(--spacing-xs); background: var(--accent-primary); }
 
-/* Journeys: a phase per square, the last one in the outcome's colour. */
+/* ── Players: find, pills, journeys ── */
+.ob-find { display: flex; flex-wrap: wrap; align-items: center; gap: var(--spacing-md) var(--spacing-xl); }
+#board-layout .ob label.sui-input-text.ob-search { min-width: 0; width: 24ch; padding: 0; }
+#board-layout .ob label.sui-input-text.ob-search input { width: 100%; min-width: 0; }
 .ob-pills { display: flex; flex-wrap: wrap; gap: var(--spacing-sm); }
 #board-layout a.ob-pill { padding: var(--spacing-xs) var(--spacing-md); background: var(--surface-default); color: var(--text-body); border: 1px solid var(--accent-secondary); text-decoration: none; }
 #board-layout a.ob-pill.is-on { background: var(--accent-primary); border-color: var(--accent-primary); color: var(--text-player-inverted); }
@@ -141,76 +215,47 @@
 .ob-journey { display: grid; grid-template-columns: repeat(11, minmax(0, 1fr)); gap: var(--spacing-xs); }
 .ob-dot { height: var(--spacing-lg); background: var(--border-subtle); }
 .ob-dot.is-done { background: var(--border-focus-friendly-dark); }
-.ob-more { display: grid; grid-template-columns: repeat(auto-fit, minmax(14ch, 1fr)); gap: var(--spacing-sm) var(--spacing-md); padding: var(--spacing-sm) var(--spacing-xs); background: var(--surface-default); border-bottom: 1px solid var(--border-subtle); }
-.ob-fact { display: flex; flex-direction: column; min-width: 0; }
+.ob-pick { justify-self: start; }
 
-/* Exclusions: the switch, the add row, then the rules. */
+/* ── Data ── */
 .ob-ex-off { color: var(--text-warning); }
-
-/* Health: what needs a look, then the sources that do not. */
 .ob-issues { display: flex; flex-direction: column; gap: var(--spacing-sm); }
-.ob-issue { display: grid; grid-template-columns: 8ch minmax(0, 1fr) auto; gap: var(--spacing-md); align-items: center; padding: var(--spacing-sm) var(--spacing-md); background: var(--page-background); border: 1px solid var(--text-warning); }
+#board-layout .ob a.ob-issue { text-decoration: none; color: var(--text-body); }
+.ob-issue { grid-template-columns: 8ch minmax(0, 1fr) auto auto; padding: var(--spacing-sm) var(--spacing-md); border: 1px solid var(--text-warning); }
 .ob-issue.is-issue { border-color: var(--accent-destructive); }
 .ob-issue .ob-badge { justify-self: start; }
-.ob-sources { display: grid; grid-template-columns: repeat(auto-fit, minmax(24ch, 1fr)); gap: var(--spacing-sm); }
-.ob-src { display: flex; gap: var(--spacing-sm); padding: var(--spacing-sm); background: var(--surface-default); min-width: 0; }
-.ob-src-mark { flex: none; width: var(--spacing-md); height: var(--spacing-md); margin-top: var(--spacing-xs); background: var(--accent-primary); }
-.ob-status .ob-src-mark { margin-top: 0; }
-.ob-src.is-failing .ob-src-mark { background: var(--accent-destructive); }
+.ob-src-mark { flex: none; display: inline-block; width: var(--spacing-md); height: var(--spacing-md); background: var(--accent-primary); }
+.ob-src-name { flex-direction: row; align-items: center; gap: var(--spacing-sm); }
+.is-failing .ob-src-mark { background: var(--accent-destructive); }
+.ob-settings { display: flex; flex-direction: column; gap: var(--spacing-md); }
+#board-layout .ob-settings label.sui-input-text.cfg-field { min-width: 0; }
+.ob-foot { color: var(--text-hint); display: flex; align-items: center; gap: var(--spacing-xs); }
+#board-layout .ob .sui-checkbox-container.has-label label { margin-left: calc(var(--form-input-height-total) + var(--spacing-md)); }
 
-/* A one-wide card (a ⌘K pop-out) keeps the figures that answer "how far, and
-   where do they stop": the bars, Skipped and p90 step aside. */
-.ob { container-type: inline-size; }
-@container (max-width: 600px) {
-  .ob-funnel .ob-row, .ob-slow .ob-row { column-gap: var(--spacing-lg); }
-  .ob-funnel .ob-row, .ob-funnel-skips .ob-row { grid-template-columns: minmax(0, 1fr) repeat(4, auto); }
-  /* Kept · Lost so far · Step drop · Median stay. */
-  .ob-funnel .ob-row > :nth-child(2), .ob-funnel .ob-row > :nth-child(3), .ob-funnel .ob-row > :nth-child(6),
-  .ob-funnel:not(.ob-funnel-skips) .ob-row > :nth-child(9),
-  .ob-funnel-skips .ob-row > :nth-child(8), .ob-funnel-skips .ob-row > :nth-child(9),
-  .ob-funnel-skips .ob-row > :nth-child(10), .ob-funnel-skips .ob-row > :nth-child(12) { display: none; }
-  .ob-slow .ob-row { grid-template-columns: minmax(0, 1fr) repeat(3, auto); }
-  /* Player · Started · Kind · Outcome. */
-  .ob-runs .ob-row { grid-template-columns: minmax(0, 1fr) repeat(3, auto); column-gap: var(--spacing-lg); }
-  .ob-runs .ob-row > :nth-child(2), .ob-runs .ob-row > :nth-child(3), .ob-runs .ob-row > :nth-child(5),
-  .ob-runs .ob-row > :nth-child(8), .ob-runs .ob-row > :nth-child(9) { display: none; }
-  .ob-slow .ob-row > :nth-child(2) { display: none; }
-  .ob-steps .ob-row, .ob-trends .ob-row { grid-template-columns: minmax(0, 1fr) repeat(3, auto); column-gap: var(--spacing-lg); }
-  .ob-steps .ob-row > :nth-child(2), .ob-trends .ob-row > :nth-child(2) { display: none; }
-  /* The rail lies down above the page. */
-  .ob-shell { flex-direction: column; gap: var(--spacing-md); }
-  .ob-rail { width: auto; flex-direction: row; flex-wrap: wrap; }
-  .ob-rail-head { display: none; }
-  /* Phase · Left · Lost. */
-  .ob-phases .ob-row { grid-template-columns: minmax(0, 1fr) repeat(2, auto); column-gap: var(--spacing-lg); }
-  .ob-phases .ob-row > :nth-child(2), .ob-phases .ob-row > :nth-child(5) { display: none; }
-  /* Player · Outcome · Seen. */
-  .ob-recent .ob-row { grid-template-columns: minmax(0, 1fr) repeat(2, auto); column-gap: var(--spacing-lg); }
-  .ob-recent .ob-row > :nth-child(3), .ob-recent .ob-row > :nth-child(4), .ob-recent .ob-row > :nth-child(5) { display: none; }
-  /* Run · Runs · Finished · Time to finish. */
-  .ob-run-compare .ob-row { grid-template-columns: minmax(0, 1fr) repeat(3, auto); column-gap: var(--spacing-lg); }
-  .ob-run-compare .ob-row > :nth-child(4), .ob-run-compare .ob-row > :nth-child(6), .ob-run-compare .ob-row > :nth-child(7) { display: none; }
-  /* Who · Players · Median · Max. */
-  .ob-dist .ob-row { grid-template-columns: minmax(0, 1fr) repeat(3, auto); column-gap: var(--spacing-lg); }
-  .ob-dist .ob-row > :nth-child(3), .ob-dist .ob-row > :nth-child(4), .ob-dist .ob-row > :nth-child(6), .ob-dist .ob-row > :nth-child(7) { display: none; }
-  /* Guild · Players · Active. */
-  .ob-guilds .ob-row { grid-template-columns: minmax(0, 1fr) repeat(2, auto); column-gap: var(--spacing-lg); }
-  .ob-guilds .ob-row > :nth-child(2), .ob-guilds .ob-row > :nth-child(5), .ob-guilds .ob-row > :nth-child(6) { display: none; }
+/* A one-wide card (a ⌘K pop-out): columns marked optional step aside, and
+   every table takes the narrow template it was given. */
+@container ob (max-width: 600px) {
+  .ob-table > .ob-row { grid-template-columns: var(--ob-cols-narrow, var(--ob-cols)); column-gap: var(--spacing-lg); }
+  .ob-opt { display: none; }
+  .ob-top { flex-wrap: wrap; gap: var(--spacing-sm); }
+  .ob-top .ob-sections { flex: 1 1 100%; }
+  #board-layout .ob .ob-sections .sui-screen-nav-items { flex-wrap: nowrap; overflow-x: auto; justify-content: flex-start; }
+  .ob-sections .sui-screen-nav-item { flex: none; }
+  #board-layout .ob a.ob-scope-toggle { display: inline-flex; }
+  .ob-scope { flex-wrap: wrap; }
+  .ob-scope-side { flex: 1 1 100%; margin-left: 0; justify-content: space-between; order: -1; }
+  .ob-scope-body { display: none; padding-top: var(--spacing-sm); }
+  .ob-scope.is-open .ob-scope-body { display: flex; }
+  .ob-kpi-table .ob-of { display: none; }
+  .ob-hud { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--spacing-md); }
+  .ob-hud .ob-tile { padding: var(--spacing-md); }
+  .ob-tile-spark, .ob-tile-top .ob-tile-stage, .ob-pick { display: none; }
+  .ob-signal-value { display: none; }
+  .ob-signal-inline { display: block; color: var(--text-body); }
+  #board-layout .ob a.ob-signal { grid-template-columns: auto minmax(0, 1fr) auto; }
+  .ob-signal .ob-step > span { white-space: normal; }
+  .ob-doors { flex-direction: column; align-items: flex-end; gap: 0; }
+  .ob-two { grid-template-columns: minmax(0, 1fr); }
   .ob-who-row { grid-template-columns: minmax(0, 1fr) repeat(2, auto); }
   .ob-who-row > :nth-child(2) { display: none; }
 }
-
-/* AARRR: the five stages over three windows, then the tutorial's effect. */
-.ob-aarrr .ob-row, .ob-impact .ob-row { grid-template-columns: var(--ob-cols); }
-.ob-aarrr .ob-row:has(+ .is-stage), .ob-aarrr-compare .ob-row:has(+ .is-stage) { border-bottom-color: var(--border-strong); }
-.ob-stage-name { color: var(--text-hint); }
-.ob-stages { grid-template-columns: repeat(5, minmax(0, 1fr)); }
-.ob-hud .ob-tile.is-off .fstat-v { color: var(--text-hint); }
-.ob-row.is-total .ob-c { color: var(--text-hint); }
-.ob-c.is-best { color: var(--text-player-primary); }
-.ob-windows { align-self: flex-start; }
-/* A control the page does not read: visible, so its value is known, but inert. */
-.ob-controls .is-off { opacity: .4; pointer-events: none; }
-.ob-of { display: block; }
-/* Narrower than its columns, a table scrolls rather than hiding the last ones. */
-.ob-aarrr, .ob-impact, .ob-aarrr-compare { overflow-x: auto; }

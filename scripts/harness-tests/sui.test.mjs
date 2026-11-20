@@ -202,7 +202,10 @@ const BUDGET = {
   // Sounds card's) and the one-wide container breakpoint; columns are in ch,
   // bars and swatches on the spacing scale.
   'board-terminal-onboarding.js': [0, 0],
-  'onboarding.css': [0, 15],
+  // 2026-11-20 redesign: +8 — hairlines for the new rows (aside, picked,
+  // issue, scope rule), the KPI stage tag's 8px display type, and the tile
+  // container breakpoint (180px) at which a figure drops to the 16px body size.
+  'onboarding.css': [0, 23],
   // The Sector Blitz cards (2026-11-17): DOM builders only; the stylesheet's
   // px are 1px hairlines and the flex bases at which the race legend and the
   // territory panel stop sitting beside their chart (breakpoints, no token).

@@ -1610,9 +1610,10 @@
     // One number, one bar, one button. ENERGY used to open the guild grid;
     // GRID still does.
     ENERGY: ['energy'], POWER: ['energy'], HEADROOM: ['energy'],
-    // How far new players get through signup and Combat Training, over
-    // every guild. TELEMETRY because that is what the data is called.
-    TELEMETRY: ['onboarding'], ONBOARDING: ['onboarding'], FUNNEL: ['onboarding'], SIGNUPS: ['onboarding'],
+    // How players find the game, get through signup and Combat Training, and
+    // stay — over every guild. TELEMETRY because that is what the data is
+    // called; a section or view may follow (`TELEMETRY retention 7d`).
+    TELEMETRY: ['onboarding', 'args'], ONBOARDING: ['onboarding', 'args'], FUNNEL: ['onboarding', 'args'], SIGNUPS: ['onboarding', 'args'],
     INVENTORY: ['wallet', 'optid'], OPS: ['health'], CONFIG: ['page', 'config'],
     // What a player has DONE (the tiles) and what their hulls have done (the
     // table). `AWARDS` and `HULLS` because that is what each is called out loud.

@@ -928,6 +928,9 @@ cat > "$FIX" <<'EOF'
         dwell['signup.recovery_key_create'] = { n: 288, p50: 74, p90: 310, mean: 120 };
         dwell['tutorial.first_attack.combat'] = { n: 160, p50: 58, p90: 140, mean: 70 };
         var players = Math.round(9600 * scale);
+        /* New players a day (more lately) and activations a day, scaled with the segment. */
+        var pser = { new: Array.from({ length: 60 }, function (_, i) { return Math.round(((i % 4) + (i > 30 ? 6 : 4)) * scale); }),
+          activations: Array.from({ length: 60 }, function (_, i) { return Math.round((i % 3 === 0 ? 2 : 1) * scale); }) };
         return {
           key: key, label: label, players: players, active: Math.round(players * 0.42), inactive: Math.round(players * 0.58), active_rate: 0.42,
           never_acted: Math.round(players * 0.1), never_acted_rate: 0.1,
@@ -960,9 +963,13 @@ cat > "$FIX" <<'EOF'
           },
           play_length: dist(Math.round(600 * scale), Math.round(220 * scale), 5400, 900, 4800, 86400, 1900000, PLAY),
           pirate: {
+            /* Windows are sums of the same daily series the card charts, as
+             * the real payload's are (pirate.rs builds both from player dates),
+             * so a tile's change line has something true to compare with. */
             windows: [1, 7, 30].map(function (w) {
               var k = { 1: 0.02, 7: 0.1, 30: 0.3 }[w];
-              return { days: w, new: Math.round(players * k * 0.1), activated: Math.round(players * k * 0.02), cohort: Math.round(players * k * 0.01), cohort_rate: 0.1,
+              var sumLast = function (a) { return a.slice(-w).reduce(function (x, y) { return x + y; }, 0); };
+              return { days: w, new: sumLast(pser.new), activated: sumLast(pser.activations), cohort: Math.round(sumLast(pser.activations) / 2), cohort_rate: 0.1,
                 refiners: Math.round(players * k * 0.05), miners: Math.round(players * k * 0.06), raiders: Math.round(players * k * 0.03),
                 active: Math.round(players * k * 0.2), active_activated: Math.round(players * k * 0.04), retention_rate: 0.2 };
             }),
@@ -971,8 +978,8 @@ cat > "$FIX" <<'EOF'
             stickiness: { dau: Math.round(players * 0.004), mau: Math.round(players * 0.06) },
           },
           pirate_series: { days: Array.from({ length: 60 }, function (_, i) { return new Date(now - (59 - i) * day).toISOString().slice(0, 10); }),
-            series: { new: Array.from({ length: 60 }, function (_, i) { return i % 4; }), players_total: Array.from({ length: 60 }, function (_, i) { return 400 + i; }),
-              activations: Array.from({ length: 60 }, function (_, i) { return i % 9 ? 0 : 1; }), activated_total: Array.from({ length: 60 }, function (_, i) { return 30 + Math.floor(i / 9); }),
+            series: { new: pser.new, players_total: Array.from({ length: 60 }, function (_, i) { return players - 59 + i; }),
+              activations: pser.activations, activated_total: Array.from({ length: 60 }, function (_, i) { return 30 + Math.floor(i / 9); }),
               refiners: Array.from({ length: 60 }, function (_, i) { return i % 3; }), refiners_7d: Array.from({ length: 60 }, function (_, i) { return 8 + (i % 6); }),
               miners: Array.from({ length: 60 }, function (_, i) { return i % 4; }), miners_7d: Array.from({ length: 60 }, function (_, i) { return 9 + (i % 5); }),
               raiders: Array.from({ length: 60 }, function (_, i) { return i % 2; }), raiders_7d: Array.from({ length: 60 }, function (_, i) { return 5 + (i % 4); }) } },
