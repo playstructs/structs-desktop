@@ -436,13 +436,17 @@ cat > "$FIX" <<'EOF'
                 'alert.ore_received': { files: [{ name: 'lost.mp3', size: 0, mtime_ms: 0, ok: false, reason: 'missing' }] } } },
     sound_config_set: null, sound_mount_set: null, sound_mount_delete: null, sound_pick_file: { cancelled: true }, sound_trace_set: null, sound_reveal_config: null, sound_export: { cancelled: true }, sound_import: { cancelled: true },
     // The Terminal: a saved layout, the market, and the windows it has open.
-    terminal_layout_get: { version: 3, cards: [
-      { id: 'people-1', type: 'people', params: {}, w: 1 },
-      { id: 'market-1', type: 'market', params: {}, w: 2 },
-      { id: 'work-1', type: 'page', params: { page: 'work' }, w: 1 },
-      { id: 'player-1', type: 'player', params: { id: '1-61' }, w: 1 },
-      { id: 'stats-1', type: 'stats', params: { section: 'raids' }, w: 1 },
-    ] },
+    /* `__HARNESS_LAYOUT__` (set before the page's scripts run) replaces the
+     * workspace, for a suite that needs a card of its own, e.g. a solo window. */
+    terminal_layout_get: function () {
+      return window.__HARNESS_LAYOUT__ || { version: 3, cards: [
+        { id: 'people-1', type: 'people', params: {}, w: 1 },
+        { id: 'market-1', type: 'market', params: {}, w: 2 },
+        { id: 'work-1', type: 'page', params: { page: 'work' }, w: 1 },
+        { id: 'player-1', type: 'player', params: { id: '1-61' }, w: 1 },
+        { id: 'stats-1', type: 'stats', params: { section: 'raids' }, w: 1 },
+      ] };
+    },
     // Answers the saved layout back (its version is what the page keeps).
     get terminal_layout_set() { return { version: 4, cards: [] }; },
     terminal_workspaces: { active: 'main', names: ['main', 'war-room'] },
@@ -955,6 +959,25 @@ cat > "$FIX" <<'EOF'
             raids_won: dist(players, Math.round(players * 0.96), 0.1, 0, 0, 0, 88, COUNT),
           },
           play_length: dist(Math.round(600 * scale), Math.round(220 * scale), 5400, 900, 4800, 86400, 1900000, PLAY),
+          pirate: {
+            windows: [1, 7, 30].map(function (w) {
+              var k = { 1: 0.02, 7: 0.1, 30: 0.3 }[w];
+              return { days: w, new: Math.round(players * k * 0.1), activated: Math.round(players * k * 0.02), cohort: Math.round(players * k * 0.01), cohort_rate: 0.1,
+                refiners: Math.round(players * k * 0.05), miners: Math.round(players * k * 0.06), raiders: Math.round(players * k * 0.03),
+                active: Math.round(players * k * 0.2), active_activated: Math.round(players * k * 0.04), retention_rate: 0.2 };
+            }),
+            all: { players: players, acted: Math.round(players * 0.4), activated: Math.round(players * 0.08), activation_rate: 0.08, refiners: Math.round(players * 0.11), miners: Math.round(players * 0.14), raiders: Math.round(players * 0.15) },
+            untimed: Math.round(3 * scale), time_to_activate: { n: Math.round(40 * scale), p50: 3 * 86400, p90: 12 * 86400 },
+            stickiness: { dau: Math.round(players * 0.004), mau: Math.round(players * 0.06) },
+          },
+          pirate_series: { days: Array.from({ length: 60 }, function (_, i) { return new Date(now - (59 - i) * day).toISOString().slice(0, 10); }),
+            series: { new: Array.from({ length: 60 }, function (_, i) { return i % 4; }), players_total: Array.from({ length: 60 }, function (_, i) { return 400 + i; }),
+              activations: Array.from({ length: 60 }, function (_, i) { return i % 9 ? 0 : 1; }), activated_total: Array.from({ length: 60 }, function (_, i) { return 30 + Math.floor(i / 9); }),
+              refiners: Array.from({ length: 60 }, function (_, i) { return i % 3; }), refiners_7d: Array.from({ length: 60 }, function (_, i) { return 8 + (i % 6); }),
+              miners: Array.from({ length: 60 }, function (_, i) { return i % 4; }), miners_7d: Array.from({ length: 60 }, function (_, i) { return 9 + (i % 5); }),
+              raiders: Array.from({ length: 60 }, function (_, i) { return i % 2; }), raiders_7d: Array.from({ length: 60 }, function (_, i) { return 5 + (i % 4); }) } },
+          pirate_server: serverless || key === 'replicant' ? null : { windows: [{ days: 1, started: Math.round(4 * scale), signed_up: Math.round(2 * scale) }, { days: 7, started: Math.round(21 * scale), signed_up: Math.round(9 * scale) }, { days: 30, started: null, signed_up: null }],
+            all: { started: Math.round(2140 * scale), signed_up: Math.round(1091 * scale) }, since: new Date(now - 9 * day).toISOString().slice(0, 10) },
         };
       }
       var segs = f.compare === 'activity' ? [seg('active', 'Active', 0.42), seg('inactive', 'Inactive', 0.58)]
@@ -962,6 +985,7 @@ cat > "$FIX" <<'EOF'
         : f.compare === 'interface' ? [seg('structs-webapp', 'structs-webapp', 0.4), seg('none', 'none', 0.6)]
         : f.compare === 'replicant' ? [seg('human', 'Humans', 0.05), Object.assign(seg('replicant', 'Replicants', 0.95), { signup: null, sessions: 0 })]
         : f.compare === 'version' ? [seg('tutorial-4', 'tutorial-4', 0.8), seg('tutorial-3', 'tutorial-3', 0.2)]
+        : f.compare === 'tutorial' ? [seg('finished', 'Finished', 0.1), seg('quit', 'Quit', 0.1), seg('skipped', 'Skipped', 0.05), seg('none', 'No record', 0.75)].map(function (x) { return Object.assign(x, { signup: null, pirate_server: null }); })
         : [seg('all', 'All', 1)];
       var r = {
         version: 'tutorial-4', versions: ['tutorial-4', 'tutorial-3'], idle_hours: (a && a.idleHours) || 24, active_days: (a && a.activeDays) || 7, generated_ms: now,
@@ -992,12 +1016,22 @@ cat > "$FIX" <<'EOF'
           return { day: new Date(at).toISOString().slice(0, 10), ts_ms: at, humans: 400 + i * 2, replicants: 9000 + i * 50, activated: 150 + i, active_1d: 6 + (i % 3), active_7d: 16 + (i % 5), active_30d: 90 + i, mined: 50 + i, refined: 40, raided: 12,
             guilds: { '0-5': { humans: 300 + i, active_7d: 10 } }, server: i < 30 ? null : { version: 'tutorial-4', signups_started: 100 + i, signed_up: 80 + i, tutorial_players: 60 + i, tutorial_completed: 30 + i } };
         }),
+        history_series: { days: Array.from({ length: 60 }, function (_, i) { return new Date(now - (59 - i) * day).toISOString().slice(0, 10); }),
+          series: { dau: Array.from({ length: 60 }, function (_, i) { return i < 20 ? null : 6 + (i % 3); }), wau: Array.from({ length: 60 }, function (_, i) { return i < 20 ? null : 16 + (i % 5); }),
+            mau: Array.from({ length: 60 }, function (_, i) { return i < 20 ? null : 90 + i; }), signups_started: Array.from({ length: 60 }, function (_, i) { return i < 50 ? null : 100 + i; }),
+            signed_up: Array.from({ length: 60 }, function (_, i) { return i < 50 ? null : 80 + i; }) } },
+        tutorial_impact: [['finished', 'Finished', 12, 11, 7, 6, 5, 4, 8, 2.5], ['quit', 'Quit', 9, 6, 2, 3, 1, 1, 2, 6], ['skipped', 'Skipped', 7, 4, 1, 1, 0, 0, 1, null],
+          ['none', 'No record', 300, 90, 20, 30, 10, 3, 12, 9], ['all', 'All', 328, 111, 30, 40, 16, 8, 23, 7]].map(function (r) {
+          return { key: r[0], label: r[1], players: r[2], acted: r[3], mined: r[4], refined: r[4], raided: r[5], activated: r[6], active_7d: r[7], active_30d: r[8],
+            refined_p50: 12, raids_p50: 3, activate_days_p50: r[9], play_days_p50: 4 };
+        }),
         untracked: 2410,
         crawl: { running: true, finished_ms: now - 200000,
           guilds: { '0-1': { candidates: 3, team_skipped: 1, todo: 2, fetched: 2, errors: 0, last_error: null }, '0-5': { candidates: 9810, team_skipped: 0, replicants_skipped: 6000, todo: 3810, fetched: 3810, errors: 0, last_error: null } },
           players: { known: 9612, ledgers: 4100, humans: 445, human_ledgers: 445, refreshed_ms: now - 60000, round: { ledger_todo: 3000, ledger_read: 1200, ledger_errors: 0 } },
           replicants: { known: 7667, likely: 1500, primaries: 9, source: 'guild', read_ms: now - 60000 } },
       };
+      r.trend_series = segs[0].pirate_series;
       /* A first read before the crawls have found anything: 'reading' while
        * they run, 'done' once they finished empty-handed. */
       var cold = window.__HARNESS_OB_COLD__;
@@ -1006,6 +1040,8 @@ cat > "$FIX" <<'EOF'
         r.recent = [];
         r.stopped = {};
         r.history = [];
+        r.trend_series = null;
+        r.segments = r.segments.map(function (s) { return Object.assign(s, { pirate: null, pirate_series: null }); });
         r.crawl = { running: cold === 'reading', finished_ms: cold === 'reading' ? null : now - 1000, guilds: {}, players: { known: 0, ledgers: 0, refreshed_ms: null, round: null } };
       }
       return r;

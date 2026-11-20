@@ -34,6 +34,7 @@ pub mod onboarding;
 pub mod orders;
 pub mod onboarding_history;
 pub mod onboarding_players;
+pub mod pirate;
 pub mod rates;
 pub mod game_stats;
 pub mod grass_native;

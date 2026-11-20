@@ -862,6 +862,7 @@ fn spawn_crawl(entries: Vec<GuildApiEntry>, idle_hours: u32) {
         return;
     }
     CRAWL.lock().unwrap_or_else(|p| p.into_inner()).started = Some(Instant::now());
+    let entries_kept = entries.clone();
     tauri::async_runtime::spawn(async move {
         // Replicants first: both crawls below skip or defer them.
         let replicants_error = crate::mcp::onboarding_players::refresh_replicants().await.err();
@@ -882,6 +883,7 @@ fn spawn_crawl(entries: Vec<GuildApiEntry>, idle_hours: u32) {
         crate::mcp::cache_store::save_in_background(CACHE_NAME, snapshot);
         crate::mcp::onboarding_players::finish_round(&telemetry_players());
         crate::mcp::onboarding_history::record_chain(&crate::mcp::onboarding_players::snapshot(), now_ms());
+        record_server_totals(&entries_kept).await;
         {
             let mut st = CRAWL.lock().unwrap_or_else(|p| p.into_inner());
             st.finished = Some(Instant::now());
@@ -1038,6 +1040,56 @@ pub fn fold_sample(sessions: &[(&String, &PlayerSession)], next: &HashMap<String
     })
 }
 
+/// Sessions that opened signup: the largest first step of a raw funnel.
+fn funnel_started(raw: &[Value]) -> Option<f64> {
+    merge_funnels(&[(String::new(), raw.to_vec())])
+        .iter()
+        .filter(|s| s["previous"].is_null() && !s["next"].is_null())
+        .map(|s| s["reached"].as_f64().unwrap_or(0.0))
+        .reduce(f64::max)
+}
+
+/// `[signup sessions opened, signups finished]` from one guild's read, when it answered.
+fn signup_totals(a: &GuildAggregate) -> Option<[f64; 2]> {
+    if a.error.is_some() {
+        return None;
+    }
+    let raw = a.funnels.get(PHASES[0])?;
+    let signed = raw.iter().find(|s| text(s.get("step_key")) == PLAYER_STEP).and_then(|s| num(s.get("reached"))).unwrap_or(0.0);
+    Some([funnel_started(raw).unwrap_or(0.0), signed])
+}
+
+/// The day's running totals, when every guild answered: a partial sum would
+/// read as a fall in the trend.
+fn server_day(version: &str, read: &[(String, &GuildAggregate)]) -> Option<crate::mcp::onboarding_history::ServerDay> {
+    if read.is_empty() || read.iter().any(|(_, a)| a.error.is_some()) {
+        return None;
+    }
+    let guilds: BTreeMap<String, [f64; 2]> = read.iter().filter_map(|(g, a)| signup_totals(a).map(|t| (g.clone(), t))).collect();
+    let unique = |key: &str| read.iter().filter_map(|(_, a)| num(a.players.get(key))).sum::<f64>();
+    Some(crate::mcp::onboarding_history::ServerDay {
+        version: version.to_string(),
+        signups_started: guilds.values().map(|t| t[0]).sum(),
+        signed_up: guilds.values().map(|t| t[1]).sum(),
+        tutorial_players: unique("players"),
+        tutorial_completed: unique("completed"),
+        guilds,
+    })
+}
+
+/// Write today's server totals without the card open: the crawl that keeps
+/// the daily record going calls this when it ends.
+async fn record_server_totals(entries: &[GuildApiEntry]) {
+    let Ok((_, versions, _)) = directory(false).await else { return };
+    let Some(version) = versions.first().cloned() else { return };
+    let with_api: Vec<(&String, &str)> = entries.iter().filter_map(|e| e.guild_api.as_deref().map(|a| (&e.id, a))).collect();
+    let aggs = futures_util::future::join_all(with_api.iter().map(|(g, api)| guild_aggregate(g, api, &version, DEFAULT_IDLE_HOURS, None, false, false))).await;
+    let read: Vec<(String, &GuildAggregate)> = with_api.iter().map(|(g, _)| (*g).clone()).zip(aggs.iter()).collect();
+    if let Some(day) = server_day(&version, &read) {
+        crate::mcp::onboarding_history::record_server(day, now_ms());
+    }
+}
+
 // ── Filters and segments ────────────────────────────────────────────────────
 
 /// One population, optionally split along one dimension. Every page of the
@@ -1054,7 +1106,7 @@ pub struct Filters {
     /// Count replicants too; humans only when unset.
     #[serde(default)]
     pub replicants: Option<bool>,
-    /// `interface` | `guild` | `activity` | `replicant` | `version`
+    /// `interface` | `guild` | `activity` | `replicant` | `version` | `tutorial`
     #[serde(default)]
     pub compare: Option<String>,
     /// Ask the guilds' reports for their excluded players too
@@ -1079,6 +1131,8 @@ pub struct Seg {
     pub replicant: Option<bool>,
     /// A design other than the card's chosen one, when comparing designs.
     pub version: Option<String>,
+    /// One tutorial group (`pirate::TUTORIAL_GROUPS`), when comparing them.
+    pub tutorial: Option<String>,
 }
 
 impl Seg {
@@ -1087,6 +1141,9 @@ impl Seg {
             && self.interface.as_deref().map_or(true, |i| i == interface)
             && self.active.map_or(true, |a| a == active)
             && self.replicant.map_or(true, |r| r == replicant)
+    }
+    pub fn wants_tutorial(&self, group: &str) -> bool {
+        self.tutorial.as_deref().map_or(true, |t| t == group)
     }
 }
 
@@ -1109,6 +1166,7 @@ pub fn segments(f: &Filters, guilds: &[(String, String)], interfaces: &[String],
         },
         replicant: if f.replicants == Some(true) { None } else { Some(false) },
         version: None,
+        tutorial: None,
     };
     match clean(&f.compare).as_deref() {
         Some("guild") => guilds
@@ -1135,6 +1193,10 @@ pub fn segments(f: &Filters, guilds: &[(String, String)], interfaces: &[String],
             .iter()
             .take(VERSIONS_COMPARED)
             .map(|v| Seg { key: v.clone(), label: v.clone(), version: Some(v.clone()), ..base.clone() })
+            .collect(),
+        Some("tutorial") => crate::mcp::pirate::TUTORIAL_GROUPS
+            .iter()
+            .map(|(k, l)| Seg { key: (*k).into(), label: (*l).into(), tutorial: Some((*k).into()), ..base.clone() })
             .collect(),
         _ => vec![base],
     }
@@ -1352,6 +1414,26 @@ pub async fn terminal_onboarding(
         .iter()
         .map(|e| (e.id.clone(), if e.tag.is_empty() { if e.name.is_empty() { e.id.clone() } else { e.name.clone() } } else { e.tag.clone() }))
         .collect();
+    // What each player did with Combat Training: their signup session and every run.
+    let tutorial_of: HashMap<&str, &'static str> = {
+        let mut done: HashMap<&str, (bool, bool, bool)> = HashMap::new();
+        for (pid, s) in sessions_all.iter().filter(|(_, s)| !s.events.is_empty()) {
+            let e = done.entry(pid.as_str()).or_default();
+            e.0 |= s.completed();
+            e.1 |= s.reached(LOADING_STEP).is_some();
+            e.2 |= s.reached(OFFER_STEP).is_some() || s.skipped(OFFER_STEP);
+        }
+        for r in runs_all() {
+            if let Some(p) = r.player.as_deref() {
+                let e = done.entry(p).or_default();
+                e.0 |= r.outcome == "completed";
+                e.1 = true;
+                e.2 = true;
+            }
+        }
+        done.into_iter().map(|(p, (c, st, o))| (p, crate::mcp::pirate::tutorial_group(c, st, o))).collect()
+    };
+    let group_of = |pid: &str| tutorial_of.get(pid).copied().unwrap_or("none");
     let segs = segments(&filters, &guild_labels, &interfaces, &versions);
     let base = segments(&Filters { compare: None, ..filters.clone() }, &guild_labels, &interfaces, &versions).remove(0);
     let seg_version = |seg: &Seg| seg.version.clone().unwrap_or_else(|| version.clone());
@@ -1362,7 +1444,7 @@ pub async fn terminal_onboarding(
     // Replicants sign up from code and record no telemetry, so the servers'
     // funnel is the humans' and a replicants-only segment has none.
     let signup_guilds = |seg: &Seg| -> Option<Vec<String>> {
-        if seg.active.is_some() || seg.interface.as_deref() == Some(NO_INTERFACE) || seg.replicant == Some(true) {
+        if seg.active.is_some() || seg.interface.as_deref() == Some(NO_INTERFACE) || seg.replicant == Some(true) || seg.tutorial.is_some() {
             return None;
         }
         Some(with_api.iter().filter(|e| seg.guild.as_ref().map_or(true, |g| *g == e.id)).map(|e| e.id.clone()).collect())
@@ -1383,14 +1465,21 @@ pub async fn terminal_onboarding(
     let agg: HashMap<Combo, GuildAggregate> = combos.into_iter().zip(aggs).collect();
 
     let session_in = |seg: &Seg, pid: &str, s: &PlayerSession| -> bool {
-        s.version == seg_version(seg) && !s.events.is_empty() && seg.wants(&s.guild, if s.interface.is_empty() { NO_INTERFACE } else { &s.interface }, is_active(players.get(pid), cutoff), is_rep(pid))
+        s.version == seg_version(seg)
+            && !s.events.is_empty()
+            && seg.wants(&s.guild, if s.interface.is_empty() { NO_INTERFACE } else { &s.interface }, is_active(players.get(pid), cutoff), is_rep(pid))
+            && seg.wants_tutorial(group_of(pid))
     };
 
     let run_in = |seg: &Seg, r: &Run| -> bool {
         let p = r.player.as_deref();
-        r.version == seg_version(seg) && seg.wants(&r.guild, &r.interface, p.map_or(false, |p| is_active(players.get(p), cutoff)), p.map_or(false, |p| is_rep(p)))
+        r.version == seg_version(seg)
+            && seg.wants(&r.guild, &r.interface, p.map_or(false, |p| is_active(players.get(p), cutoff)), p.map_or(false, |p| is_rep(p)))
+            && seg.wants_tutorial(p.map_or("none", |p| group_of(p)))
     };
 
+    let history_all = crate::mcp::onboarding_history::recent(HISTORY_SHOWN);
+    let newest = versions.first().cloned().unwrap_or_else(|| version.clone());
     let out_segs: Vec<Value> = segs
         .iter()
         .map(|seg| {
@@ -1402,6 +1491,7 @@ pub async fn terminal_onboarding(
                 .iter()
                 .filter(|(pid, p)| seg.wants(&p.guild, interface_of.get(pid.as_str()).copied().unwrap_or(NO_INTERFACE), is_active(Some(p), cutoff), is_rep(pid)))
                 .filter(|(pid, _)| seg.version.is_none() || version_of.get(pid.as_str()).copied() == Some(seg_v.as_str()))
+                .filter(|(pid, _)| seg.wants_tutorial(group_of(pid)))
                 .collect();
             let active = members.iter().filter(|(_, p)| is_active(Some(p), cutoff)).count();
             // Churn is leaving: a player who never acted never arrived.
@@ -1459,6 +1549,18 @@ pub async fn terminal_onboarding(
             let new_only = sum_rows(&answered(&|a| &a.new_players), &["players", "started"]);
             let player_steps = merge_player_steps(&server.iter().map(|a| &a.player_steps).collect::<Vec<_>>());
             let seg_runs: Vec<&Run> = runs_all().filter(|r| run_in(seg, r)).collect();
+            let pirate_members: Vec<crate::mcp::pirate::Member> =
+                members.iter().map(|(pid, p)| crate::mcp::pirate::Member { facts: *p, stats: stats.get(*pid) }).collect();
+            // Signup sessions over a window come from the daily record, which
+            // holds the newest design's totals with excluded players left out.
+            let server = (seg.interface.is_none() && !all && seg_v == newest && signup_guilds(seg).is_some())
+                .then(|| {
+                    let gs = signup_guilds(seg).unwrap_or_default();
+                    let totals: Vec<[f64; 2]> = gs.iter().filter_map(|g| agg.get(&(g.clone(), seg_v.clone(), None))).filter_map(signup_totals).collect();
+                    let now_totals = (totals.len() == gs.len() && !gs.is_empty()).then(|| totals.iter().fold([0.0, 0.0], |a, t| [a[0] + t[0], a[1] + t[1]]));
+                    crate::mcp::pirate::server_windows(&history_all, now_totals, seg.guild.as_deref(), now)
+                })
+                .unwrap_or(Value::Null);
 
             json!({
                 "key": seg.key, "label": seg.label,
@@ -1480,6 +1582,9 @@ pub async fn terminal_onboarding(
                 },
                 "sessions": sess.len(),
                 "runs": run_summary(&seg_runs),
+                "pirate": crate::mcp::pirate::stages(&pirate_members, now),
+                "pirate_series": crate::mcp::pirate::series(&pirate_members, now),
+                "pirate_server": server,
                 "run_comparison": run_comparison(&seg_runs),
                 "durations": folded["durations"], "daily": folded["daily"], "dwell": dwell,
                 "stats": {
@@ -1524,6 +1629,27 @@ pub async fn terminal_onboarding(
         })
         .collect();
 
+    // How players who took the tutorial fare against those who did not: the
+    // base population, from when telemetry began, so every group had the offer.
+    let tutorial_impact: Vec<Value> = {
+        let rows: Vec<(&str, crate::mcp::pirate::Member)> = players
+            .iter()
+            .filter(|(pid, p)| player_index(pid).map_or(false, |i| i >= TELEMETRY_FLOOR_INDEX) && base.wants(&p.guild, interface_of.get(pid.as_str()).copied().unwrap_or(NO_INTERFACE), is_active(Some(p), cutoff), is_rep(pid)))
+            .map(|(pid, p)| (group_of(pid), crate::mcp::pirate::Member { facts: p, stats: stats.get(pid) }))
+            .collect();
+        crate::mcp::pirate::tutorial_impact(&rows, now)
+    };
+
+    // Trends' rebuilt series: humans, narrowed by guild only, like the daily record beside them.
+    let trend_series = {
+        let ms: Vec<crate::mcp::pirate::Member> = players
+            .iter()
+            .filter(|(pid, p)| !is_rep(pid) && base.guild.as_ref().map_or(true, |g| *g == p.guild))
+            .map(|(pid, p)| crate::mcp::pirate::Member { facts: p, stats: stats.get(pid) })
+            .collect();
+        crate::mcp::pirate::series(&ms, now)
+    };
+
     let crawl = {
         let st = CRAWL.lock().unwrap_or_else(|p| p.into_inner());
         let u = crate::mcp::onboarding_players::UNIVERSE_CRAWL.lock().unwrap_or_else(|p| p.into_inner()).clone();
@@ -1545,9 +1671,7 @@ pub async fn terminal_onboarding(
         .map(|e| {
             let a = agg.get(&(e.id.clone(), version.clone(), None));
             let signup = a.and_then(|a| a.funnels.get(PHASES[0]));
-            let first = signup.map(|r| merge_funnels(&[(String::new(), r.clone())])).and_then(|m| {
-                m.iter().filter(|s| s["previous"].is_null() && !s["next"].is_null()).map(|s| s["reached"].as_f64().unwrap_or(0.0)).reduce(f64::max)
-            });
+            let first = signup.and_then(|r| funnel_started(r));
             let signed = signup.and_then(|r| r.iter().find(|s| text(s.get("step_key")) == PLAYER_STEP)).and_then(|s| num(s.get("reached")));
             let mine: Vec<&PlayerSession> = sessions_all.iter().filter(|(pid, s)| s.guild == e.id && !is_rep(pid)).map(|(_, s)| s).collect();
             let all: Vec<(&String, &crate::mcp::onboarding_players::PlayerFacts)> = players.iter().filter(|(_, p)| p.guild == e.id).collect();
@@ -1576,21 +1700,12 @@ pub async fn terminal_onboarding(
 
     // The running totals, when every API answered for the newest design: a
     // partial sum would read as a fall in the trend.
-    if versions.first() == Some(&version) {
-        let all: Vec<&GuildAggregate> = with_api.iter().filter_map(|e| agg.get(&(e.id.clone(), version.clone(), None))).collect();
-        if !all.is_empty() && all.iter().all(|a| a.error.is_none()) {
-            let total = |key: &str| guilds.iter().filter_map(|g| g[key].as_f64()).sum::<f64>();
-            let unique = |key: &str| all.iter().filter_map(|a| num(a.players.get(key))).sum::<f64>();
-            crate::mcp::onboarding_history::record_server(
-                crate::mcp::onboarding_history::ServerDay {
-                    version: version.clone(),
-                    signups_started: total("started"),
-                    signed_up: total("signed_up"),
-                    tutorial_players: unique("players"),
-                    tutorial_completed: unique("completed"),
-                },
-                now,
-            );
+    // Only the default population is written down: a day read with excluded
+    // players included would read as a jump and back.
+    if versions.first() == Some(&version) && !all {
+        let read: Vec<(String, &GuildAggregate)> = with_api.iter().filter_map(|e| agg.get(&(e.id.clone(), version.clone(), None)).map(|a| (e.id.clone(), a))).collect();
+        if let Some(day) = server_day(&version, &read) {
+            crate::mcp::onboarding_history::record_server(day, now);
         }
     }
 
@@ -1609,7 +1724,10 @@ pub async fn terminal_onboarding(
         "recent": recent,
         "runs": runs,
         "stopped": stopped,
-        "history": crate::mcp::onboarding_history::recent(HISTORY_SHOWN),
+        "history_series": crate::mcp::pirate::history_series(&history_all, now),
+        "trend_series": trend_series,
+        "history": history_all,
+        "tutorial_impact": tutorial_impact,
         "untracked": sessions_all.iter().filter(|(pid, s)| s.events.is_empty() && !is_rep(pid)).count(),
         "crawl": crawl,
     }))

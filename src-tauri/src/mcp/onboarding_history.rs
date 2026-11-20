@@ -50,6 +50,9 @@ pub struct ServerDay {
     pub signed_up: f64,
     pub tutorial_players: f64,
     pub tutorial_completed: f64,
+    /// Each guild's own `[signups started, signups finished]`.
+    #[serde(default)]
+    pub guilds: BTreeMap<String, [f64; 2]>,
 }
 
 /// (metric, unit, label), for the Chart card.
@@ -60,14 +63,26 @@ pub const METRICS: &[(&str, &str, &str)] = &[
     ("active_1d", "count", "humans active in a day"),
     ("active_7d", "count", "humans active in 7 days"),
     ("active_30d", "count", "humans active in 30 days"),
-    ("mined", "count", "humans who mined"),
-    ("refined", "count", "humans who refined"),
-    ("raided", "count", "humans who raided"),
+    ("mined", "count", "humans who ever mined"),
+    ("refined", "count", "humans who ever refined"),
+    ("raided", "count", "humans who ever raided"),
     ("signups_started", "count", "signups started"),
     ("signed_up", "count", "signups finished"),
     ("tutorial_players", "count", "tutorial players"),
     ("tutorial_completed", "count", "tutorial finishers"),
+    // Rebuilt from each player's own dates (`pirate::series`), not the record.
+    ("new", "count", "new humans a day"),
+    ("activations", "count", "humans activated a day (refined + raided)"),
+    ("activated_total", "count", "humans ever activated (refined + raided)"),
+    ("refiners", "count", "humans who refined that day"),
+    ("refiners_7d", "count", "humans who refined in the 7 days to that day"),
+    ("miners_7d", "count", "humans who mined in the 7 days to that day"),
+    ("raiders", "count", "humans who initiated a raid that day"),
+    ("raiders_7d", "count", "humans who initiated a raid in the 7 days to that day"),
 ];
+
+/// The metrics `samples` rebuilds from player dates rather than reads from the record.
+const DERIVED: &[&str] = &["new", "activations", "activated_total", "refiners", "refiners_7d", "miners_7d", "raiders", "raiders_7d"];
 
 static HISTORY: LazyLock<Mutex<Vec<Day>>> =
     LazyLock::new(|| Mutex::new(crate::mcp::cache_store::load(CACHE_NAME).unwrap_or_default()));
@@ -174,8 +189,31 @@ fn value_of(d: &Day, metric: &str) -> Option<f64> {
 
 /// `(ts_ms, value)` for one metric, for the Chart card.
 pub fn samples(metric: &str) -> Vec<(f64, f64)> {
+    if DERIVED.contains(&metric) {
+        return derived(&crate::mcp::onboarding_players::snapshot(), metric, now_ms());
+    }
     let rows = HISTORY.lock().unwrap_or_else(|p| p.into_inner());
     rows.iter().filter_map(|d| value_of(d, metric).map(|v| (d.ts_ms as f64, v))).collect()
+}
+
+fn now_ms() -> i64 {
+    chrono::Utc::now().timestamp_millis()
+}
+
+/// A rebuilt series over the humans, one point at each day's noon. Nothing
+/// until the player table has been read.
+pub fn derived(s: &Snapshot, metric: &str, now: i64) -> Vec<(f64, f64)> {
+    if s.players.is_empty() {
+        return Vec::new();
+    }
+    let members: Vec<crate::mcp::pirate::Member> =
+        s.players.iter().filter(|(id, _)| !s.is_replicant(id)).map(|(id, p)| crate::mcp::pirate::Member { facts: p, stats: s.stats.get(id) }).collect();
+    let v = crate::mcp::pirate::series(&members, now);
+    let first = crate::mcp::onboarding_players::epoch_day(now) as i64 - crate::mcp::pirate::SERIES_DAYS + 1;
+    v["series"][metric]
+        .as_array()
+        .map(|a| a.iter().enumerate().filter_map(|(i, x)| x.as_f64().map(|x| (((first + i as i64) * DAY_MS + DAY_MS / 2) as f64, x))).collect())
+        .unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -225,6 +263,26 @@ mod tests {
         let d = Day::default();
         assert_eq!(value_of(&d, "signed_up"), None);
         assert_eq!(value_of(&d, "humans"), Some(0.0));
-        assert!(METRICS.iter().all(|(m, _, _)| value_of(&Day { server: Some(ServerDay::default()), ..Default::default() }, m).is_some()), "every listed metric has a value");
+        assert!(
+            METRICS.iter().filter(|(m, _, _)| !DERIVED.contains(m)).all(|(m, _, _)| value_of(&Day { server: Some(ServerDay::default()), ..Default::default() }, m).is_some()),
+            "every recorded metric has a value"
+        );
+    }
+
+    #[test]
+    fn a_derived_metric_is_rebuilt_from_dates_and_leaves_replicants_out() {
+        let mut s = Snapshot::default();
+        let v = crate::mcp::onboarding_players::LEDGER_V;
+        s.players.insert("1-1".into(), PlayerFacts { refine_days: vec![crate::mcp::onboarding_players::epoch_day(NOW)], refined_g: Some(1.0), ledger_v: v, ..Default::default() });
+        s.players.insert("1-2".into(), PlayerFacts { refine_days: vec![crate::mcp::onboarding_players::epoch_day(NOW)], refined_g: Some(1.0), ledger_v: v, ..Default::default() });
+        s.replicants.insert("1-2".into(), "1-1".into());
+        let pts = derived(&s, "refiners", NOW);
+        assert_eq!(pts.len(), crate::mcp::pirate::SERIES_DAYS as usize);
+        assert_eq!(pts.last().map(|p| p.1), Some(1.0));
+        assert!(DERIVED.iter().all(|m| METRICS.iter().any(|(k, _, _)| k == m)), "every derived metric is listed for the chart");
+        assert!(derived(&Snapshot::default(), "refiners", NOW).is_empty());
+        s.players.get_mut("1-1").unwrap().ledger_v = 1;
+        assert!(derived(&s, "refiners", NOW).is_empty(), "an undated ledger leaves the chart empty, not zero");
+        assert_eq!(derived(&s, "new", NOW).len(), crate::mcp::pirate::SERIES_DAYS as usize);
     }
 }

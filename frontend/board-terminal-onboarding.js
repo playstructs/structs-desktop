@@ -5,8 +5,15 @@
 // EVERY guild's server and the whole chain (`terminal_onboarding`,
 // mcp/onboarding.rs + mcp/onboarding_players.rs).
 //
-// Every page reads the same filters (interface, guild, active/inactive,
-// replicants) and can be split by one of them (Compare). Replicants — players
+// AARRR leads: Awareness (signup opened), Acquisition (new players),
+// Activation (refined alpha AND initiated a raid), Retention (DAU/WAU/MAU),
+// Referral (not recorded anywhere), over 24 hours, 7 days, 30 days and all
+// time, then how players fare by what they did with the tutorial
+// (mcp/pirate.rs).
+//
+// Pages read the same filters (interface, guild, active/inactive,
+// replicants) and can be split by one of them (Compare); a control a page
+// does not read is switched off on it (`USES`). Replicants — players
 // that hand another player full control of themselves — are left out unless
 // the box is ticked. The payload is a list of SEGMENTS —
 // one when nothing is compared — and each page draws one column (or one row)
@@ -24,7 +31,7 @@
   var invoke = function (cmd, args) { return Board.T.core.invoke(cmd, args || {}); };
 
   /* Pages by the question they answer, not the source that feeds them. */
-  var NAV = [['Growth', [['overview', 'Overview'], ['trends', 'Trends'], ['daily', 'Daily']]],
+  var NAV = [['Growth', [['aarrr', 'AARRR'], ['overview', 'Overview'], ['trends', 'Trends'], ['daily', 'Daily']]],
     ['Onboarding', [['signup', 'Signup'], ['tutorial', 'Tutorial'], ['runs', 'Runs'], ['timing', 'Timing']]],
     ['Players', [['players', 'Players'], ['retention', 'Retention'], ['recent', 'Recent']]],
     ['Network', [['guilds', 'Guilds'], ['health', 'Health']]],
@@ -36,15 +43,48 @@
   var IDLE = [{ value: '6', label: 'Quit 6h' }, { value: '24', label: 'Quit 24h' }, { value: '72', label: 'Quit 3d' }, { value: '168', label: 'Quit 7d' }];
   var ACTIVE = [{ value: '1', label: 'Active 1d' }, { value: '7', label: 'Active 7d' }, { value: '30', label: 'Active 30d' }];
   var ACTIVITY = [{ value: '', label: 'All players' }, { value: 'active', label: 'Active' }, { value: 'inactive', label: 'Inactive' }];
-  var COMPARE = [{ value: '', label: 'Compare: nothing' }, { value: 'interface', label: 'Compare: interface' }, { value: 'guild', label: 'Compare: guild' }, { value: 'activity', label: 'Compare: active / inactive' }, { value: 'replicant', label: 'Compare: human / replicant' }, { value: 'version', label: 'Compare: tutorial version' }];
+  var COMPARE = [{ value: '', label: 'Compare: nothing' }, { value: 'interface', label: 'Compare: interface' }, { value: 'guild', label: 'Compare: guild' }, { value: 'activity', label: 'Compare: active / inactive' }, { value: 'replicant', label: 'Compare: human / replicant' }, { value: 'version', label: 'Compare: tutorial version' }, { value: 'tutorial', label: 'Compare: tutorial outcome' }];
   var DURATIONS = [['signup', 'Signup'], ['chain_wait', 'Chain wait'], ['to_offer', 'To offer'], ['decision', 'Decision'], ['tutorial', 'Tutorial'], ['total', 'Whole run']];
   var OUTCOMES = [['completed', 'Finished'], ['declined', 'Skipped'], ['left', 'Quit'], ['playing', 'Playing']];
   var STATS = [['mined', 'Ore mined', 'ore'], ['refined', 'Alpha refined', 'alpha'], ['planets', 'Planets completed', 'count'],
     ['raids_initiated', 'Raids initiated', 'count'], ['raids_won', 'Raids won', 'count']];
   var MILESTONES = [['signed_up', 'Signed up'], ['acted', 'Acted'], ['mined', 'Mined'], ['refined', 'Refined'], ['planet', 'Completed a planet'], ['raided', 'Raided'], ['active', 'Still active']];
-  var TRENDS = [['humans', 'Humans'], ['activated', 'Ever acted'], ['active_1d', 'Active in a day'], ['active_7d', 'Active in 7 days'], ['active_30d', 'Active in 30 days'],
-    ['mined', 'Mined'], ['refined', 'Refined'], ['raided', 'Raided'], ['signups_started', 'Signups started'], ['signed_up', 'Signups finished'],
-    ['tutorial_players', 'Tutorial players'], ['tutorial_completed', 'Tutorial finishers'], ['replicants', 'Replicants']];
+  /* [metric, label, source, kind]. `record`: the app's daily record (humans,
+   * every guild). `rebuilt`: from each player's own dates, so it reaches back
+   * before the record began. A `daily` row sums over a window; a `level` row
+   * shows the change. */
+  var TRENDS = [['humans', 'Humans', 'record', 'level'], ['new', 'New players', 'rebuilt', 'daily'],
+    ['activated', 'Ever acted', 'record', 'level'], ['activated_total', 'Activated', 'rebuilt', 'level'], ['activations', 'Newly activated', 'rebuilt', 'daily'],
+    ['active_1d', 'Active in a day', 'record', 'level'], ['active_7d', 'Active in 7 days', 'record', 'level'], ['active_30d', 'Active in 30 days', 'record', 'level'],
+    ['refiners_7d', 'Refined in 7 days', 'rebuilt', 'level'], ['raiders_7d', 'Raided in 7 days', 'rebuilt', 'level'], ['miners_7d', 'Mined in 7 days', 'rebuilt', 'level'],
+    ['refined', 'Ever refined', 'record', 'level'], ['raided', 'Ever raided', 'record', 'level'], ['mined', 'Ever mined', 'record', 'level'],
+    ['signups_started', 'Signups started', 'record', 'level'], ['signed_up', 'Signups finished', 'record', 'level'],
+    ['tutorial_players', 'Tutorial players', 'record', 'level'], ['tutorial_completed', 'Tutorial finishers', 'record', 'level'], ['replicants', 'Replicants', 'record', 'level']];
+  /* Which controls change each page. A control a page ignores is switched
+   * off there, so changing it never looks like a broken page. */
+  var USES = {
+    aarrr: ['iface', 'guild', 'activity', 'reps', 'compare'],
+    overview: ['iface', 'guild', 'activity', 'reps', 'compare', 'active', 'idle', 'version'],
+    trends: ['guild'],
+    daily: ['iface', 'guild', 'activity', 'compare', 'idle', 'version'],
+    signup: ['iface', 'guild', 'compare', 'idle', 'version'],
+    tutorial: ['iface', 'guild', 'activity', 'compare', 'idle', 'version'],
+    runs: ['iface', 'guild', 'activity', 'compare', 'idle', 'version'],
+    timing: ['iface', 'guild', 'activity', 'compare', 'idle', 'version'],
+    players: ['iface', 'guild', 'activity', 'reps', 'compare', 'active', 'version'],
+    retention: ['iface', 'guild', 'activity', 'reps', 'compare', 'active', 'version'],
+    recent: ['iface', 'guild', 'activity', 'idle', 'version'],
+    guilds: ['reps', 'active', 'version'],
+    health: [], exclusions: [],
+  };
+  /* Whether `view` uses control `key` under filters `f`. The activity split
+   * reads the active window wherever the page reads activity. */
+  function uses(view, key, f) {
+    var list = USES[view] || USES.overview;
+    if (list.indexOf(key) >= 0) return true;
+    f = f || {};
+    return key === 'active' && list.indexOf('activity') >= 0 && !!(f.activity || f.compare === 'activity');
+  }
   var FLAG_TOP = 3;
   /* Below this many, a percentage claims more than the count can carry. */
   var SMALL_N = 20;
@@ -66,6 +106,11 @@
   function share(n, total) {
     if (!(total > 0)) return '—';
     return total >= SMALL_N ? pct(n / total) : int(n) + ' of ' + int(total);
+  }
+  /* Under a count already shown: the share, or "of N" while N is too small for one. */
+  function ofShare(n, total) {
+    if (!(total > 0)) return null;
+    return total >= SMALL_N ? pct(n / total) : 'of ' + int(total);
   }
   function int(n) { return n == null || !isFinite(n) ? '—' : H.fmtInt(n); }
   function dur(s) { return H.duration(s); }
@@ -515,6 +560,7 @@
     var segs = (d.segments || []).filter(function (s) { return s.signup; });
     if (!segs.length) {
       if (d.filters && (d.filters.activity || d.filters.compare === 'activity')) box.appendChild(H.stateBlock('empty', 'Activity is only known once signup finishes'));
+      else if (d.filters && d.filters.compare === 'tutorial') box.appendChild(H.stateBlock('empty', 'The tutorial comes after signup'));
       else box.appendChild(emptyOr(d, 'No signups recorded'));
       return box;
     }
@@ -877,7 +923,7 @@
     return box;
   }
 
-  // ── Trends (the app's own daily record) ──
+  // ── Trends (the app's own daily record, and series rebuilt from player dates) ──
   function trendValue(row, key, guild) {
     if (!row) return null;
     if (guild) {
@@ -887,37 +933,232 @@
     if (key in row) return row[key];
     return row.server ? row.server[key] : null;
   }
-  /* Change since the row `days` back, or nothing if the record is younger. */
-  function trendChange(rows, key, guild, days) {
-    if (rows.length <= days) return null;
-    var now = trendValue(rows[rows.length - 1], key, guild), then = trendValue(rows[rows.length - 1 - days], key, guild);
-    return now == null || then == null ? null : now - then;
+  /* One metric as [day, value] pairs, oldest first; missing days are absent. */
+  function trendPoints(d, m) {
+    var guild = (d.filters || {}).guild, out = [];
+    if (m[2] === 'rebuilt') {
+      var ts = d.trend_series || {}, days = ts.days || [], vals = (ts.series || {})[m[0]] || [];
+      days.forEach(function (day, i) { if (vals[i] != null) out.push([day, vals[i]]); });
+      return out;
+    }
+    (d.history || []).forEach(function (r) { var v = trendValue(r, m[0], guild); if (v != null) out.push([r.day, v]); });
+    return out;
+  }
+  function dayBefore(day, n) {
+    var t = Date.parse(day + 'T00:00:00Z') - n * 86400000;
+    return new Date(t).toISOString().slice(0, 10);
+  }
+  /* Over the `days` up to the newest point: the change for a level, the sum
+   * for a daily count. Null when the series does not reach back that far. */
+  function trendChange(points, days, kind) {
+    if (!points.length) return null;
+    var last = points[points.length - 1], from = dayBefore(last[0], days);
+    if (points[0][0] > from) return null;
+    if (kind === 'daily') return points.filter(function (p) { return p[0] > from; }).reduce(function (a, p) { return a + p[1]; }, 0);
+    /* The point on the window's first day, or a day or two before a long
+     * window's: an older one would stretch the window over the days missed. */
+    var floor = dayBefore(from, Math.floor(days / 7)), then = null;
+    points.forEach(function (p) { if (p[0] <= from && p[0] >= floor) then = p[1]; });
+    return then == null ? null : last[1] - then;
   }
   function signed(n) { return n == null ? '—' : (n > 0 ? '+' : '') + int(n); }
+  function openChart(metric) {
+    T.add('chart', { series: JSON.stringify([{ source: 'telemetry', metric: metric }]), window: '2592000' }, 2);
+  }
+  function chartLink(label, metric, cls) {
+    if (!metric) return cell(label, 'ob-step' + (cls ? ' ' + cls : ''));
+    var a = H.el('a', 'ob-c ob-step ob-link' + (cls ? ' ' + cls : ''), label);
+    a.href = 'javascript:void(0)';
+    a.setAttribute('data-chart', metric);
+    a.addEventListener('click', function () { openChart(metric); });
+    return a;
+  }
   function viewTrends(d) {
     var box = H.el('div', 'ob-view');
-    var rows = d.history || [], guild = (d.filters || {}).guild;
+    var rows = TRENDS.map(function (m) { return [m, trendPoints(d, m)]; }).filter(function (r) { return r[1].length; });
     if (!rows.length) { box.appendChild(emptyOr(d, 'No days recorded yet')); return box; }
     var t = H.el('div', 'ob-table ob-trends');
-    t.appendChild(headRow(['Since ' + rows[0].day, '', 'Now', '7 days', '30 days']));
-    TRENDS.forEach(function (m) {
-      var vals = rows.map(function (r) { return trendValue(r, m[0], guild); }).filter(function (v) { return v != null; });
-      if (!vals.length) return;
+    t.appendChild(headRow(['', '', 'Now', '7 days', '30 days']));
+    rows.forEach(function (r) {
+      var m = r[0], pts = r[1], daily = m[3] === 'daily';
       var row = H.el('div', 'ob-row');
       row.setAttribute('data-trend', m[0]);
-      var open = H.el('a', 'ob-c ob-step ob-link', m[1]);
-      open.href = 'javascript:void(0)';
-      open.addEventListener('click', function () { T.add('chart', { series: JSON.stringify([{ source: 'telemetry', metric: m[0] }]), window: '2592000' }, 2); });
-      row.appendChild(open);
+      var name = chartLink(m[1], m[0]);
+      name.appendChild(H.el('span', 'ob-sub', 'Since ' + pts[0][0]));
+      row.appendChild(name);
       var line = H.el('span', 'ob-c ob-spark');
-      line.appendChild(window.StructsCards.sparkline(vals, 'player', m[1]));
+      line.appendChild(window.StructsCards.sparkline(pts.map(function (p) { return p[1]; }), 'player', m[1]));
       row.appendChild(line);
-      row.appendChild(cell(int(vals[vals.length - 1]), 'ob-n'));
-      row.appendChild(cell(signed(trendChange(rows, m[0], guild, 7)), 'ob-n'));
-      row.appendChild(cell(signed(trendChange(rows, m[0], guild, 30)), 'ob-n'));
+      row.appendChild(cell(int(pts[pts.length - 1][1]), 'ob-n', pts[pts.length - 1][0]));
+      [7, 30].forEach(function (n) {
+        var c = trendChange(pts, n, m[3]);
+        row.appendChild(cell(daily ? int(c) : signed(c), 'ob-n'));
+      });
       t.appendChild(row);
     });
     box.appendChild(t);
+    return box;
+  }
+
+  // ── AARRR (pirate metrics) ──
+  var WINDOWS = [{ key: '1', label: '24 hours' }, { key: '7', label: '7 days' }, { key: '30', label: '30 days' }];
+  var ACTIVE_NAME = { 1: 'Daily active', 7: 'Weekly active', 30: 'Monthly active' };
+  function winOf(seg, days) { return (((seg && seg.pirate) || {}).windows || []).filter(function (w) { return String(w.days) === String(days); })[0] || {}; }
+  function allOf(seg) { return ((seg && seg.pirate) || {}).all || {}; }
+  /* The servers' signup figures over a window, or null where the record is too young. */
+  function srvOf(seg, days) {
+    var s = seg && seg.pirate_server;
+    if (!s) return null;
+    if (days === 'all') return s.all || null;
+    return (s.windows || []).filter(function (w) { return String(w.days) === String(days); })[0] || null;
+  }
+  /* [stage, label, value(seg, days) → [main, sub], chart metric, spark key]. `days` is '1'|'7'|'30'|'all'. */
+  var AARRR = [
+    ['Awareness', 'Opened signup', function (s, w) { var x = srvOf(s, w); return [x ? x.started : null]; }, 'signups_started', 'h:signups_started'],
+    ['Acquisition', 'Finished signup', function (s, w) { var x = srvOf(s, w); return x ? [x.signed_up, ofShare(x.signed_up, x.started)] : [null]; }, 'signed_up', 'h:signed_up'],
+    ['Acquisition', 'New players', function (s, w) { return [w === 'all' ? allOf(s).players : winOf(s, w).new]; }, 'new', 'p:new'],
+    ['Activation', 'Refined alpha', function (s, w) { return [w === 'all' ? allOf(s).refiners : winOf(s, w).refiners]; }, 'refiners_7d', 'p:refiners_7d'],
+    ['Activation', 'Initiated a raid', function (s, w) { return [w === 'all' ? allOf(s).raiders : winOf(s, w).raiders]; }, 'raiders_7d', 'p:raiders_7d'],
+    ['Activation', 'Activated', function (s, w) { var a = allOf(s); return w === 'all' ? [a.activated, ofShare(a.activated, a.players)] : [winOf(s, w).activated]; }, 'activated_total', 'p:activated_total'],
+    ['Activation', 'New players activated', function (s, w) { if (w === 'all') return [null]; var x = winOf(s, w); return [x.cohort, ofShare(x.cohort, x.new)]; }, 'activations', 'p:activations'],
+    ['Retention', 'Active', function (s, w) { return [w === 'all' ? allOf(s).acted : winOf(s, w).active, w === 'all' ? 'ever acted' : null]; }, 'active_30d', 'h:mau'],
+    ['Retention', 'Activated and active', function (s, w) { if (w === 'all') return [null]; var x = winOf(s, w); return [x.active_activated, ofShare(x.active_activated, allOf(s).activated)]; }, null, null],
+    ['Referral', 'Referred players', function () { return [null]; }, null, null, 'not tracked'],
+  ];
+  function valueText(v) { return int(v); }
+  /* A series for the trend column: the segment's rebuilt one, or the daily
+   * record's (every guild's humans), which only describes the plain population. */
+  function sparkOf(d, seg, key, plain) {
+    if (!key) return null;
+    var src = key.slice(0, 2) === 'h:' ? (plain ? d.history_series : null) : seg && seg.pirate_series;
+    var vals = src && src.series && src.series[key.slice(2)];
+    if (!vals) return null;
+    vals = vals.slice(-30);
+    /* A running server total reads as its daily increase. */
+    if (key === 'h:signups_started' || key === 'h:signed_up') {
+      vals = vals.map(function (v, i) { var p = vals[i - 1]; return v == null || p == null ? null : Math.max(0, v - p); }).slice(1);
+    }
+    var finite = vals.filter(function (v) { return v != null; });
+    return finite.length > 1 ? finite : null;
+  }
+  function isPlain(d) {
+    var f = d.filters || {};
+    return !f.guild && !f.interface && !f.activity && !f.replicants && !f.compare;
+  }
+  function stageTiles(seg, w) {
+    var hud = H.el('div', 'ob-hud ob-stages');
+    var x = winOf(seg, w), srv = srvOf(seg, w), a = allOf(seg);
+    var since = seg.pirate_server && seg.pirate_server.since;
+    var known = srv && srv.started != null;
+    var t1 = tile('Awareness', int(known ? srv.started : null), known || !since ? 'opened signup' : 'record since ' + since);
+    var t2 = tile('Acquisition', int(x.new), known ? int(srv.signed_up) + ' finished signup' : 'new players');
+    var t3 = tile('Activation', int(x.activated), share(x.cohort, x.new) + ' of new players', 'ok');
+    var t4 = tile('Retention', int(x.active), ACTIVE_NAME[w] + ' · ' + share(x.active_activated, a.activated) + ' of activated', 'ok');
+    var t5 = tile('Referral', '—', 'not tracked');
+    [t1, t2, t3, t4, t5].forEach(function (t, i) { t.setAttribute('data-stage', ['awareness', 'acquisition', 'activation', 'retention', 'referral'][i]); hud.appendChild(t); });
+    t5.classList.add('is-off');
+    return hud;
+  }
+  function aarrrTable(d, seg) {
+    var plain = isPlain(d);
+    var t = H.el('div', 'ob-table ob-aarrr');
+    t.style.setProperty('--ob-cols', 'minmax(10ch, .7fr) minmax(15ch, 1.2fr) repeat(4, minmax(7ch, .6fr)) minmax(8ch, .8fr)');
+    t.appendChild(headRow(['Stage', '', '24 hours', '7 days', '30 days', 'All time', ''], [1, 6]));
+    var last = null;
+    AARRR.forEach(function (r) {
+      var row = H.el('div', 'ob-row' + (r[0] === last ? '' : ' is-stage'));
+      row.setAttribute('data-aarrr', r[1]);
+      row.appendChild(cell(r[0] === last ? '' : r[0], 'ob-stage-name'));
+      last = r[0];
+      var name = chartLink(r[1], r[3]);
+      if (r[5]) name.appendChild(H.el('span', 'ob-sub', r[5]));
+      row.appendChild(name);
+      ['1', '7', '30', 'all'].forEach(function (w) {
+        var v = r[2](seg, w), c = cell(valueText(v[0]), 'ob-n');
+        if (v[1] && v[0] != null) c.appendChild(H.el('span', 'ob-sub ob-of', v[1]));
+        row.appendChild(c);
+      });
+      var vals = sparkOf(d, seg, r[4], plain), sp = H.el('span', 'ob-c ob-spark');
+      if (vals) sp.appendChild(window.StructsCards.sparkline(vals, 'player', r[1]));
+      row.appendChild(sp);
+      t.appendChild(row);
+    });
+    return t;
+  }
+  function aarrrCompare(segs, w) {
+    var t = table('ob-compare ob-aarrr-compare', 'minmax(11ch, .8fr) minmax(18ch, 1.4fr)', segs.length);
+    t.appendChild(headRow(['Stage', ''].concat(segs.map(function (s) { return s.label; })), [1]));
+    var last = null;
+    AARRR.forEach(function (r) {
+      var row = H.el('div', 'ob-row' + (r[0] === last ? '' : ' is-stage'));
+      row.setAttribute('data-aarrr', r[1]);
+      row.appendChild(cell(r[0] === last ? '' : r[0], 'ob-stage-name'));
+      last = r[0];
+      row.appendChild(chartLink(r[1], null));
+      segs.forEach(function (s) {
+        var v = r[2](s, w), c = cell(valueText(v[0]), 'ob-n');
+        if (v[1] && v[0] != null) c.appendChild(H.el('span', 'ob-sub ob-of', v[1]));
+        row.appendChild(c);
+      });
+      t.appendChild(row);
+    });
+    return t;
+  }
+  /* Players since telemetry began, by what they did with Combat Training. */
+  var IMPACT = [['acted', 'Acted'], ['refined', 'Refined'], ['raided', 'Raided'], ['activated', 'Activated'], ['active_7d', 'Active 7d'], ['active_30d', 'Active 30d']];
+  function impactBlock(d) {
+    var rows = (d.tutorial_impact || []).filter(function (r) { return r.players > 0 || r.key === 'all'; });
+    if (!rows.length) return null;
+    var b = block('By tutorial outcome');
+    var t = table('ob-impact', 'minmax(12ch, 1fr)', IMPACT.length + 2);
+    t.appendChild(headRow(['', 'Players'].concat(IMPACT.map(function (m) { return m[1]; })).concat(['Days to activate'])));
+    var best = rows.filter(function (r) { return r.key !== 'all' && r.players >= 3; })
+      .reduce(function (m, r) { return !m || r.activated / r.players > m.activated / m.players ? r : m; }, null);
+    rows.forEach(function (r) {
+      var row = H.el('div', 'ob-row' + (r.key === 'all' ? ' is-total' : ''));
+      row.setAttribute('data-group', r.key);
+      row.appendChild(cell(r.label, 'ob-step'));
+      row.appendChild(cell(int(r.players), 'ob-n ob-v'));
+      IMPACT.forEach(function (m) {
+        var c = cell(int(r[m[0]]), 'ob-n' + (m[0] === 'activated' && best && r.key === best.key ? ' is-best' : ''));
+        c.appendChild(H.el('span', 'ob-sub ob-of', ofShare(r[m[0]], r.players)));
+        row.appendChild(c);
+      });
+      row.appendChild(cell(r.activate_days_p50 == null ? '—' : dur(r.activate_days_p50 * 86400), 'ob-n', r.activate_days_p50 == null ? null : 'Median, signup to activation'));
+      t.appendChild(row);
+    });
+    b.appendChild(t);
+    return b;
+  }
+  function viewAarrr(d, ctx, set, st) {
+    var box = H.el('div', 'ob-view');
+    var segs = d.segments || [];
+    if (!segs.length || !segs[0].pirate) { box.appendChild(emptyOr(d, 'No players read yet')); return box; }
+    st = st || {};
+    var w = st.win || '30';
+    var strip = H.navStrip(WINDOWS, w, function (k) { st.win = k; box.parentNode.replaceChild(viewAarrr(d, ctx, set, st), box); });
+    strip.classList.add('ob-windows');
+    box.appendChild(strip);
+    if (segs.length === 1) {
+      var s = segs[0], p = s.pirate;
+      box.appendChild(stageTiles(s, w));
+      var b = block();
+      b.appendChild(aarrrTable(d, s));
+      box.appendChild(b);
+      var extra = H.el('div', 'ob-hud');
+      var sk = p.stickiness || {};
+      extra.appendChild(tile('DAU / MAU', pct(ratio(sk.dau, sk.mau)), int(sk.dau) + ' of ' + int(sk.mau)));
+      extra.appendChild(tile('Time to activate', dur(p.time_to_activate && p.time_to_activate.p50), p.time_to_activate ? 'median of ' + int(p.time_to_activate.n) : 'none timed yet'));
+      extra.appendChild(tile('Activated ever', int(allOf(s).activated), share(allOf(s).activated, allOf(s).players) + ' of players'));
+      if (p.untimed) extra.appendChild(tile('Not yet dated', int(p.untimed), 'activated, ledger being re-read'));
+      box.appendChild(extra);
+    } else {
+      var cb = block();
+      cb.appendChild(aarrrCompare(segs, w));
+      box.appendChild(cb);
+    }
+    var ib = impactBlock(d);
+    if (ib) box.appendChild(ib);
     return box;
   }
 
@@ -1173,7 +1414,7 @@
   }
   function emptyOr(d, text) { return reading(d) ? H.stateBlock('loading', progress(d)) : H.stateBlock('empty', text); }
   // Pages folded from the crawls; Signup, Runs and Guilds come from the servers' own reads.
-  var CRAWLED = { overview: 1, tutorial: 1, players: 1, retention: 1, timing: 1, daily: 1, recent: 1 };
+  var CRAWLED = { aarrr: 1, overview: 1, tutorial: 1, players: 1, retention: 1, timing: 1, daily: 1, recent: 1 };
 
   function footLine(d) {
     var c = d.crawl || {}, p = c.players || {};
@@ -1192,24 +1433,35 @@
   }
 
   // ── Controls ──
-  function controls(d, p, set) {
+  function controls(d, p, set, view) {
     var o = d.options || {};
     var f = d.filters || {};
     var bar1 = H.el('div', 'ob-controls');
+    /* Off on a page that ignores it: still showing its value, never changeable there. */
+    function put(key, node, input) {
+      node.setAttribute('data-control', key);
+      if (!uses(view, key, f)) {
+        node.classList.add('is-off');
+        (input || node).disabled = true;
+        node.title = key === 'reps' ? 'Humans only on this page' : 'Not used on this page';
+      }
+      bar1.appendChild(node);
+    }
     var ifaces = [{ value: '', label: 'Every interface' }].concat((o.interfaces || []).map(function (i) { return { value: i, label: i === 'none' ? 'No telemetry' : i }; }));
     var guilds = [{ value: '', label: 'Every guild' }].concat((o.guilds || []).map(function (g) { return { value: g.id, label: g.label + ' · ' + g.id }; }));
-    bar1.appendChild(H.selectBox(f.interface || '', ifaces, function (v) { set({ iface: v }); }));
-    bar1.appendChild(H.selectBox(f.guild || '', guilds, function (v) { set({ guild: v }); }));
-    bar1.appendChild(H.selectBox(f.activity || '', ACTIVITY, function (v) { set({ activity: v }); }));
+    put('iface', H.selectBox(f.interface || '', ifaces, function (v) { set({ iface: v }); }));
+    put('guild', H.selectBox(f.guild || '', guilds, function (v) { set({ guild: v }); }));
+    put('activity', H.selectBox(f.activity || '', ACTIVITY, function (v) { set({ activity: v }); }));
     var both = f.compare === 'replicant';
     var reps = H.checkbox(both || !!f.replicants, 'Replicants', function (on) { set({ reps: on ? '1' : '' }); });
-    reps.querySelector('input').disabled = both;
-    bar1.appendChild(reps);
-    bar1.appendChild(H.selectBox(f.compare || '', COMPARE, function (v) { set({ compare: v }); }));
-    bar1.appendChild(H.selectBox(String(d.active_days || 7), ACTIVE, function (v) { set({ active: v }); }));
-    bar1.appendChild(H.selectBox(String(d.idle_hours || 24), IDLE, function (v) { set({ idle: v }); }));
+    var box = reps.querySelector('input');
+    put('reps', reps, box);
+    if (both) box.disabled = true;
+    put('compare', H.selectBox(f.compare || '', COMPARE, function (v) { set({ compare: v }); }));
+    put('active', H.selectBox(String(d.active_days || 7), ACTIVE, function (v) { set({ active: v }); }));
+    put('idle', H.selectBox(String(d.idle_hours || 24), IDLE, function (v) { set({ idle: v }); }));
     var versions = (d.versions || []).map(function (v) { return { value: v, label: v }; });
-    if (versions.length > 1) bar1.appendChild(H.selectBox(d.version, versions, function (v) { set({ version: v }); }));
+    if (versions.length > 1) put('version', H.selectBox(d.version, versions, function (v) { set({ version: v }); }));
     return bar1;
   }
   function rail(view, onPick) {
@@ -1249,7 +1501,7 @@
   }
 
   // ── The card ──
-  var DRAW = { overview: viewOverview, signup: viewSignup, tutorial: viewTutorial, runs: viewRuns, players: viewPlayers, retention: viewRetention,
+  var DRAW = { aarrr: viewAarrr, overview: viewOverview, signup: viewSignup, tutorial: viewTutorial, runs: viewRuns, players: viewPlayers, retention: viewRetention,
     timing: viewTiming, daily: viewDaily, trends: viewTrends, guilds: viewGuilds, recent: viewRecent, health: viewHealth, exclusions: viewExclusions };
   T.register('onboarding', {
     label: 'Telemetry', describe: function (p) { return 'Telemetry' + (p && p.version ? ' · ' + p.version : ''); },
@@ -1257,7 +1509,10 @@
     params: [],
     render: function (host, p, ctx) {
       p = p || {};
-      var st = OB.cards[ctx.id] || (OB.cards[ctx.id] = { view: 'overview', last: null });
+      var st = OB.cards[ctx.id] || (OB.cards[ctx.id] = { view: 'aarrr', last: null, seq: 0 });
+      /* Only the newest read may draw: a slow read started before a filter
+       * changed would otherwise land last and put the old figures back. */
+      var seq = st.seq = (st.seq || 0) + 1;
       var args = argsOf(p);
       if (st.fresh) { args.fresh = true; st.fresh = false; }
       function set(patch) { T.setParams(ctx.id, Object.assign({}, p, patch)); }
@@ -1266,13 +1521,13 @@
         host.innerHTML = '';
         var wrap = H.el('div', 'ob');
         function pick(k) { st.view = k; draw(st.last); }
-        var top = controls(d, p, set);
+        var top = controls(d, p, set, st.view);
         top.appendChild(statusLink(d, pick));
         wrap.appendChild(top);
         var shell = H.el('div', 'ob-shell'), main = H.el('div', 'ob-main');
         shell.appendChild(rail(st.view, pick));
         if (CRAWLED[st.view] && reading(d) && !hasData(d)) main.appendChild(H.stateBlock('loading', progress(d)));
-        else main.appendChild((DRAW[st.view] || viewOverview)(d, ctx, set));
+        else main.appendChild((DRAW[st.view] || viewOverview)(d, ctx, set, st));
         shell.appendChild(main);
         wrap.appendChild(shell);
         host.appendChild(wrap);
@@ -1282,19 +1537,20 @@
       }
       if (st.last && !host.firstChild) draw(st.last);
       else if (!st.last) host.appendChild(H.stateBlock('loading', 'Reading every guild'));
-      return invoke('terminal_onboarding', args).then(draw).catch(function (e) {
+      return invoke('terminal_onboarding', args).then(function (d) { if (seq === st.seq) draw(d); }).catch(function (e) {
+        if (seq !== st.seq) return;
         host.innerHTML = '';
         host.appendChild(H.stateBlock('error', 'Telemetry unavailable: ' + e));
       });
     },
     doors: function (c) {
       return [{ icon: 'icon-refresh', title: 'Read again now', onClick: function () {
-        var st = OB.cards[c.id] || (OB.cards[c.id] = { view: 'overview', last: null });
+        var st = OB.cards[c.id] || (OB.cards[c.id] = { view: 'aarrr', last: null, seq: 0 });
         st.fresh = true;
         T.setParams(c.id, Object.assign({}, c.params || {}));
       } }];
     },
   });
 
-  T.onboarding = { phaseOf: phaseOf, phaseRows: phaseRows, heatBand: heatBand, issuesOf: issuesOf, runKind: runKind, stepLabel: stepLabel, pct: pct, share: share, topKeys: topKeys, headline: headline, tutorialOf: tutorialOf, trendChange: trendChange, bucketLabel: bucketLabel, fmtKind: fmtKind, argsOf: argsOf };
+  T.onboarding = { phaseOf: phaseOf, phaseRows: phaseRows, heatBand: heatBand, issuesOf: issuesOf, runKind: runKind, stepLabel: stepLabel, pct: pct, share: share, topKeys: topKeys, headline: headline, tutorialOf: tutorialOf, trendChange: trendChange, trendPoints: trendPoints, ofShare: ofShare, uses: uses, sparkOf: sparkOf, bucketLabel: bucketLabel, fmtKind: fmtKind, argsOf: argsOf };
 })();

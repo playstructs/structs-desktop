@@ -105,6 +105,42 @@ pub struct PlayerFacts {
     pub ledger_ms: i64,
     #[serde(default)]
     pub ledger_truncated: bool,
+    /// When the first ore credit / ualpha credit landed (the ledger's `time`).
+    #[serde(default)]
+    pub first_mined_ms: Option<i64>,
+    #[serde(default)]
+    pub first_refined_ms: Option<i64>,
+    #[serde(default)]
+    pub last_mined_ms: Option<i64>,
+    #[serde(default)]
+    pub last_refined_ms: Option<i64>,
+    /// Days (`epoch_day`) with an ore credit / a ualpha credit, ascending.
+    #[serde(default)]
+    pub mine_days: Vec<i32>,
+    #[serde(default)]
+    pub refine_days: Vec<i32>,
+    /// Which fold of the ledger the figures came from: an older one is read again.
+    #[serde(default)]
+    pub ledger_v: u8,
+}
+
+/// The ledger fold that also keeps WHEN: below this, a player's ledger is read again.
+pub const LEDGER_V: u8 = 2;
+const DAY_MS: i64 = 86_400_000;
+
+/// Whole days since the epoch, UTC: the unit every daily series counts in.
+pub fn epoch_day(ms: i64) -> i32 {
+    ms.div_euclid(DAY_MS) as i32
+}
+
+/// One `raid_status` event: planet, fleet, status, and when.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+pub struct RaidEvent {
+    pub planet: String,
+    pub fleet: String,
+    pub status: String,
+    #[serde(default)]
+    pub ms: Option<i64>,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -118,8 +154,12 @@ pub struct Universe {
     pub players: HashMap<String, PlayerFacts>,
     planets: HashMap<String, Planet>,
     fleets: HashMap<String, String>,
-    /// (planet_id, fleet_id, status) for every raid_status event.
+    /// Before raid times were kept: read from an old cache, never written.
+    #[serde(default, skip_serializing)]
     raids: Vec<(String, String, String)>,
+    /// Every raid_status event, with its time.
+    #[serde(default)]
+    raid_log: Vec<RaidEvent>,
     /// unix seconds each table was last read from (for `updated_since`).
     #[serde(default)]
     since: HashMap<String, i64>,
@@ -146,6 +186,10 @@ pub struct PlayerStats {
     pub planets: f64,
     pub raids_initiated: f64,
     pub raids_won: f64,
+    /// The first raid this player's fleet initiated, and the days it initiated any.
+    pub first_raid_ms: Option<i64>,
+    pub last_raid_ms: Option<i64>,
+    pub raid_days: Vec<i32>,
 }
 
 pub static UNIVERSE: LazyLock<Mutex<Universe>> =
@@ -289,16 +333,25 @@ impl Universe {
     }
 
     pub fn set_raids(&mut self, rows: &[Value]) {
-        self.raids = rows
+        self.raid_log = rows
             .iter()
             .map(|r| {
                 // `detail_json` is the server's decode; `detail` the raw string.
                 let d = r.get("detail_json").cloned().filter(|v| v.is_object()).unwrap_or_else(|| {
                     serde_json::from_str(&text(r.get("detail"))).unwrap_or(Value::Null)
                 });
-                (text(r.get("planet_id")), text(d.get("fleet_id")), text(d.get("status")))
+                RaidEvent { planet: text(r.get("planet_id")), fleet: text(d.get("fleet_id")), status: text(d.get("status")), ms: parse_ts(&text(r.get("time"))) }
             })
             .collect();
+        self.raids.clear();
+    }
+
+    /// The raid log, or an old cache's untimed one until the next read replaces it.
+    fn raid_events(&self) -> Vec<RaidEvent> {
+        if !self.raid_log.is_empty() || self.raids.is_empty() {
+            return self.raid_log.clone();
+        }
+        self.raids.iter().map(|(p, f, s)| RaidEvent { planet: p.clone(), fleet: f.clone(), status: s.clone(), ms: None }).collect()
     }
 
     pub fn is_replicant(&self, id: &str) -> bool {
@@ -344,13 +397,18 @@ impl Universe {
                 }
             }
         }
-        for (planet, fleet, status) in &self.raids {
+        for RaidEvent { planet, fleet, status, ms } in &self.raid_events() {
             let fleet_owner = self.fleets.get(fleet);
             let planet_owner = self.planets.get(planet).map(|p| &p.owner);
             match status.as_str() {
                 "initiated" => {
                     if let Some(s) = fleet_owner.and_then(|o| out.get_mut(o)) {
                         s.raids_initiated += 1.0;
+                        if let Some(t) = *ms {
+                            s.first_raid_ms = Some(s.first_raid_ms.map_or(t, |f| f.min(t)));
+                            s.last_raid_ms = Some(s.last_raid_ms.map_or(t, |f| f.max(t)));
+                            s.raid_days.push(epoch_day(t));
+                        }
                     }
                 }
                 "raidSuccessful" => {
@@ -366,25 +424,63 @@ impl Universe {
                 _ => {}
             }
         }
+        for s in out.values_mut() {
+            s.raid_days.sort_unstable();
+            s.raid_days.dedup();
+        }
         out
     }
+}
+
+/// What one read of a player's ledger says: totals, and when.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct LedgerFacts {
+    pub mined_g: f64,
+    pub refined_g: f64,
+    pub first_mined_ms: Option<i64>,
+    pub first_refined_ms: Option<i64>,
+    pub last_mined_ms: Option<i64>,
+    pub last_refined_ms: Option<i64>,
+    pub mine_days: Vec<i32>,
+    pub refine_days: Vec<i32>,
+}
+
+/// Totals as `ledger_totals`, plus the first credit of each and the days
+/// with any. A row with no readable `time` still counts toward the total.
+pub fn ledger_facts(rows: &[Value]) -> LedgerFacts {
+    let mut f = LedgerFacts::default();
+    for r in rows {
+        if text(r.get("direction")) != "credit" {
+            continue;
+        }
+        let amount = num(r.get("amount_p")).unwrap_or(0.0);
+        let at = parse_ts(&text(r.get("time")));
+        let (total, first, last, days) = match (text(r.get("action")).as_str(), text(r.get("denom")).as_str()) {
+            ("mined", "ore") => (&mut f.mined_g, &mut f.first_mined_ms, &mut f.last_mined_ms, &mut f.mine_days),
+            ("refined", "ualpha") => (&mut f.refined_g, &mut f.first_refined_ms, &mut f.last_refined_ms, &mut f.refine_days),
+            _ => continue,
+        };
+        *total += amount;
+        if let Some(t) = at {
+            *first = Some(first.map_or(t, |x| x.min(t)));
+            *last = Some(last.map_or(t, |x| x.max(t)));
+            days.push(epoch_day(t));
+        }
+    }
+    f.refined_g /= 1_000_000.0;
+    for d in [&mut f.mine_days, &mut f.refine_days] {
+        d.sort_unstable();
+        d.dedup();
+    }
+    f
 }
 
 /// Ore mined (grams) and alpha refined (grams) from a player's ledger rows.
 /// `mined` is an ore credit; `refined` writes an ore debit AND a ualpha
 /// credit, and only the credit is counted.
 pub fn ledger_totals(rows: &[Value]) -> (f64, f64) {
-    let (mut mined, mut refined_u) = (0.0, 0.0);
-    for r in rows {
-        let credit = text(r.get("direction")) == "credit";
-        let amount = num(r.get("amount_p")).unwrap_or(0.0);
-        match (text(r.get("action")).as_str(), text(r.get("denom")).as_str()) {
-            ("mined", "ore") if credit => mined += amount,
-            ("refined", "ualpha") if credit => refined_u += amount,
-            _ => {}
-        }
-    }
-    (mined, refined_u / 1_000_000.0)
+    let f = ledger_facts(rows);
+    (f.mined_g, f.refined_g)
 }
 
 /// A replicant that never granted: an account nobody has touched, carrying a
@@ -488,7 +584,7 @@ pub fn ledger_plan(players: &HashMap<String, PlayerFacts>, is_replicant: impl Fn
             continue;
         }
         let r = if is_replicant(id) { 2 } else { 0 };
-        if p.ledger_ms == 0 {
+        if p.ledger_ms == 0 || p.ledger_v < LEDGER_V {
             tiers[r].push(id);
         } else if p.last_active_ms.map(|a| a > p.ledger_ms).unwrap_or(false) && now - p.ledger_ms > LEDGER_REFRESH_MS {
             tiers[r + 1].push(id);
@@ -559,7 +655,7 @@ async fn refresh_names(c: &GuildApiClient, guilds: &[String]) {
     }
 }
 
-async fn read_ledger(c: &GuildApiClient, pid: &str) -> Result<(f64, f64, bool), String> {
+async fn read_ledger(c: &GuildApiClient, pid: &str) -> Result<(LedgerFacts, bool), String> {
     let mut rows = Vec::new();
     let mut truncated = true;
     for page in 1..=LEDGER_MAX_PAGES {
@@ -574,8 +670,7 @@ async fn read_ledger(c: &GuildApiClient, pid: &str) -> Result<(f64, f64, bool), 
             break;
         }
     }
-    let (m, r) = ledger_totals(&rows);
-    Ok((m, r, truncated))
+    Ok((ledger_facts(&rows), truncated))
 }
 
 /// One round: the tables and names, then up to `LEDGER_BUDGET` ledgers,
@@ -607,10 +702,17 @@ pub async fn crawl(replicants_error: Option<String>, guilds: Vec<String>, teleme
     let mut errors = 0;
     while let Some((pid, r)) = results.next().await {
         match r {
-            Ok((m, rf, truncated)) => {
+            Ok((f, truncated)) => {
                 if let Some(p) = UNIVERSE.lock().unwrap_or_else(|p| p.into_inner()).players.get_mut(&pid) {
-                    p.mined_g = Some(m);
-                    p.refined_g = Some(rf);
+                    p.mined_g = Some(f.mined_g);
+                    p.refined_g = Some(f.refined_g);
+                    p.first_mined_ms = f.first_mined_ms;
+                    p.first_refined_ms = f.first_refined_ms;
+                    p.last_mined_ms = f.last_mined_ms;
+                    p.last_refined_ms = f.last_refined_ms;
+                    p.mine_days = f.mine_days;
+                    p.refine_days = f.refine_days;
+                    p.ledger_v = LEDGER_V;
                     p.ledger_ms = now_ms();
                     p.ledger_truncated = truncated;
                 }
@@ -657,6 +759,50 @@ mod tests {
     }
 
     #[test]
+    fn a_ledger_read_keeps_the_first_credit_and_the_days_with_any() {
+        let rows = vec![
+            json!({"action": "refined", "denom": "ualpha", "direction": "credit", "amount_p": "2000000", "time": "2026-11-18 10:00:00+00"}),
+            json!({"action": "refined", "denom": "ualpha", "direction": "credit", "amount_p": 1_000_000, "time": "2026-11-18 09:00:00+00"}),
+            json!({"action": "refined", "denom": "ore", "direction": "debit", "amount_p": 3, "time": "2026-11-01 09:00:00+00"}),
+            json!({"action": "refined", "denom": "ualpha", "direction": "credit", "amount_p": 1_000_000, "time": "2026-11-02 09:00:00+00"}),
+            json!({"action": "mined", "denom": "ore", "direction": "credit", "amount_p": 5}),
+        ];
+        let f = ledger_facts(&rows);
+        assert_eq!((f.mined_g, f.refined_g), (5.0, 4.0), "an untimed row still counts toward the total");
+        assert_eq!(f.first_refined_ms, parse_ts("2026-11-02 09:00:00+00"));
+        assert_eq!(f.refine_days, vec![epoch_day(parse_ts("2026-11-02 09:00:00+00").unwrap()), epoch_day(parse_ts("2026-11-18 09:00:00+00").unwrap())]);
+        assert_eq!((f.first_mined_ms, f.mine_days.len()), (None, 0));
+    }
+
+    #[test]
+    fn an_old_ledger_read_is_read_again_with_the_humans_first() {
+        let now = 100 * 3_600_000;
+        let mut p: HashMap<String, PlayerFacts> = HashMap::new();
+        p.insert("1-5".into(), PlayerFacts { ledger_ms: now - 1_000, ledger_v: 1, ..Default::default() });
+        p.insert("1-6".into(), PlayerFacts { ledger_ms: now - 1_000, ledger_v: LEDGER_V, ..Default::default() });
+        assert_eq!(ledger_plan(&p, |_| false, now), vec!["1-5"]);
+    }
+
+    #[test]
+    fn a_raid_keeps_its_time_and_an_old_cache_still_counts() {
+        let mut u = Universe::default();
+        u.fold_players(&[json!({"id": "1-1"})]);
+        u.fold_fleets(&[json!({"id": "9-1", "owner": "1-1"})]);
+        u.raids = vec![("2-2".into(), "9-1".into(), "initiated".into())];
+        assert_eq!((u.stats()["1-1"].raids_initiated, u.stats()["1-1"].first_raid_ms), (1.0, None), "the untimed cache until the next read");
+        u.set_raids(&[
+            json!({"planet_id": "2-2", "time": "2026-11-19 12:00:00+00", "detail_json": {"fleet_id": "9-1", "status": "initiated"}}),
+            json!({"planet_id": "2-3", "time": "2026-11-10 12:00:00+00", "detail_json": {"fleet_id": "9-1", "status": "initiated"}}),
+            json!({"planet_id": "2-3", "time": "2026-11-10 13:00:00+00", "detail_json": {"fleet_id": "9-1", "status": "initiated"}}),
+        ]);
+        let s = &u.stats()["1-1"];
+        assert_eq!(s.raids_initiated, 3.0);
+        assert_eq!(s.first_raid_ms, parse_ts("2026-11-10 12:00:00+00"));
+        assert_eq!(s.raid_days.len(), 2, "one entry a day");
+        assert!(serde_json::to_value(&u).unwrap().get("raids").is_none(), "the untimed log is never written back");
+    }
+
+    #[test]
     fn raids_and_planets_follow_the_servers_definitions() {
         let mut u = Universe::default();
         u.fold_players(&[json!({"id": "1-1", "guild_id": "0-1", "created_at": "2026-10-20 10:00:00+00"}), json!({"id": "1-2", "guild_id": "0-5"})]);
@@ -692,9 +838,9 @@ mod tests {
         let mut p: HashMap<String, PlayerFacts> = HashMap::new();
         p.insert("1-5".into(), PlayerFacts::default());
         p.insert("1-50".into(), PlayerFacts::default());
-        p.insert("1-7".into(), PlayerFacts { ledger_ms: 10 * 3_600_000, last_active_ms: Some(20 * 3_600_000), ..Default::default() });
-        p.insert("1-8".into(), PlayerFacts { ledger_ms: 10 * 3_600_000, last_active_ms: Some(5 * 3_600_000), ..Default::default() });
-        p.insert("1-9".into(), PlayerFacts { ledger_ms: now - 3_600_000, last_active_ms: Some(now), ..Default::default() });
+        p.insert("1-7".into(), PlayerFacts { ledger_v: LEDGER_V, ledger_ms: 10 * 3_600_000, last_active_ms: Some(20 * 3_600_000), ..Default::default() });
+        p.insert("1-8".into(), PlayerFacts { ledger_v: LEDGER_V, ledger_ms: 10 * 3_600_000, last_active_ms: Some(5 * 3_600_000), ..Default::default() });
+        p.insert("1-9".into(), PlayerFacts { ledger_v: LEDGER_V, ledger_ms: now - 3_600_000, last_active_ms: Some(now), ..Default::default() });
         assert_eq!(ledger_plan(&p, |_| false, now), vec!["1-50", "1-5", "1-7"]);
         assert_eq!(ledger_plan(&p, |id| id == "1-50", now), vec!["1-5", "1-7", "1-50"], "every human before any replicant");
     }
@@ -756,6 +902,27 @@ mod tests {
     }
 
     /// `cargo test --bin structs-app live_replicants -- --ignored --nocapture`
+    /// Live raid_status rows (saved from the guild API, path in LIVE_RAIDS) through
+    /// the real fold, against the real fleet table in the app's cache.
+    #[test]
+    #[ignore]
+    fn live_raid_rows_date_the_first_raid() {
+        let rows: Vec<Value> = serde_json::from_str(&std::fs::read_to_string(std::env::var("LIVE_RAIDS").expect("LIVE_RAIDS")).unwrap()).unwrap();
+        let mut u: Universe = crate::mcp::cache_store::load(CACHE_NAME).expect("universe cache");
+        u.set_raids(&rows);
+        let st = u.stats();
+        for r in &rows {
+            let fleet = r["detail_json"]["fleet_id"].as_str().unwrap();
+            let owner = u.fleets.get(fleet).cloned().unwrap_or_default();
+            let s = &st[&owner];
+            eprintln!("{fleet} → {owner}: status {} at {} → initiated {} first {:?} last {:?} days {:?}", r["detail_json"]["status"], r["time"], s.raids_initiated, s.first_raid_ms, s.last_raid_ms, s.raid_days);
+        }
+        let initiated = rows.iter().find(|r| r["detail_json"]["status"] == "initiated").unwrap();
+        let owner = &u.fleets[initiated["detail_json"]["fleet_id"].as_str().unwrap()];
+        assert_eq!(st[owner].first_raid_ms, crate::mcp::onboarding::parse_ts(initiated["time"].as_str().unwrap()));
+        assert!(st[owner].first_raid_ms.is_some(), "the live time format parses");
+    }
+
     #[tokio::test]
     #[ignore]
     async fn live_replicants_come_from_the_whole_permission_store() {

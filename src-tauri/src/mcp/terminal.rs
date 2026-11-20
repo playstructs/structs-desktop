@@ -563,6 +563,8 @@ pub fn card_window_size(kind: &str) -> (f64, f64) {
         "replication" => (460.0, 450.0),
         // One number, one bar, one button — and the short flows behind it.
         "energy" => (460.0, 560.0),
+        // A rail of pages beside wide tables: every page is a table of windows or segments.
+        "onboarding" => (1180.0, 860.0),
         _ => (640.0, 620.0),
     }
 }
@@ -628,7 +630,9 @@ pub fn open_terminal_card_new(
 ///
 /// "About this id" is `params.id` — the one parameter every object card and
 /// every Comms card keys on. A card with NO id (a room list, the feed) is a
-/// singleton by kind alone. Pure, so it is testable without a window.
+/// singleton by kind alone when opened bare; opened WITH params (a chart of
+/// one series) it is only the card with those same params, or every chart
+/// door re-focused the first chart. Pure, so it is testable without a window.
 fn same_card(workspace: Option<&str>, kind: &str, params: &Value) -> Option<(String, String)> {
     let st = lock(&STORE);
     let name = match workspace {
@@ -637,10 +641,11 @@ fn same_card(workspace: Option<&str>, kind: &str, params: &Value) -> Option<(Str
     };
     let layout = st.workspaces.get(&name)?;
     let want = params.get("id").and_then(|v| v.as_str());
+    let bare = params.as_object().map_or(true, |o| o.is_empty());
     layout
         .cards
         .iter()
-        .find(|c| c.kind == kind && c.params.get("id").and_then(|v| v.as_str()) == want)
+        .find(|c| c.kind == kind && c.params.get("id").and_then(|v| v.as_str()) == want && (want.is_some() || bare || c.params == *params))
         .map(|c| (name.clone(), c.id.clone()))
 }
 
@@ -2277,6 +2282,7 @@ mod same_card_tests {
     fn a_fixed_card_gets_a_window_that_fits_and_lists_keep_the_default() {
         assert_eq!(card_window_size("replication"), (460.0, 450.0));
         assert_eq!(card_window_size("energy"), (460.0, 560.0));
+        assert_eq!(card_window_size("onboarding"), (1180.0, 860.0));
         assert_eq!(card_window_size("armada"), (640.0, 620.0));
         assert_eq!(card_window_size(""), (640.0, 620.0));
     }
@@ -2314,8 +2320,12 @@ mod same_card_tests {
     /// kind alone.
     #[test]
     fn a_card_without_an_id_is_a_singleton_by_kind() {
-        seed(vec![("comms-1", "comms", json!({}))]);
+        seed(vec![("comms-1", "comms", json!({})), ("chart-1", "chart", json!({ "series": "[\"a\"]" }))]);
         assert_eq!(same_card(None, "comms", &json!({})), Some(("main".into(), "comms-1".into())));
+        // A chart of another series is another chart; the same series is that chart.
+        assert_eq!(same_card(None, "chart", &json!({ "series": "[\"b\"]" })), None);
+        assert_eq!(same_card(None, "chart", &json!({ "series": "[\"a\"]" })), Some(("main".into(), "chart-1".into())));
+        assert_eq!(same_card(None, "chart", &json!({})), Some(("main".into(), "chart-1".into())), "a bare open finds the kind");
     }
 }
 #[cfg(test)]

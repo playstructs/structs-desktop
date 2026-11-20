@@ -199,3 +199,18 @@
   .ob-who-row { grid-template-columns: minmax(0, 1fr) repeat(2, auto); }
   .ob-who-row > :nth-child(2) { display: none; }
 }
+
+/* AARRR: the five stages over three windows, then the tutorial's effect. */
+.ob-aarrr .ob-row, .ob-impact .ob-row { grid-template-columns: var(--ob-cols); }
+.ob-aarrr .ob-row:has(+ .is-stage), .ob-aarrr-compare .ob-row:has(+ .is-stage) { border-bottom-color: var(--border-strong); }
+.ob-stage-name { color: var(--text-hint); }
+.ob-stages { grid-template-columns: repeat(5, minmax(0, 1fr)); }
+.ob-hud .ob-tile.is-off .fstat-v { color: var(--text-hint); }
+.ob-row.is-total .ob-c { color: var(--text-hint); }
+.ob-c.is-best { color: var(--text-player-primary); }
+.ob-windows { align-self: flex-start; }
+/* A control the page does not read: visible, so its value is known, but inert. */
+.ob-controls .is-off { opacity: .4; pointer-events: none; }
+.ob-of { display: block; }
+/* Narrower than its columns, a table scrolls rather than hiding the last ones. */
+.ob-aarrr, .ob-impact, .ob-aarrr-compare { overflow-x: auto; }
