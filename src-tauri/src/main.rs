@@ -196,6 +196,9 @@ fn main() {
             mcp::terminal::terminal_providers,
             mcp::terminal::terminal_provider_preview,
             mcp::terminal::terminal_provider_action,
+            mcp::terminal::terminal_substations,
+            mcp::terminal::terminal_substation_preview,
+            mcp::terminal::terminal_substation_action,
             mcp::terminal::terminal_series,
             mcp::influence::terminal_influence,
             mcp::influence::terminal_influence_hunt,
@@ -618,92 +621,7 @@ try {{
     }}
 }})();
 
-// Proxy HTTP fetch through Tauri to bypass CORS and ATS
-(function() {{
-    const originalFetch = window.fetch;
-    window.fetch = async function(input, init) {{
-        const url = (typeof input === 'string') ? input
-            : (input instanceof URL) ? input.href
-            : input.url;
-
-        // Skip Tauri's own IPC transport. On Windows WebView2, Tauri 2 implements
-        // tauri.core.invoke() on top of `fetch('http://ipc.localhost/...')`. If we
-        // route that through our proxy, calling invoke('proxy_fetch') triggers a
-        // fetch to http://ipc.localhost/proxy_fetch — which our proxy re-catches,
-        // calls invoke('proxy_fetch') again with the previous IPC body embedded in
-        // the new one, and the payload doubles per recursion until JSON.stringify
-        // throws "Invalid string length" (V8's ~512 MB string cap). The renderer
-        // burns several hundred MB on the way there → "Out of Memory" crash page.
-        // macOS WKWebView uses a different IPC transport so the bug is invisible
-        // there. Filter these URLs before the proxy fast-path.
-        if (url.startsWith('http://ipc.localhost')
-            || url.startsWith('https://ipc.localhost')
-            || url.startsWith('ipc://')
-            || url.startsWith('tauri://')) {{
-            return originalFetch.call(this, input, init);
-        }}
-
-        // Only proxy absolute HTTP URLs (not relative, not ws://, not blob:, etc.)
-        if (url.startsWith('http://') || url.startsWith('https://')) {{
-            const method = ((init && init.method) || (input instanceof Request && input.method) || 'GET').toUpperCase();
-            const signal = (init && init.signal) || (input instanceof Request ? input.signal : null);
-            const aborted = () => new DOMException('The operation was aborted.', 'AbortError');
-            // A direct fetch after a proxy failure is a SECOND request. Only
-            // idempotent methods may take it: a POST (the v0.22 logout, a
-            // signup) that the proxy already sent must never go out twice.
-            const idempotent = method === 'GET' || method === 'HEAD' || method === 'OPTIONS';
-            if (signal && signal.aborted) throw aborted();
-            try {{
-                const headers = {{}};
-                if (init && init.headers) {{
-                    const h = (init.headers instanceof Headers) ? Object.fromEntries(init.headers) : init.headers;
-                    Object.assign(headers, h);
-                }}
-                const body = (init && init.body) ? String(init.body) : null;
-
-                // Wait for Tauri IPC to be ready (handles init script timing)
-                let tauri = window.__TAURI__;
-                if (!tauri || !tauri.core) {{
-                    // IPC not ready yet — wait briefly and retry
-                    await new Promise(r => setTimeout(r, 100));
-                    tauri = window.__TAURI__;
-                }}
-                if (!tauri || !tauri.core) {{
-                    console.warn('[Structs Proxy] Tauri IPC not available, falling back to direct fetch:', url);
-                    return originalFetch.call(this, input, init);
-                }}
-
-                const call = tauri.core.invoke('proxy_fetch', {{
-                    req: {{ url, method, headers, body }}
-                }});
-                // Honour the caller's AbortSignal (the v0.22 webapp aborts page
-                // work on navigation and bounds every request with one). The
-                // proxied request may still complete in Rust; its answer is
-                // simply not delivered, exactly like an aborted fetch.
-                const result = signal
-                    ? await Promise.race([call, new Promise((_, rej) =>
-                        signal.addEventListener('abort', () => rej(aborted()), {{ once: true }}))])
-                    : await call;
-
-                return new Response(result.body, {{
-                    status: result.status,
-                    headers: result.headers,
-                }});
-            }} catch (e) {{
-                if ((e && e.name === 'AbortError') || (signal && signal.aborted)) throw aborted();
-                if (!idempotent) {{
-                    console.warn('[Structs Proxy] Proxy failed; not re-sending a ' + method + ':', url, e);
-                    throw new TypeError('Failed to fetch: ' + String((e && e.message) || e));
-                }}
-                console.warn('[Structs Proxy] Proxy failed, falling back to direct fetch:', url, e);
-                return originalFetch.call(this, input, init);
-            }}
-        }}
-
-        // Pass through for relative URLs, blobs, etc.
-        return originalFetch.call(this, input, init);
-    }};
-}})();
+{fetch_proxy}
 
 // Rust-driven sync tick — see main.rs setup hook. WKWebView can throttle
 // setTimeout under occlusion even with App Nap suppressed, so we also let
@@ -741,6 +659,9 @@ try {{
 "#,
                 config_json = config_json,
                 macos_lottie_canvas = macos_lottie_canvas,
+                // Plain JS in its own file (no format! brace-doubling), so
+                // the harness can run exactly what ships.
+                fetch_proxy = include_str!("fetch_proxy.js"),
             );
 
             let window = WebviewWindowBuilder::new(app, "main", WebviewUrl::default())

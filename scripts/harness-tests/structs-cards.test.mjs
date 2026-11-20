@@ -186,6 +186,11 @@ const OWNER = { id: '1-248', name: 'Phoniffer', tag: 'SN.C', pfp: '{"head":4,"ne
   check('attacker and defender stack, each behind the game\'s glyph', vs !== null && vs.querySelector('.sui-icon-attacker') !== null && vs.querySelector('.sui-icon-defending') !== null && vs.querySelectorAll('.pc-person').length === 2);
   const ended = C.raid.row({ planetId: '2-223', live: false, status: 'raid successful', since: '1h', ore: '1Kg', attacker: { id: '1-61' }, defender: OWNER });
   check('an ended raid row: the status as its badge, attacker vs defender on the third line', /RAID SUCCESSFUL/.test(text(ended.querySelector('.sui-badge'))) && ended.querySelector('.sc-versus-row') !== null && /vs/.test(text(ended.querySelector('.sc-versus-row'))) && !ended.classList.contains('sc-enemy'));
+  const shielded = C.raid.card({ planetId: '2-1', live: true, shield: '9m', shieldState: 'breached', shieldWarning: true });
+  const sr = shielded.querySelector('.sui-text-warning');
+  check('the shield reads the game\'s readout, in the warning tone, titled by its state', sr !== null && /9m/.test(text(sr)) && /Shield breached/.test(sr.getAttribute('title') || sr.querySelector('[title]')?.getAttribute('title') || ''));
+  const secure = C.raid.card({ planetId: '2-1', live: true, shield: 'Secure', shieldState: 'secure', shieldWarning: false });
+  check('a secure shield is not a warning', /Secure/.test(text(secure)) && secure.querySelector('.sui-text-warning') === null);
   check('the raid chip is planet + LIVE', /Kepler/.test(text(C.raid.chip({ planetId: '2-15361', planetName: 'Kepler', live: true }))) && /LIVE/.test(text(C.raid.chip({ planetId: '2-15361', live: true }))));
 
   const fired = C.incident.row({ at: '14:02', planetId: '2-287', mode: 'act', fired: 2, planned: 2, attacker: { id: '1-1957' }, damage: 4, fireTarget: '5-88' });

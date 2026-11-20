@@ -45,6 +45,7 @@ pub mod guild_admin;
 pub mod guild_membership;
 pub mod guild_founding;
 pub mod providers;
+pub mod substations;
 pub mod guild_auth;
 pub mod guild_power;
 pub mod ledger;

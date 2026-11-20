@@ -1486,6 +1486,29 @@ pub async fn terminal_provider_action(
     crate::mcp::providers::execute(&app, &provider_id, &action, &args).await
 }
 
+/// The substations you may run: share, per-player cap, standing.
+#[tauri::command]
+pub async fn terminal_substations() -> Result<Value, String> {
+    crate::mcp::substations::list().await
+}
+
+#[tauri::command]
+pub async fn terminal_substation_preview(substation_id: String, action: String, args: Value) -> Result<Value, String> {
+    crate::mcp::substations::preview(&substation_id, &action, &args).await
+}
+
+#[tauri::command]
+pub async fn terminal_substation_action(
+    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+    substation_id: String,
+    action: String,
+    args: Value,
+) -> Result<Value, String> {
+    crate::mcp::tools::board_pages::require_trusted(&window)?;
+    crate::mcp::substations::execute(&app, &substation_id, &action, &args).await
+}
+
 /* ── The stat store (`/api/stat/...`) ───────────────────────────────────────
  *
  * The guild indexes a time series per object — ten metrics, sampled whenever

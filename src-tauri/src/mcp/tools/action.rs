@@ -89,8 +89,9 @@ pub async fn execute(
         "found_guild" => action_found_guild(app_handle, &params.args).await,
         "guild" => action_guild(app_handle, &params.args).await,
         "provider" => action_provider(app_handle, &params.args).await,
+        "substation" => action_substation(app_handle, &params.args).await,
         other => vec![Content::text(format!(
-            "Unknown action '{}'. Available: explore, mine, refine, build, activate, deactivate, attack, defend, move_fleet, transfer, deploy, raid, update_primary_reactor, rank_quote, rank_purchase, found_guild, guild, provider, resync",
+            "Unknown action '{}'. Available: explore, mine, refine, build, activate, deactivate, attack, defend, move_fleet, transfer, deploy, raid, update_primary_reactor, rank_quote, rank_purchase, found_guild, guild, provider, substation, resync",
             other
         ))],
     }
@@ -954,6 +955,30 @@ async fn action_provider(app_handle: &tauri::AppHandle, args: &Value) -> Vec<Con
     match res {
         Ok(v) => vec![Content::text(serde_json::to_string_pretty(&v).unwrap_or_default())],
         Err(e) => crate::mcp::handler::fail(format!("provider {op} failed: {}", translate_error(&e))),
+    }
+}
+
+/// Substations you may run (v0.23): `{op, substation_id?, value?}`. `op:
+/// list` reads; `connection_max` sets the per-player cap in mW (0 =
+/// unlimited) and previews unless `confirm: true`.
+async fn action_substation(app_handle: &tauri::AppHandle, args: &Value) -> Vec<Content> {
+    let op = args.get("op").and_then(|v| v.as_str()).unwrap_or("list");
+    let confirmed = args.get("confirm").and_then(|v| v.as_bool()).unwrap_or(false);
+    let res = if op == "list" {
+        crate::mcp::substations::list().await
+    } else {
+        match args.get("substation_id").and_then(|v| v.as_str()) {
+            None => Err("substation_id required (e.g. 4-12)".to_string()),
+            Some(id) if confirmed => crate::mcp::substations::execute(app_handle, id, op, args).await,
+            Some(id) => crate::mcp::substations::preview(id, op, args).await.map(|mut p| {
+                p["note"] = json!("preview only — send confirm:true to sign it");
+                p
+            }),
+        }
+    };
+    match res {
+        Ok(v) => vec![Content::text(serde_json::to_string_pretty(&v).unwrap_or_default())],
+        Err(e) => crate::mcp::handler::fail(format!("substation {op} failed: {}", translate_error(&e))),
     }
 }
 

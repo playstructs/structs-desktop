@@ -143,6 +143,7 @@ const BUDGET = {
   'raidview-log.js':    [0, 0],
   'raidview-sheet.js':  [0, 0],
   'raidview-hud.js':    [0, 0],
+  'shield-readout.js':  [0, 0],
   'raidview-pip.js':    [0, 0],
   // 2026-09-06: +8 for the Game Stats chart family (axis figures, ticks,
   // meter, battery columns) — the type sizes are 8/16 on the scale and the

@@ -58,7 +58,7 @@ use crate::mcp::raid_view::Target;
 pub const AMBIT_KEYS: &[&str] = &["space", "air", "land", "water"];
 
 /// Guild API and LCD numerics arrive as JSON strings as often as numbers.
-fn num_u64(v: &Value) -> Option<u64> {
+pub(crate) fn num_u64(v: &Value) -> Option<u64> {
     v.as_u64()
         .or_else(|| v.as_str().and_then(|s| s.trim().parse().ok()))
         .or_else(|| v.as_f64().map(|f| f as u64))
@@ -549,6 +549,13 @@ pub struct Snapshot {
     /// snapshot rather than a command of its own because the raid window
     /// already polls this live, and charge accrues per block.
     pub viewer_charge: Option<f64>,
+    /// The game's `KeyPlayer.arePlanetaryDefensesSecure()`: the owner's fleet
+    /// is onStation HERE and its Command Ship is built and not destroyed.
+    /// This, not `planetary_shield`, is what makes a planet raidable — the
+    /// shield is the raid proof's decay range and practically never reaches
+    /// 0. The HUD's secure / vulnerable / breached icon reads it so it agrees
+    /// with the game's own icon for the same planet. `None` = could not tell.
+    pub owner_defenses_secure: Option<bool>,
     pub fetched_at_ms: f64,
     /// Populated when a read failed, so the window can say "stale" rather than
     /// silently showing a half-built map.
@@ -597,6 +604,7 @@ pub async fn snapshot_planet(
                 owner_last_action: None,
                 raider_last_action: None,
                 viewer_last_action: None,
+                owner_defenses_secure: None,
                 fetched_at_ms: crate::hasher::types::now_millis(),
                 warning: Some(format!("planet unavailable: {e}")),
             }
@@ -640,8 +648,9 @@ pub async fn snapshot_planet(
     // with its body — see `fleets_docked_at` for the three sources and why
     // no single one of them is enough.
     let docked = fleets_docked_at(client, planet_id, body, owner.as_deref()).await;
+    let docked_read_failed = docked.warning.is_some();
     if docked.warning.is_some() {
-        warning = docked.warning;
+        warning = docked.warning.clone();
     }
     let mut fleets: Vec<String> = Vec::with_capacity(docked.fleets.len());
     for (fid, fbody) in &docked.fleets {
@@ -675,6 +684,14 @@ pub async fn snapshot_planet(
             .then(a.slot.cmp(&b.slot))
             .then(a.id.cmp(&b.id))
     });
+
+    let owner_defenses_secure = match owner.as_deref() {
+        Some(o) => {
+            let fleet = docked.fleets.iter().find(|(_, f)| str_of(f.get("owner")).as_deref() == Some(o)).map(|(_, f)| f);
+            defenses_secure(client, fleet, docked_read_failed).await
+        }
+        None => None,
+    };
 
     // HUD facts for the planet's owner. One extra read, concurrent with
     // nothing else here because it needs `owner` which the planet read gave us.
@@ -720,9 +737,79 @@ pub async fn snapshot_planet(
             .read()
             .ok()
             .and_then(|g| g.last_action_block_height.map(|b| b as f64)),
+        owner_defenses_secure,
         fetched_at_ms: crate::hasher::types::now_millis(),
         warning,
     }
+}
+
+/// Where the planet owner's fleet stands, for [`defenses_secure`].
+#[derive(Debug, PartialEq)]
+enum Station {
+    /// Not at this planet (absent from the docked set).
+    NotHere,
+    /// At this planet but not `onStation`.
+    Away,
+    /// On station with no Command Ship.
+    NoShip,
+    /// On station; its Command Ship is this struct.
+    Ship(String),
+}
+
+fn station_of(fleet: Option<&Value>) -> Station {
+    let Some(fleet) = fleet else { return Station::NotHere };
+    if str_of(fleet.get("status")).as_deref() != Some("onStation") {
+        return Station::Away;
+    }
+    match str_of(fleet.get("commandStruct")) {
+        Some(cmd) => Station::Ship(cmd),
+        None => Station::NoShip,
+    }
+}
+
+/// A Command Ship that counts: built and not destroyed (the game's
+/// `isCommandStructAlive`). Read off the struct ENTITY, because
+/// `build_struct` drops destroyed structs from the board — a dead ship is
+/// absent there, which would read as "could not tell".
+fn ship_alive(ship: &Value) -> bool {
+    let a = ship.get("structAttributes");
+    !flag(a.and_then(|a| a.get("isDestroyed")))
+        && a.and_then(|a| a.get("isBuilt")).map(|v| flag(Some(v))).unwrap_or(true)
+}
+
+/// The game's `KeyPlayer.arePlanetaryDefensesSecure()` for a planet: the
+/// owner's fleet is onStation HERE with a living Command Ship.
+///
+/// `owner_fleet` is that fleet only if it is at this planet; `None` means it
+/// is elsewhere — NOT secure — unless `fleet_unknown` (the fleet read failed),
+/// when absence proves nothing. `None` back = could not tell.
+async fn defenses_secure(
+    client: &crate::mcp::cosmos_client::CosmosClient,
+    owner_fleet: Option<&Value>,
+    fleet_unknown: bool,
+) -> Option<bool> {
+    match station_of(owner_fleet) {
+        Station::NotHere => (!fleet_unknown).then_some(false),
+        Station::Away | Station::NoShip => Some(false),
+        Station::Ship(id) => client.entity("struct", &id).await.ok().map(|v| ship_alive(&v)),
+    }
+}
+
+/// [`defenses_secure`] for a planet nobody is spectating — the Terminal's
+/// Raid card. Three reads (player, fleet, ship), all through the cached client.
+pub async fn planet_defenses_secure(
+    client: &crate::mcp::cosmos_client::CosmosClient,
+    owner: &str,
+    planet_id: &str,
+) -> Option<bool> {
+    let player = client.entity("player", owner).await.ok()?;
+    let Some(fid) = str_of(player.get("Player").unwrap_or(&player).get("fleetId")) else {
+        return Some(false); // no fleet, no ship on station
+    };
+    let fleet = client.entity("fleet", &fid).await.ok()?;
+    let fbody = fleet.get("Fleet").unwrap_or(&fleet);
+    let here = str_of(fbody.get("locationId")).as_deref() == Some(planet_id);
+    defenses_secure(client, here.then_some(fbody), false).await
 }
 
 /// Every `locationId` that means "present at this planet": the planet itself,
@@ -908,6 +995,27 @@ mod defence_tests {
         assert!(!board[2].defended);
         assert!(board[1].defending, "5-2 is defending");
         assert!(!board[0].defending);
+    }
+
+    /// The game's `arePlanetaryDefensesSecure()` inputs: the owner's fleet on
+    /// station HERE, and its Command Ship built and alive.
+    #[test]
+    fn station_reads_the_fleet() {
+        use serde_json::json;
+        assert_eq!(station_of(None), Station::NotHere);
+        assert_eq!(station_of(Some(&json!({"status": "away", "commandStruct": "5-9"}))), Station::Away);
+        assert_eq!(station_of(Some(&json!({"status": "onStation", "commandStruct": ""}))), Station::NoShip);
+        assert_eq!(station_of(Some(&json!({"status": "onStation"}))), Station::NoShip);
+        assert_eq!(station_of(Some(&json!({"status": "onStation", "commandStruct": "5-9"}))), Station::Ship("5-9".into()));
+    }
+
+    #[test]
+    fn a_ship_counts_only_built_and_alive() {
+        use serde_json::json;
+        assert!(ship_alive(&json!({"Struct": {}, "structAttributes": {"isBuilt": true, "isDestroyed": false}})));
+        assert!(!ship_alive(&json!({"structAttributes": {"isBuilt": true, "isDestroyed": true}})), "destroyed");
+        assert!(!ship_alive(&json!({"structAttributes": {"isBuilt": false}})), "unbuilt");
+        assert!(!ship_alive(&json!({"structAttributes": {"isBuilt": "true", "isDestroyed": "t"}})), "string flags");
     }
 
     #[test]

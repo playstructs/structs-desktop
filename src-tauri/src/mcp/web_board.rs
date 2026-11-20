@@ -1177,6 +1177,15 @@ async fn board_invoke(
             (Some(p), Some(a)) => from_result(crate::mcp::providers::execute(&st.app, &p, &a, body.get("args").unwrap_or(&Value::Null)).await),
             _ => err_json("providerId + action required".into()),
         },
+        "terminal_substations" => from_result(crate::mcp::substations::list().await),
+        "terminal_substation_preview" => match (s("substationId"), s("action")) {
+            (Some(p), Some(a)) => from_result(crate::mcp::substations::preview(&p, &a, body.get("args").unwrap_or(&Value::Null)).await),
+            _ => err_json("substationId + action required".into()),
+        },
+        "terminal_substation_action" => match (s("substationId"), s("action")) {
+            (Some(p), Some(a)) => from_result(crate::mcp::substations::execute(&st.app, &p, &a, body.get("args").unwrap_or(&Value::Null)).await),
+            _ => err_json("substationId + action required".into()),
+        },
         "mcp_collect_retained_preview" => from_result(board_pages::mcp_collect_retained_preview(s("player")).await),
         "mcp_collect_retained" => from_result(board_pages::mcp_collect_retained_impl(st.app.clone(), s("player")).await),
         "mcp_render_map" => match s("player") {

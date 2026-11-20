@@ -1564,13 +1564,19 @@
           subs.slice(0, 12).forEach(function (x) {
             var free = Math.max(0, (Number(x.capacity_mw) || 0) - (Number(x.load_mw) || 0));
             var count = Number(x.connection_count) || 0;
-            var now = Number(x.connection_capacity_mw) || (count ? free / count : 0);
-            var next = free / (count + 1);
+            // v0.23: the share is held at the station's per-player cap, so a
+            // capped station loses nothing to one more until the uncapped
+            // share falls under the cap.
+            var max = Number(x.connection_max_mw) || 0;
+            var held = function (v) { return max > 0 ? Math.min(v, max) : v; };
+            var now = Number(x.connection_capacity_mw) || held(count ? free / count : 0);
+            var next = held(free / (count + 1));
             st.appendChild(window.StructsCards.substation.row({
               id: x.id, guild: x.name || null, load: Number(x.load_mw) || 0, capacity: Number(x.capacity_mw) || 0,
               connections: count, perConnection: H.fmtWatts(now),
+              cap: max > 0 ? H.fmtWatts(max) : null,
               fmt: H.fmtWatts,
-              attn: now > 0 ? '−' + H.fmtWatts(now - next) + ' with one more' : 'nothing left to share',
+              attn: now <= 0 ? 'nothing left to share' : now - next > 0 ? '−' + H.fmtWatts(now - next) + ' with one more' : 'holds with one more',
             }, { onClick: function () { add('inspector', { id: x.id }); } }));
           });
           host.appendChild(st);
@@ -1699,6 +1705,7 @@
           ['connections', H.fmtInt(g.sub_connection_count || 0)],
         ]));
         host.appendChild(H.row('Per connection', H.fmtWatts(g.sub_connection_capacity_mw || 0) + ' → ' + H.fmtWatts(g.share_if_one_more_mw || 0) + ' with one more'));
+        if ((g.sub_connection_max_mw || 0) > 0) host.appendChild(H.row('Per-player cap', H.fmtWatts(g.sub_connection_max_mw)));
         host.appendChild(H.row('Reactor fuel', H.fmtWatts(g.reactor_fuel_mw || 0) + ' · ' + Math.round((g.reactor_commission || 0) * 100) + '% commission'));
         host.appendChild(H.row('Headroom', '~' + H.fmtInt(g.supportable_more || 0) + ' more players', (g.supportable_more || 0) > 0 ? 'icon-success' : 'icon-alert'));
         /* Which reactor the guild draws from is a GUILD-ADMIN change and the
@@ -1708,6 +1715,7 @@
         host.appendChild(doorRow([
           { label: 'Allocations', onClick: function () { add('allocations', {}); } },
           { label: 'Reactor fuel', onClick: function () { add('fuel', {}); } },
+          { label: 'Substations', onClick: function () { add('substations', {}); } },
           { label: 'Primary reactor', onClick: function () {
             slot.innerHTML = '';
             slot.appendChild(ticket({
@@ -2034,8 +2042,13 @@
         if (rows.length > 25) cap(host, 'showing 25 of ' + rows.length);
         var table = H.resultTable();
         rows.slice(0, 25).forEach(function (r) {
+          // Live rows carry the shield inputs; the readout is the game's own.
+          var sh = r.shield && window.ShieldReadout
+            ? window.ShieldReadout.readout(r.shield.defenses_secure, r.status, r.shield.planetary_shield, r.shield.block_start_raid, d.height)
+            : null;
           table.appendChild(window.StructsCards.raid.row({
             planetId: r.planet_id, live: !!r.live, status: human(r.status), since: H.ago(r.updated_ms), stale: !!r.stale,
+            shield: sh && sh.state ? sh.text : null, shieldState: sh && sh.state, shieldWarning: !!(sh && sh.warning),
             ore: H.fmtOre(r.seized_ore || 0), oreLabel: 'Ore seized',
             attacker: r.attacker ? { id: r.attacker } : null, defender: r.defender ? { id: r.defender } : null,
           }, {
@@ -4413,6 +4426,100 @@
         submit: function (v) {
           if (!pv) return Promise.reject(new Error('fill in the change and wait for the check'));
           return invoke('terminal_provider_action', { providerId: v.provider, action: v.action || 'capacity_max', args: argsOf(v) });
+        },
+      }));
+    },
+  });
+
+  /* ── SUBSTATIONS: the stations you run, and their per-player cap ────────
+   *
+   * Chain v0.23: a substation's share is (usable − load) ÷ connections, then
+   * held at its connectionCapacityMaximum when that is above 0. The cap keeps
+   * every connection's share steady while the station has more than it needs
+   * — a new connection stops diluting everyone — and it is a ceiling, never a
+   * guarantee. Rust (mcp/substations.rs) checks the standing exactly as the
+   * keeper does and names who a lower cap would cut off. */
+  var subRow = function (s) {
+    return {
+      id: s.id, guild: s.guild_owned ? s.owner : null, load: Number(s.load_mw) || 0, capacity: Number(s.capacity_mw) || 0, fmt: H.fmtWatts,
+      connections: Number(s.connection_count) || 0, perConnection: H.fmtWatts(Number(s.share_mw) || 0),
+      cap: Number(s.connection_max_mw) > 0 ? H.fmtWatts(Number(s.connection_max_mw)) : null, capped: !!s.capped,
+      attn: s.closing ? 'closing' : (s.can_update ? null : 'read only'),
+      owner: s.owner ? { id: s.owner } : null,
+    };
+  };
+  T.register('substations', {
+    label: 'Substations', cadenceMs: 30000,
+    describe: function () { return 'Substations'; },
+    render: function (host, p, ctx) {
+      return invoke('terminal_substations').then(function (d) {
+        host.innerHTML = '';
+        var list = (d && d.substations) || [];
+        if (!list.length) { host.appendChild(H.stateBlock('info', 'You run no substations.')); return; }
+        var table = H.resultTable();
+        list.forEach(function (s) {
+          table.appendChild(window.StructsCards.substation.row(subRow(s), { onClick: function () { add('substation', { id: s.id }); } }));
+        });
+        host.appendChild(table);
+      }).catch(function (e) { fail(host, 'Substations', e); });
+    },
+  });
+
+  /* kW as typed → whole mW, or null while the field cannot be read. */
+  var kwToMw = function (v) {
+    var t = String(v == null ? '' : v).trim();
+    if (!t) return null;
+    var n = Number(t);
+    return isFinite(n) && n >= 0 ? Math.round(n * 1e6) : null;
+  };
+  T.register('substation', {
+    label: 'Substation ticket', cadenceMs: 0,
+    describe: function (p) { return 'Substation' + (p && p.id ? ' · ' + p.id : ''); },
+    params: [{ key: 'id', label: 'Substation id', kind: 'id', kinds: [4], placeholder: '4-12' }],
+    render: function (host, p) {
+      host.innerHTML = '';
+      var pv = null;
+      host.appendChild(ticket({
+        cta: 'Sign',
+        doneText: 'signed',
+        fields: [
+          { key: 'substation', label: 'Substation', kind: 'text', value: (p && p.id) || '', placeholder: '4-12', inputmode: 'text' },
+          { key: 'kw', label: 'Per-player cap (kW)', placeholder: '0 = unlimited', inputmode: 'decimal' },
+        ],
+        preview: function (v) {
+          pv = null;
+          var mw = kwToMw(v.kw);
+          if (!v.substation || mw == null) return null;
+          return invoke('terminal_substation_preview', { substationId: v.substation, action: 'connection_max', args: { value: mw } })
+            .then(function (r) { return r && r.ok === false ? { ok: false, refusal: (r.problems || []).join('; '), warnings: r.warnings } : r; });
+        },
+        facts: function (r) {
+          pv = r;
+          var now = Number(r.share_mw) || 0, after = Number(r.share_after_mw) || 0, cut = (r.knocked_offline || []).length;
+          var f = [
+            ['change', r.summary, null, 'live'],
+            ['cap now', Number(r.connection_max_mw) > 0 ? H.fmtWatts(Number(r.connection_max_mw)) : 'unlimited', null, 'muted'],
+            ['share each', H.fmtWatts(now) + ' → ' + H.fmtWatts(after), null, after < now ? 'bad' : null],
+            ['connections', H.fmtInt(Number(r.connection_count) || 0), null, 'muted'],
+          ];
+          if (cut) f.push(['lose power', H.fmtInt(cut), null, 'bad']);
+          return f;
+        },
+        confirm: function () {
+          if (!pv) return null;
+          var cut = pv.knocked_offline || [];
+          var rows = [
+            ['Substation', pv.substation_id],
+            ['Share each', H.fmtWatts(Number(pv.share_mw) || 0) + ' → ' + H.fmtWatts(Number(pv.share_after_mw) || 0)],
+          ];
+          if (cut.length) rows.push(['Lose power', cut.slice(0, 6).join(', ') + (cut.length > 6 ? ' +' + (cut.length - 6) : '')]);
+          rows.push(['Message', pv.message]);
+          return { title: pv.summary + '?', cta: 'Sign', rows: rows };
+        },
+        submit: function (v) {
+          var mw = kwToMw(v.kw);
+          if (!pv || mw == null) return Promise.reject(new Error('fill in the cap and wait for the check'));
+          return invoke('terminal_substation_action', { substationId: v.substation, action: 'connection_max', args: { value: mw } });
         },
       }));
     },

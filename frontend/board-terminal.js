@@ -105,7 +105,7 @@
     ['Command', ['help', 'next', 'alerts', 'watchlist', 'feed']],
     ['Explore', ['player', 'record', 'guild', 'guildadmin', 'guildmember', 'guildset', 'members', 'guildinbox', 'planet', 'map', 'inspector', 'sheet', 'chart', 'people', 'stats', 'onboarding']],
     ['Armada', ['replication', 'armada', 'ops', 'build', 'fleet', 'pow', 'tasks', 'solve', 'queue', 'results', 'crew', 'crewpay']],
-    ['Industry', ['energy', 'grid', 'brownout', 'halt', 'allocations', 'fuel', 'market', 'book', 'ore', 'banks', 'gt', 'bank', 'rank', 'found', 'providers', 'provider', 'wallet', 'deliver']],
+    ['Industry', ['energy', 'grid', 'brownout', 'halt', 'allocations', 'fuel', 'market', 'book', 'ore', 'banks', 'gt', 'bank', 'rank', 'found', 'providers', 'provider', 'substations', 'substation', 'wallet', 'deliver']],
     ['War', ['scout', 'tally', 'posture', 'targets', 'raids', 'log', 'grudges', 'vetoes', 'incidents']],
     ['Contest', ['contest', 'standings', 'race', 'territory', 'influence', 'leaders', 'hunt', 'claims']],
     ['System', ['health', 'sounds', 'external']],
@@ -1591,7 +1591,7 @@
     CARDS: ['external'], INSTALLED: ['external'],
     MKT: ['market'], MARKET: ['market'], PEOPLE: ['people'], TAPE: ['feed'], FLOW: ['feed'],
     DELIVER: ['deliver'], PAY: ['deliver'], SEND: ['deliver'], GT: ['gt', 'id'], GUILD: ['guild', 'id'],
-    BANKS: ['banks'], BANK: ['bank'], MINT: ['bank'], REDEEM: ['bank'], RANK: ['rank', 'optid'], FOUND: ['found'], ADMIN: ['guildadmin', 'optid'], RECRUIT: ['guildmember', 'optid'], INVITE: ['guildmember', 'optid'], GSET: ['guildset', 'optid'], PROVIDERS: ['providers'], SELLING: ['providers'], TERMS: ['provider', 'optid'], SHEET: ['sheet', 'id'], TS: ['sheet', 'id'], TEARSHEET: ['sheet', 'id'],
+    BANKS: ['banks'], BANK: ['bank'], MINT: ['bank'], REDEEM: ['bank'], RANK: ['rank', 'optid'], FOUND: ['found'], ADMIN: ['guildadmin', 'optid'], RECRUIT: ['guildmember', 'optid'], INVITE: ['guildmember', 'optid'], GSET: ['guildset', 'optid'], PROVIDERS: ['providers'], SELLING: ['providers'], TERMS: ['provider', 'optid'], SUBSTATIONS: ['substations'], STATIONS: ['substations'], SUBSTATION: ['substation', 'optid'], CAP: ['substation', 'optid'], SHEET: ['sheet', 'id'], TS: ['sheet', 'id'], TEARSHEET: ['sheet', 'id'],
     PLAYER: ['player', 'id'], MAP: ['map', 'id'], PLANET: ['planet', 'id'], INSPECT: ['inspector', 'id'], WATCH: ['watchlist', 'ids'],
     // The structs.app link words (docs/links.md): an energy provider's offer and
     // a reactor have no card of their own, so they open in the inspector.

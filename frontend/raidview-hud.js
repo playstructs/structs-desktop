@@ -13,6 +13,8 @@
 //   window.RaidHud({ state, target, chat, paintComposerIdentity })
 //     → { renderHeader, renderSide, paintPfp, paintBattery, whoLine, chargeLevel,
 //         CHARGE_THRESHOLDS, fmtAge, humanStatus, fmtNum, setText }
+//
+// Needs window.ShieldReadout (shield-readout.js) loaded first.
 (function () {
   'use strict';
   window.RaidHud = function (ctx) {
@@ -55,36 +57,36 @@
       }
       if (!snap) return;
 
-      // Shield: the game shows the value beside a shield glyph whose state is
-      // up/down. `planetaryShield` arrives on the live stream ahead of the next
-      // snapshot, so prefer it.
+      // Shield: the game's ShieldStatusComponent, as its raid-target HUD
+      // draws it (showTextStatus on) — see shield-readout.js. Derived from
+      // the defender's Command Ship being on station, not from
+      // `planetaryShield`: a shield-derived "breached" never showed, and a
+      // defender with no ship on station read as secure.
       var shield = state().planetaryShield || snap.planetary_shield || 0;
-      // The game's own shield art and vocabulary: secure / vulnerable /
-      // breached, drawn from img/non_standard_icons. The `_raid_enemy` suffix is
-      // the variant the game uses for a planet that is not yours — which, to a
-      // spectator, is always the case.
       var status = state().raidStatus || snap.raid_status;
-      var shieldState = shield <= 0 ? 'breached'
-        : (status === 'shieldsVulnerable' ? 'vulnerable' : 'secure');
-      // The NUMBER only appears while the shield is vulnerable. Secure, its
-      // exact value tells a spectator nothing actionable and reads as a health
-      // bar it is not (shield does not predict a raid's outcome — it is the
-      // proof's difficulty range, a timer). Breached, it is zero by definition.
-      // In both of those the glyph alone carries the whole state().
-      setText('rv-shield', shieldState === 'vulnerable' ? fmtNum(shield) : '');
+      var height = Number(state().height) || Number(snap.height) || 0;
+      var ro = window.ShieldReadout.readout(snap.owner_defenses_secure, status, shield, snap.block_start_raid, height);
+      var valueEl = document.getElementById('rv-shield');
+      if (valueEl) {
+        valueEl.textContent = ro.text;
+        valueEl.classList.toggle('sui-text-warning', ro.warning);
+      }
+      // The `_raid_enemy` suffix is the variant the game uses for a planet
+      // that is not yours — which, to a spectator, is always the case.
       var icon = document.getElementById('rv-shield-icon');
-      if (icon && icon.dataset.shieldState !== shieldState) {
-        icon.dataset.shieldState = shieldState;
-        icon.innerHTML = '<img src="img/non_standard_icons/shield_' + shieldState
-          + '_raid_enemy.png" alt="' + shieldState + '" />';
+      if (icon && ro.state && icon.dataset.shieldState !== ro.state) {
+        icon.dataset.shieldState = ro.state;
+        icon.innerHTML = '<img src="img/non_standard_icons/shield_' + ro.state
+          + '_raid_enemy.png" alt="' + ro.state + '" />';
       }
       var shieldRes = document.getElementById('rv-shield-res');
       if (shieldRes) {
         // First line = the label the tooltip draws as its strip; the facts
         // follow on their own lines.
         shieldRes.setAttribute('data-sui-tooltip',
-          'Planetary shield\n' + fmtNum(shield)
-          + (shield > 0 ? ' — raids cannot seize until it falls' : ' — down, the planet is vulnerable')
+          'Planetary shield\n' + (ro.state ? ro.state.charAt(0).toUpperCase() + ro.state.slice(1) : 'Unknown')
+          + (ro.text && ro.state !== 'secure' ? ' · ' + ro.text : '')
+          + '\nShield ' + fmtNum(shield)
           + (status ? '\nRaid: ' + humanStatus(status) : ''));
       }
 

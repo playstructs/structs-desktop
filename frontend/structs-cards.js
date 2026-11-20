@@ -445,7 +445,9 @@
     chip: function (s, opts) { var st = strct.state(s); return chip({ kind: 'struct', emblem: strct.emblemOf(s, 'xs'), title: s.type || 'Struct', id: s.id, badge: st === 'dead' ? { text: 'DESTROYED', mod: 'destructive' } : null, state: st === 'dead' ? 'bad' : null }, opts); },
   };
 
-  /* substation: { id, guild, load, capacity, fmt, connections, perConnection, owner } */
+  /* substation: { id, guild, load, capacity, fmt, connections, perConnection, cap, capped, owner }
+   * cap = the per-player ceiling, formatted (null/absent = unlimited);
+   * capped = the cap is what is holding each share down right now. */
   var substation = {
     describe: function (s) {
       var thin = s.capacity > 0 && s.load / s.capacity >= 0.9;
@@ -456,6 +458,7 @@
           s.capacity != null ? meter(s.load, s.capacity, s.fmt, 'Load / capacity') : null,
           s.connections != null ? { value: s.connections, icon: 'sui-icon-players', title: 'Connections' } : null,
           s.perConnection != null ? { value: s.perConnection, icon: 'sui-icon-energy', title: 'Capacity per connection' } : null,
+          s.cap ? { value: '≤ ' + s.cap, icon: 'sui-icon-energy', title: s.capped ? 'Per-player cap (holding each share)' : 'Per-player cap' } : null,
         ],
         foot: person(s.owner, { title: s.owner && ('Run by ' + (s.owner.name || s.owner.id)) }),
       };
@@ -588,7 +591,9 @@
     chip: function (t, opts) { var d = tx.describe(t); return chip({ kind: 'tx', emblem: tx.emblemOf(t, 'xs'), title: t.type || '?', id: t.hash ? str(t.hash).slice(0, 8) + '…' : null, badge: d.badge, state: d.state }, opts); },
   };
 
-  /* raid: { planetId, planetName, live, ended, since, shield, ore, oreLabel, shots, attacker, defender, stale } */
+  /* raid: { planetId, planetName, live, ended, since, shield, shieldState, shieldWarning, ore, oreLabel, shots, attacker, defender, stale }
+   * shield = the game's readout text (window.ShieldReadout: Secure / a breach
+   * time / a countdown), shieldState = secure|vulnerable|breached. */
   var raid = {
     describe: function (r) {
       return {
@@ -597,7 +602,7 @@
         state: r.live ? 'bad' : null, theme: r.live ? 'enemy' : null,
         badge: r.live ? { text: 'LIVE', mod: 'destructive' } : { text: (r.status || 'ended').toUpperCase(), mod: 'default' },
         readings: [
-          r.shield != null ? { value: r.shield, icon: 'sui-icon-md icon-planetary-shield', title: 'Defender shield' } : null,
+          r.shield != null ? { value: r.shield, icon: 'sui-icon-md icon-planetary-shield', title: r.shieldState ? 'Shield ' + r.shieldState : 'Defender shield', cls: r.shieldWarning ? 'sui-text-warning' : null } : null,
           r.ore != null ? { value: r.ore, icon: 'sui-icon-alpha-ore', title: r.oreLabel || (r.live ? 'Ore at stake' : 'Ore seized') } : null,
           r.shots != null ? { value: r.shots, icon: 'sui-icon-md icon-dmg', title: 'Shots fired' } : null,
         ],

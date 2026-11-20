@@ -453,6 +453,7 @@ pub async fn mcp_energy() -> Result<Value, String> {
             "sub_usable_mw": gp.available(),
             "sub_connection_capacity_mw": gp.sub_connection_capacity,
             "sub_connection_count": gp.sub_connection_count,
+            "sub_connection_max_mw": gp.sub_connection_max,
             "share_if_one_more_mw": gp.share_if_one_more,
             "supportable_more": gp.supportable_more,
         },
@@ -1361,7 +1362,7 @@ pub async fn mcp_allocations() -> Result<Value, String> {
     // the loops obey and could push the very endpoint pressure it exists to
     // avoid — and the substation count is chain-driven, so it can grow.
     let c = client.clone();
-    let enriched: std::collections::HashMap<String, (f64, f64, f64, f64)> =
+    let enriched: std::collections::HashMap<String, (f64, f64, f64, f64, f64)> =
         crate::mcp::loop_util::map_concurrent(ids.clone(), 8, move |id| {
             let c = c.clone();
             async move {
@@ -1373,11 +1374,12 @@ pub async fn mcp_allocations() -> Result<Value, String> {
                             grid_num(ga.and_then(|g| g.get("load"))),
                             grid_num(ga.and_then(|g| g.get("connectionCount"))),
                             grid_num(ga.and_then(|g| g.get("connectionCapacity"))),
+                            grid_num(ga.and_then(|g| g.get("connectionCapacityMaximum"))),
                         )
                     }
                     // A substation that fails to read still belongs in the
                     // list — it is a legal destination, we just cannot price it.
-                    Err(_) => (0.0, 0.0, 0.0, 0.0),
+                    Err(_) => (0.0, 0.0, 0.0, 0.0, 0.0),
                 };
                 (id, nums)
             }
@@ -1389,13 +1391,15 @@ pub async fn mcp_allocations() -> Result<Value, String> {
     // ordering is what the Move dropdown shows.
     let mut substations = Vec::new();
     for id in ids {
-        let (cap, ld, conns, conn_cap) =
-            enriched.get(&id).copied().unwrap_or((0.0, 0.0, 0.0, 0.0));
+        let (cap, ld, conns, conn_cap, conn_max) =
+            enriched.get(&id).copied().unwrap_or((0.0, 0.0, 0.0, 0.0, 0.0));
         substations.push(json!({
             "id": id,
             "name": names.get(&id).cloned().unwrap_or_default(),
             "capacity_mw": cap, "load_mw": ld,
             "connection_count": conns, "connection_capacity_mw": conn_cap,
+            // v0.23 per-player cap, mW; 0 = unlimited.
+            "connection_max_mw": conn_max,
         }));
     }
 

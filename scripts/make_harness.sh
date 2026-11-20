@@ -662,6 +662,26 @@ cat > "$FIX" <<'EOF'
         payload: {}, earnings: args.providerId === '10-5' ? [{ denom: 'ualpha', amount: '3500000' }] : [], collateral: [], open_agreements: args.providerId === '10-5' ? 1 : 0 };
     },
     terminal_provider_action: { ok: true, tx: 'PROVTX' },
+    // v0.23 substations: 4-15 ours and capped at 5 kW (uncapped it would be
+    // 7.42 kW); 4-1 the guild's, which this player may not change.
+    terminal_substations: { ok: true, owner: '1-194', guild_id: '0-1', substations: [
+      { id: '4-15', owner: '1-194', guild_owned: false, closing: false, connection_count: 12, capacity_mw: 100000000, load_mw: 0, usable_mw: 90000000,
+        share_mw: 5000000, uncapped_share_mw: 7500000, connection_max_mw: 5000000, capped: true, can_update: true, standing: 'you own it' },
+      { id: '4-1', owner: '0-1', guild_owned: true, closing: false, connection_count: 5046, capacity_mw: 41614860000, load_mw: 0, usable_mw: 37453374000,
+        share_mw: 7422388, uncapped_share_mw: 7422388, connection_max_mw: 0, capped: false, can_update: false, standing: null },
+    ] },
+    terminal_substation_preview: function (args) {
+      var mw = Number((args.args || {}).value), id = args.substationId;
+      if (id === '4-1') return { ok: false, problems: ['you need Update on 4-1 (owned by 0-1): ownership, a direct grant, or a guild rank that carries it'], warnings: [] };
+      var uncapped = 7500000, after = mw > 0 ? Math.min(uncapped, mw) : uncapped;
+      var cut = after < 2000000 ? ['1-7', '1-8'] : [];
+      return { ok: true, problems: [], warnings: cut.length ? [cut.length + ' connected player(s) lose power at ' + after + ' mW per player'] : [],
+        substation_id: id, action: 'connection_max', summary: mw > 0 ? 'Cap each player on ' + id + ' at ' + (mw / 1e6) + ' kW' : 'Remove ' + id + "'s per-player cap",
+        message: 'MsgSubstationUpdateConnectionCapacityMaximum', payload: { substationId: id, connectionCapacityMaximum: String(mw) }, standing: 'you own it',
+        connection_count: 12, connection_max_mw: 5000000, new_connection_max_mw: mw, share_mw: 5000000, share_after_mw: after, uncapped_share_mw: uncapped,
+        knocked_offline: cut, offline_checked: true };
+    },
+    terminal_substation_action: { ok: true, tx: 'SUBTX' },
     terminal_tearsheet: { kind: 'player', id: '1-61', height: 4200719,
       identity: { username: 'JPEG', pfp_attrs: '{"head":12,"neck":2,"body":7,"arms":3,"background":3}', tag: 'OH', guild_name: 'Orbital Hydro', planet_id: '2-223', fleet_id: '9-61' },
       standing: { planet_id: '2-223', fleet_id: '9-61', guild_id: '0-2', last_action: 4200700, ago_blocks: 19, charge: 19, known: true },
@@ -1298,8 +1318,8 @@ cat > "$FIX" <<'EOF'
     mcp_tx_mutate: { ok: true },
     mcp_roster_refresh: true,
     mcp_mass_action: { entries: [{ player_id: '1-287' }], total_alpha: 2.1, job_id: 'job-1' },
-    mcp_raids: { live: 1, ours: 1, finished: 1, unidentified: 0, raids: [
-      { planet_id: '2-15361', fleet_id: '9-61', status: 'shieldsVulnerable', updated_ms: Date.now() - 30000, seized_ore: 0, defender: 'JPEG', attacker: 'Marklifer', our_side: 'attacker', live: true, stale: false },
+    mcp_raids: { live: 1, ours: 1, finished: 1, unidentified: 0, height: 1400, raids: [
+      { planet_id: '2-15361', fleet_id: '9-61', status: 'shieldsVulnerable', updated_ms: Date.now() - 30000, seized_ore: 0, defender: 'JPEG', attacker: 'Marklifer', our_side: 'attacker', live: true, stale: false, shield: { planetary_shield: 238, block_start_raid: 1300, defenses_secure: false } },
       { planet_id: '2-223', fleet_id: '9-12', status: 'raidSuccessful', updated_ms: Date.now() - 3600000, seized_ore: 4, defender: 'Phoniffer', attacker: 'beezhan', our_side: 'none', live: false, stale: false },
     ] },
     mcp_war_bundle: {

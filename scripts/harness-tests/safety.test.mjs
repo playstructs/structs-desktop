@@ -46,6 +46,7 @@ const FEDERATED = [
   'frontend/raidview-log.js',
   'frontend/raidview-sheet.js',
   'frontend/raidview-hud.js',
+  'frontend/shield-readout.js',
   'frontend/raidview-pip.js',
   'frontend/board-pages.js',
   'frontend/board-gamestats.js',

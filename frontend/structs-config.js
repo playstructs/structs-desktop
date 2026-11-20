@@ -223,9 +223,10 @@ if (window.__STRUCTS_CONFIG__ && window.__TAURI__) {
     // tauri://localhost: '/img/focus/target-selected-*.gif', the burst that
     // confirms a picked target (webapp 67f3ce51), is fetched for its BYTES,
     // and sending that to the guild sent it back through proxy_fetch, which
-    // decodes every body as UTF-8 text — so the blob was mangled and the
+    // then decoded every body as UTF-8 text — so the blob was mangled and the
     // burst never played anywhere in the app, while the same art worked in
-    // the Raid View, which asks for it without the leading slash.
+    // the Raid View, which asks for it without the leading slash. (proxy_fetch
+    // now carries bytes intact, but the app's own files still belong here.)
     const toGuildUrl = (url) => (typeof url === 'string' && url.startsWith('/api')) ? apiBase + url : url;
     const proxiedFetch = window.fetch;
     window.fetch = function(input, init) {

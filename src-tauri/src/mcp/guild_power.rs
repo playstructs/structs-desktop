@@ -49,9 +49,13 @@ pub struct GuildPower {
     pub sub_connection_capacity: f64,
     pub sub_connection_count: u64,
     pub sub_load: f64,
+    /// v0.23 per-player cap (`connectionCapacityMaximum`, mW); 0 = unlimited.
+    pub sub_connection_max: f64,
     /// Derived: per-connection share if one more player connects, matching the
     /// keeper's `connectionCapacity = usable / connectionCount`
-    /// (grid_context.go) — i.e. AVAILABLE capacity over count+1.
+    /// (grid_context.go) — i.e. AVAILABLE capacity over count+1 — then held
+    /// at the station's cap, which is what stops a new connection diluting a
+    /// capped station.
     pub share_if_one_more: f64,
     /// Derived: how many MORE players the substation can power at `MIN_PLAYER_DRAW_MW`
     /// each (guild-wide; can be negative if already oversubscribed).
@@ -88,6 +92,11 @@ pub fn derive_headroom(available_capacity: f64, connection_count: u64, min_draw:
         0
     };
     (share_if_one_more, supportable_more)
+}
+
+/// A share held at a substation's per-player cap (v0.23); 0 = no cap.
+pub fn cap_share(share: f64, maximum: f64) -> f64 {
+    if maximum > 0.0 { share.min(maximum) } else { share }
 }
 
 /// Computed amounts for the hybrid "owned hub" infrastructure plan: infuse some
@@ -222,6 +231,7 @@ pub async fn resolve_guild_power(
             out.sub_connection_count =
                 num(ga.and_then(|x| x.get("connectionCount"))) as u64;
             out.sub_load = num(ga.and_then(|x| x.get("load")));
+            out.sub_connection_max = num(ga.and_then(|x| x.get("connectionCapacityMaximum")));
             out.substation_owner = owner_of(&sub, "Substation");
         }
     }
@@ -248,7 +258,7 @@ pub async fn resolve_guild_power(
     // ── Derived growth headroom ── (after the 10% operating loss, per keeper)
     let available = out.available();
     let (share, more) = derive_headroom(available, out.sub_connection_count, MIN_PLAYER_DRAW_MW);
-    out.share_if_one_more = share;
+    out.share_if_one_more = cap_share(share, out.sub_connection_max);
     out.supportable_more = more;
 
     Ok(out)
@@ -257,6 +267,15 @@ pub async fn resolve_guild_power(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// v0.23: a capped station does not dilute with one more connection
+    /// while the uncapped share is still above the cap.
+    #[test]
+    fn the_cap_holds_the_next_share() {
+        assert_eq!(cap_share(7_422_388.0, 0.0), 7_422_388.0, "0 = unlimited");
+        assert_eq!(cap_share(7_422_388.0, 5_000_000.0), 5_000_000.0);
+        assert_eq!(cap_share(4_000_000.0, 5_000_000.0), 4_000_000.0, "a ceiling, never a floor");
+    }
 
     #[test]
     fn headroom_matches_live_substation() {

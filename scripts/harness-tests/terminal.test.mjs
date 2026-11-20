@@ -1097,6 +1097,40 @@ const tick = (ms) => new Promise((r) => setTimeout(r, ms));
   await until(() => /largest contract becomes 50000/.test(pterm.textContent));
   check('…and a good one previews the change and the open contracts', /largest contract becomes 50000/.test(pterm.textContent) && /open contracts/.test(pterm.textContent));
 
+  // Substations (v0.23): the stations you run, and the per-player cap.
+  run('SUBSTATIONS');
+  await until(() => /4-1\b/.test((d.querySelector('#tm-grid [data-type="substations"]') || {}).textContent || ''));
+  const subs = d.querySelector('#tm-grid [data-type="substations"]');
+  check('SUBSTATIONS lists each station with its share and its cap as a ceiling', /4-15/.test(subs.textContent) && /≤ 5/.test(subs.textContent), subs.textContent);
+  check('…and marks one you may not change', /read only/.test(subs.textContent));
+  const ownRow = [...subs.querySelectorAll('.pc-row')].find((r) => /4-15/.test(r.textContent));
+  check('the cap reading names itself as the cap holding each share', !!ownRow && !!ownRow.querySelector('[title="Per-player cap (holding each share)"]'));
+  if (ownRow) ownRow.click();
+  await until(() => d.querySelectorAll('#tm-grid [data-type="substation"] input').length >= 2);
+  const sterm = d.querySelector('#tm-grid [data-type="substation"]');
+  const sInputs = sterm.querySelectorAll('input');
+  check('a station row opens its ticket on that station', sInputs[0].value === '4-15', sInputs[0].value);
+  const sKw = sInputs[1];
+  sKw.value = '1.5'; sKw.dispatchEvent(new w.Event('input'));
+  await until(() => /Cap each player on 4-15 at 1.5 kW/.test(sterm.textContent));
+  check('kW becomes whole mW on the wire', (w.__HARNESS_CALLS__ || []).some((c) => c.cmd === 'terminal_substation_preview' && c.args.args && c.args.args.value === 1500000));
+  check('a lower cap names who loses power', /lose power/.test(sterm.textContent) && /2 connected player/.test(sterm.textContent), sterm.textContent);
+  sKw.value = '0'; sKw.dispatchEvent(new w.Event('input'));
+  await until(() => /Remove 4-15's per-player cap/.test(sterm.textContent));
+  check('0 removes the cap, and the share rises to what the station funds', /Remove 4-15's per-player cap/.test(sterm.textContent) && /5KW\s*→\s*7\.5KW/.test(sterm.textContent), sterm.textContent);
+  const signSub = [...sterm.querySelectorAll('a')].find((a) => /^Sign$/.test(a.textContent.trim()));
+  if (signSub) signSub.click();
+  await until(() => d.querySelector('.ops-modal-overlay') && /Remove 4-15/.test(d.querySelector('.ops-modal-overlay').textContent));
+  const subConfirm = [...d.querySelectorAll('.ops-modal-overlay a, .ops-modal-overlay button')].find((b) => /^sign$/i.test(b.textContent.trim()));
+  if (subConfirm) subConfirm.click();
+  await until(() => (w.__HARNESS_CALLS__ || []).some((c) => c.cmd === 'terminal_substation_action'));
+  const subCall = (w.__HARNESS_CALLS__ || []).find((c) => c.cmd === 'terminal_substation_action');
+  check('…and signs connection_max 0 for that station', !!subCall && subCall.args.substationId === '4-15' && subCall.args.action === 'connection_max' && subCall.args.args.value === 0, JSON.stringify(subCall && subCall.args));
+  sInputs[0].value = '4-1'; sInputs[0].dispatchEvent(new w.Event('input'));
+  sKw.value = '3'; sKw.dispatchEvent(new w.Event('input'));
+  await until(() => /you need Update on 4-1/.test(sterm.textContent));
+  check('a station you lack Update on is refused with the reason', /you need Update on 4-1/.test(sterm.textContent));
+
   run('TS 1-61');
   await until(() => d.querySelector('#tm-grid [data-type="sheet"] .pc-card'));
   const sheet = d.querySelector('#tm-grid [data-type="sheet"]');
@@ -1810,6 +1844,7 @@ const tick = (ms) => new Promise((r) => setTimeout(r, ms));
   }
   check('an incident row names the attacker as a person and the shots as its badge', /1-1957/.test(d.querySelector('#tm-grid [data-type="incidents"] .pc-row').textContent) && /2-287/.test(d.querySelector('#tm-grid [data-type="incidents"] .pc-row').textContent) && d.querySelector('#tm-grid [data-type="incidents"] .pc-row .sui-badge') !== null);
   check('a raid row stacks attacker vs defender and keeps the live one\'s status word', /Marklifer/.test(d.querySelector('#tm-grid [data-type="raids"] .pc-row').textContent) && /JPEG/.test(d.querySelector('#tm-grid [data-type="raids"] .pc-row').textContent) && d.querySelector('#tm-grid [data-type="raids"] .pc-row.sc-bad') !== null);
+  check('a live raid row draws the game\'s shield countdown (shield 238, 100 blocks in = 94 left = 9m)', /\b9m\b/.test(d.querySelector('#tm-grid [data-type="raids"] .pc-row .sui-text-warning')?.textContent || ''));
   check('a wallet row is an asset row: ore marked not sendable and without a Deliver door', [...d.querySelectorAll('#tm-grid [data-type="wallet"] .pc-row')].some((r) => /not sendable/.test(r.textContent) && !r.querySelector('.pc-act[title="Deliver"]')) && [...d.querySelectorAll('#tm-grid [data-type="wallet"] .pc-row')].some((r) => r.querySelector('.pc-act[title="Deliver"]')));
   // The sweep prices itself before it moves anything.
   const sweepBtn = [...d.querySelectorAll('#tm-grid [data-type="armada"] a')].find((a) => a.textContent === 'Sweep Alpha');

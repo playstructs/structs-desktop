@@ -113,8 +113,20 @@ check('…as does the main window\'s debug panel', /window\.StructsUnits/.test(c
  * looks like. The tell for a time ladder is second-count arithmetic beside a
  * unit letter.
  */
+// Exempt, deliberately and only these: a file whose ladder is a verbatim
+// port of the GAME's, so a spectator reads the same figure as the planet's
+// own HUD. shield-readout.js = DateFormatter.formatDuration (floors, never
+// past hours: "1h", "48h" — where StructsUnits rounds and says "1.5h", "2d").
+// raidhud.test.mjs runs the webapp's own source against it, so it cannot
+// drift from the game — which is the guarantee this check exists for.
+const GAME_PARITY_LADDERS = ['shield-readout.js'];
 for (const f of readdirSync(root + '/frontend')
   .filter((x) => /\.js$/.test(x) && !x.startsWith('_') && x !== 'units.js')) {
+  if (GAME_PARITY_LADDERS.includes(f)) {
+    check(f + ' is a game-parity ladder, pinned against the webapp in raidhud.test.mjs',
+      /structs-webapp[\s\S]*DateFormatter/.test(readFileSync(root + '/scripts/harness-tests/raidhud.test.mjs', 'utf8')));
+    continue;
+  }
   const raw = readFileSync(root + '/frontend/' + f, 'utf8');
   const src = raw.replace(/\/\*[\s\S]*?\*\//g, '')
     .split('\n').map((l) => l.replace(/\/\/.*$/, '')).join('\n');

@@ -81,8 +81,9 @@ function boot(opts = {}) {
 // Everything else absolute is one of the app's own bundled files. The game
 // fetches '/img/focus/target-selected-*.gif' for its bytes, to replay the
 // burst that confirms a picked target from an object URL; sent to the guild it
-// comes back through proxy_fetch, which decodes every body as UTF-8 text, so
-// the blob is mangled and the burst never plays.
+// came back through proxy_fetch, which then decoded every body as UTF-8 text,
+// so the blob was mangled and the burst never played. (Bytes now survive the
+// proxy — fetchproxy.test.mjs — but a bundled file still must not leave.)
 
 {
   console.log("the app's own files stay on the app's own origin");

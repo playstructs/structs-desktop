@@ -119,6 +119,19 @@ pub struct RaidRow {
     /// abandoned row rather than a running raid. Listed, flagged, sorted last;
     /// never silently dropped, because a row vanishing looks like a bug.
     pub stale: bool,
+    /// What the Raid card needs to draw the game's shield readout
+    /// (frontend/shield-readout.js). Read for LIVE rows only — it costs three
+    /// more entity reads, and an ended raid has no shield story to tell.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub shield: Option<RaidShield>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, PartialEq)]
+pub struct RaidShield {
+    pub planetary_shield: u64,
+    pub block_start_raid: u64,
+    /// [`crate::mcp::spectator::planet_defenses_secure`]; `None` = could not tell.
+    pub defenses_secure: Option<bool>,
 }
 
 impl RaidRow {
@@ -229,6 +242,7 @@ pub fn reduce_raids(rows: &[Value], now_ms: f64, stale_after_ms: f64) -> Vec<Rai
             our_side: OurSide::None,
             live: active && fresh,
             stale: !terminal && !fresh,
+            shield: None,
         };
 
         // Keep the newest row per planet.
@@ -319,11 +333,27 @@ async fn enrich_row(client: crate::mcp::cosmos_client::CosmosClient, mut row: Ra
         }
     );
 
+    let planet = planet.ok();
     row.defender = planet
-        .ok()
+        .as_ref()
         .and_then(|v| text(v.get("Planet").and_then(|p| p.get("owner"))));
     row.attacker = fleet.and_then(|v| text(v.get("Fleet").and_then(|f| f.get("owner"))));
     row.our_side = classify_side(row.attacker.as_deref(), row.defender.as_deref());
+    if row.live {
+        if let (Some(p), Some(owner)) = (planet.as_ref(), row.defender.clone()) {
+            let attr = |k: &str| {
+                p.get("planetAttributes")
+                    .and_then(|a| a.get(k))
+                    .and_then(crate::mcp::spectator::num_u64)
+                    .unwrap_or(0)
+            };
+            row.shield = Some(RaidShield {
+                planetary_shield: attr("planetaryShield"),
+                block_start_raid: attr("blockStartRaid"),
+                defenses_secure: crate::mcp::spectator::planet_defenses_secure(&client, &owner, &planet_id).await,
+            });
+        }
+    }
     row
 }
 
@@ -378,6 +408,8 @@ pub async fn mcp_raids() -> Result<Value, String> {
         // Surfaced rather than silently applied: a capped list that says
         // nothing reads as a complete one.
         "unidentified": skipped,
+        // The head the live rows' shield countdowns are measured from.
+        "height": crate::game_state::GAME_STATE.read().map(|g| g.current_block_height).unwrap_or(0),
         "stale_after_ms": STALE_AFTER_MS,
         "fetched_at_ms": now_ms,
     }))
@@ -1648,12 +1680,12 @@ mod tests {
             RaidRow {
                 planet_id: "2-100".into(), fleet_id: None, status: "ongoing".into(),
                 updated_ms: NOW, seized_ore: 0.0, defender: None, attacker: None,
-                our_side: OurSide::None, live: true, stale: false,
+                our_side: OurSide::None, live: true, stale: false, shield: None,
             },
             RaidRow {
                 planet_id: "2-200".into(), fleet_id: None, status: "ongoing".into(),
                 updated_ms: NOW - 60_000.0, seized_ore: 0.0, defender: None, attacker: None,
-                our_side: OurSide::Defender, live: true, stale: false,
+                our_side: OurSide::Defender, live: true, stale: false, shield: None,
             },
         ];
         sort_raids(&mut rows);
