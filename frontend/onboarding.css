@@ -259,3 +259,39 @@
   .ob-who-row { grid-template-columns: minmax(0, 1fr) repeat(2, auto); }
   .ob-who-row > :nth-child(2) { display: none; }
 }
+
+/* The pirate funnel: four stages, each a part of the one above, the bar
+   centred so the shape narrows like the funnel it is. */
+.ob-overview-head { justify-content: flex-start; }
+.ob-fg { display: flex; flex-direction: column; gap: var(--spacing-xs); }
+.ob-fg-row, .ob-fg-step { display: grid; grid-template-columns: minmax(18ch, 1fr) minmax(0, 2.4fr) minmax(16ch, .8fr); gap: var(--spacing-lg); align-items: center; }
+.ob-fg-step { min-height: var(--spacing-xxl); }
+.ob-fg-conv { display: flex; justify-content: center; align-items: center; gap: var(--spacing-sm); color: var(--text-body); }
+.ob-fg-conv > i { color: var(--text-hint); }
+.ob-fg-rate { color: var(--accent-primary-active); }
+.ob-fg-name { display: flex; flex-direction: column; min-width: 0; }
+.ob-fg-stage { font-family: 'ExtremeHazard', sans-serif; font-size: 8px; line-height: var(--spacing-xl); text-transform: uppercase; color: var(--text-hint); }
+.ob-fg-label { color: var(--text-body); }
+.ob-fg-track { display: flex; justify-content: center; align-items: center; height: calc(var(--spacing-xxxl) + var(--spacing-md)); background: var(--surface-default); }
+.ob-fg-bar { height: 100%; display: flex; align-items: center; justify-content: center; }
+.ob-fg-awareness { border: 1px dashed var(--border-strong); background: var(--page-background); }
+.ob-fg-what { white-space: normal; }
+.ob-fg-acquisition { background: var(--accent-secondary); }
+.ob-fg-activation { background: var(--accent-primary); }
+.ob-fg-retention { background: var(--text-player-primary); }
+.ob-fg-note { color: var(--text-hint); }
+.ob-fg-num { display: flex; flex-direction: column; align-items: flex-end; min-width: 0; }
+.ob-fg-value { font-family: 'ExtremeHazard', sans-serif; font-size: 32px; line-height: calc(var(--spacing-xxxl) + var(--spacing-md)); color: var(--text-body); }
+.ob-fg-row.is-missing .ob-fg-value { color: var(--text-hint); }
+.ob-fg-split { display: grid; grid-template-columns: repeat(auto-fit, minmax(36ch, 1fr)); gap: var(--spacing-xl); }
+.ob-fg-col { display: flex; flex-direction: column; gap: var(--spacing-sm); min-width: 0; }
+.ob-fg-col .ob-fg-row, .ob-fg-col .ob-fg-step { grid-template-columns: minmax(12ch, 1fr) minmax(0, 1.4fr) minmax(7ch, .5fr); }
+.ob-fg-col .ob-fg-what, .ob-fg-col .ob-fg-conv .ob-sub { display: none; }
+.ob-fg-col .ob-fg-value { font-family: 'DirectiveZero', sans-serif; font-size: 16px; line-height: var(--spacing-xxl); }
+@container ob (max-width: 600px) {
+  .ob-fg-row { grid-template-columns: minmax(0, 1fr) auto; gap: var(--spacing-xs) var(--spacing-md); }
+  .ob-fg-step { grid-template-columns: minmax(0, 1fr); }
+  .ob-fg-step > span:empty { display: none; }
+  .ob-fg-track { grid-column: 1 / -1; grid-row: 2; height: var(--spacing-xxl); }
+  .ob-fg-what { display: none; }
+}

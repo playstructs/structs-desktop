@@ -69,12 +69,12 @@
   /* A split by tutorial outcome wears the outcome colours, not swatches. */
   var OUTCOME_SEG = { finished: 'ob-seg-completed', quit: 'ob-seg-left', skipped: 'ob-seg-declined', none: 'ob-life-never' };
   var STATS = [['mined', 'Ore mined', 'ore'], ['refined', 'Alpha refined', 'alpha'], ['planets', 'Planets completed', 'count'],
-    ['raids_initiated', 'Raids launched', 'count'], ['raids_won', 'Raids won', 'count']];
+    ['raids_initiated', 'Raids initiated', 'count'], ['raids_won', 'Raids won', 'count']];
   /* [key, label, kind]: `step` converts from the step above; `side` happens
    * apart from the path (a planet is not needed to raid); `now` is where
    * players are, not a step. */
   var MILESTONES = [['signed_up', 'Signed up', 'step'], ['acted', 'Acted', 'step'], ['mined', 'Mined', 'step'], ['refined', 'Refined', 'step'],
-    ['raided', 'Launched a raid', 'side'], ['activated', 'Activated', 'step'], ['planet', 'Completed a planet', 'side'], ['active', 'Active this week', 'now']];
+    ['raided', 'Initiated a raid', 'side'], ['activated', 'Activated', 'step'], ['planet', 'Completed a planet', 'side'], ['active', 'Active this week', 'now']];
   var WINDOWS = [{ key: '1', label: '24 hours' }, { key: '7', label: '7 days' }, { key: '30', label: '30 days' }];
   var WIN_WORD = { 1: 'day', 7: '7 days', 30: '30 days' };
   var ACTIVE_NAME = { 1: 'Active today', 7: 'Active this week', 30: 'Active this month' };
@@ -87,23 +87,28 @@
    * match the tiles. */
   var TRENDS = [
     ['signups_started', 'Signup opens', 'record', 'level', 'Acquisition'], ['signed_up', 'Finished signups', 'record', 'level', 'Acquisition'],
-    ['new', 'New players', 'rebuilt', 'daily', 'Acquisition'], ['humans', 'Players', 'record', 'level', 'Acquisition'],
+    ['new', 'Signups', 'rebuilt', 'daily', 'Acquisition'], ['humans', 'Players', 'record', 'level', 'Acquisition'],
     ['tutorial_players', 'Tutorial players', 'record', 'level', 'Onboarding'], ['tutorial_completed', 'Tutorial finishers', 'record', 'level', 'Onboarding'],
-    ['activations', 'Newly activated', 'rebuilt', 'daily', 'Activation'], ['activated_total', 'Activated', 'rebuilt', 'level', 'Activation'],
+    ['activations', 'Activated', 'rebuilt', 'daily', 'Activation'], ['activated_total', 'Activated, all time', 'rebuilt', 'level', 'Activation'],
     ['activated', 'Acted at least once', 'record', 'level', 'Activation'], ['mined', 'Mined at least once', 'record', 'level', 'Activation'],
-    ['refined', 'Refined at least once', 'record', 'level', 'Activation'], ['raided', 'Launched a raid at least once', 'record', 'level', 'Activation'],
+    ['refined', 'Refined at least once', 'record', 'level', 'Activation'], ['raided', 'Initiated a raid at least once', 'record', 'level', 'Activation'],
     ['active_1d', 'Active today', 'record', 'level', 'Retention'], ['active_7d', 'Active this week', 'record', 'level', 'Retention'],
     ['active_30d', 'Active this month', 'record', 'level', 'Retention'], ['miners_7d', 'Mined this week', 'rebuilt', 'level', 'Retention'],
-    ['refiners_7d', 'Refined this week', 'rebuilt', 'level', 'Retention'], ['raiders_7d', 'Launched a raid this week', 'rebuilt', 'level', 'Retention'],
+    ['refiners_7d', 'Refined this week', 'rebuilt', 'level', 'Retention'], ['raiders_7d', 'Initiated a raid this week', 'rebuilt', 'level', 'Retention'],
     ['replicants', 'Replicants', 'record', 'level', 'Population']];
   function trendDef(k) { return TRENDS.filter(function (m) { return m[0] === k; })[0]; }
   /* What each figure means: on hover wherever it is drawn, and listed on Data. */
   var DEFS = {
-    'Signup opens': 'Signup sessions opened on any guild server. Nothing records visitors before that, so this is the top of the funnel.',
+    'Unique visitors': 'Distinct people who loaded the game. Not recorded yet: the game client keeps a browser id, but only sends it once someone opens signup.',
+    'Signups': 'Players who signed up: human players created on chain.',
+    'Active users': 'Activated players who did anything on chain within the window.',
+    'Anyone active': 'Every player who did anything on chain within the window, activated or not.',
+    'Signups who activated': 'Of the players who signed up in the window, those who have activated.',
+    'Signup opens': 'Signup sessions opened on any guild server: the nearest measured thing to visitors.',
     'Finished signups': 'Signup sessions that reached the end of signup (the employee record).',
     'New players': 'Human players created on chain.',
     'Players': 'Human players on chain in scope: replicants and excluded players left out unless asked for.',
-    'Activated': 'Refined alpha AND launched a raid. Dated at the later of the two firsts.',
+    'Activated': 'Refined alpha AND initiated a raid. Dated at the later of the two firsts.',
     'Active': 'Did anything on chain within the window.',
     'Time to activate': 'Typical (median) time from signup to activation.',
     'Take-up': 'New players offered Combat Training who started it.',
@@ -437,17 +442,19 @@
     return null;
   }
   /* [stage, label, value(seg, days) → [main, sub], chart metric, spark key, note]. `days` is '1'|'7'|'30'|'all'. */
+  /* The pirate stages, in the owner's words (2026-11-20):
+   *   Awareness   — unique visitors (not recorded by any guild yet)
+   *   Acquisition — signups (players created on chain)
+   *   Activation  — refined alpha AND initiated a raid
+   *   Retention   — active users: activated players who acted in the window
+   * [stage, label, value(seg, days) → [main, sub], chart metric, spark key, note]. `days` is '1'|'7'|'30'|'all'. */
   var AARRR = [
-    ['Awareness', 'Signup opens', function (s, w) { var x = srvWin(s, w); return x ? [x.started, x.partial ? 'since ' + x.partial : null] : [null]; }, 'signups_started', 'h:signups_started'],
-    ['Acquisition', 'Finished signups', function (s, w) { var x = srvWin(s, w); return x ? [x.signed_up, x.partial ? 'since ' + x.partial : ofShare(x.signed_up, x.started)] : [null]; }, 'signed_up', 'h:signed_up'],
-    ['Acquisition', 'New players', function (s, w) { return [w === 'all' ? allOf(s).players : winOf(s, w).new]; }, 'new', 'p:new'],
-    ['Activation', 'Refined alpha', function (s, w) { return [w === 'all' ? allOf(s).refiners : winOf(s, w).refiners]; }, 'refiners_7d', 'p:refiners_7d'],
-    ['Activation', 'Launched a raid', function (s, w) { return [w === 'all' ? allOf(s).raiders : winOf(s, w).raiders]; }, 'raiders_7d', 'p:raiders_7d'],
+    ['Awareness', 'Unique visitors', function () { return [null]; }, null, null, 'not recorded yet'],
+    ['Acquisition', 'Signups', function (s, w) { return [w === 'all' ? allOf(s).players : winOf(s, w).new]; }, 'new', 'p:new'],
     ['Activation', 'Activated', function (s, w) { var a = allOf(s); return w === 'all' ? [a.activated, ofShare(a.activated, a.players)] : [winOf(s, w).activated]; }, 'activated_total', 'p:activated_total'],
-    ['Activation', 'New players activated', function (s, w) { if (w === 'all') return [null]; var x = winOf(s, w); return [x.cohort, ofShare(x.cohort, x.new)]; }, 'activations', 'p:activations'],
-    ['Retention', 'Active', function (s, w) { return [w === 'all' ? allOf(s).acted : winOf(s, w).active, w === 'all' ? 'ever acted' : null]; }, 'active_30d', 'h:mau'],
-    ['Retention', 'Activated and active', function (s, w) { if (w === 'all') return [null]; var x = winOf(s, w); return [x.active_activated, ofShare(x.active_activated, allOf(s).activated)]; }, null, null],
-    ['Referral', 'Referred players', function () { return [null]; }, null, null, 'not tracked'],
+    ['Activation', 'Signups who activated', function (s, w) { if (w === 'all') return [null]; var x = winOf(s, w); return [x.cohort, ofShare(x.cohort, x.new)]; }, 'activations', null],
+    ['Retention', 'Active users', function (s, w) { if (w === 'all') return [null]; var x = winOf(s, w); return [x.active_activated, ofShare(x.active_activated, allOf(s).activated)]; }, null, null],
+    ['Retention', 'Anyone active', function (s, w) { return [w === 'all' ? allOf(s).acted : winOf(s, w).active, w === 'all' ? 'ever acted' : null]; }, 'active_30d', 'h:mau'],
   ];
   /* A series for a trend line: the segment's rebuilt one, or the daily
    * record's (every guild's humans), which only describes the plain population. */
@@ -1100,21 +1107,27 @@
       } };
     },
     newPlayers: function (ctx) {
-      return { key: 'new', stage: 'Acquisition', label: 'New players', count: true, go: function () { ctx.go('acquisition'); }, get: function (s) {
+      return { key: 'new', stage: 'Acquisition', label: 'Signups', count: true, def: DEFS.Signups, go: function () { ctx.go('acquisition'); }, get: function (s) {
         var v = winOf(s, ctx.win).new;
         return { value: int(v), raw: v, delta: deltaFor(v, seriesOf(s).new, ctx.win, 'daily'), spark: sparkOf(ctx.d, s, 'p:new') };
       } };
     },
     activated: function (ctx) {
-      return { key: 'activated', stage: 'Activation', label: 'Newly activated', cls: 'ok', count: true, def: DEFS.Activated, go: function () { ctx.go('engagement', 'activation'); }, get: function (s) {
+      return { key: 'activated', stage: 'Activation', label: 'Activated', cls: 'ok', count: true, def: DEFS.Activated, go: function () { ctx.go('engagement', 'activation'); }, get: function (s) {
         var x = winOf(s, ctx.win);
-        return { value: int(x.activated), raw: x.activated, sub: x.cohort != null ? int(x.cohort) + ' joined in the window' : null, delta: deltaFor(x.activated, seriesOf(s).activations, ctx.win, 'daily'), spark: sparkOf(ctx.d, s, 'p:activations') };
+        return { value: int(x.activated), raw: x.activated, sub: x.cohort != null ? int(x.cohort) + ' of them signed up in the window' : null, delta: deltaFor(x.activated, seriesOf(s).activations, ctx.win, 'daily'), spark: sparkOf(ctx.d, s, 'p:activations') };
       } };
     },
     active: function (ctx) {
       return { key: 'active', stage: 'Retention', label: activeName(ctx.win), cls: 'ok', def: DEFS.Active, go: function () { ctx.go('engagement', 'retention'); }, get: function (s) {
         var x = winOf(s, ctx.win), key = { 1: 'dau', 7: 'wau', 30: 'mau' }[ctx.win];
         return { value: int(x.active), raw: x.active, sub: shareOf(x.active, allOf(s).players, 'players'), delta: deltaFor(x.active, histSeries(ctx.d, key), ctx.win, 'level'), spark: sparkOf(ctx.d, s, 'h:' + key, isPlain(ctx.d)) };
+      } };
+    },
+    activeUsers: function (ctx) {
+      return { key: 'active_users', stage: 'Retention', label: 'Active users', count: true, def: DEFS['Active users'], go: function () { ctx.go('engagement', 'retention'); }, get: function (s) {
+        var x = winOf(s, ctx.win), a = allOf(s);
+        return { value: int(x.active_activated), raw: x.active_activated, sub: shareOf(x.active_activated, a.activated, 'activated players') };
       } };
     },
     players: function (ctx) {
@@ -1132,7 +1145,79 @@
     },
   };
 
-  // ── OVERVIEW: the headline figures, what needs a look, and the whole path ──
+  // ── THE PIRATE FUNNEL: every stage a part of the one above it ──
+  /* Awareness → Acquisition → Activation → Retention over everyone who has
+   * signed up, retention judged over the chosen window. Each stage is a
+   * subset of the one before, so every percentage is "of the stage above". */
+  function funnelStages(seg, win) {
+    var a = allOf(seg), x = winOf(seg, win);
+    return [
+      { key: 'awareness', stage: 'Awareness', label: 'Unique visitors', value: null, missing: true, what: 'people who found the game' },
+      { key: 'acquisition', stage: 'Acquisition', label: 'Signups', value: a.players, what: 'players who signed up' },
+      { key: 'activation', stage: 'Activation', label: 'Activated', value: a.activated, what: 'refined alpha and initiated a raid' },
+      { key: 'retention', stage: 'Retention', label: 'Active users', value: x.active_activated, what: 'activated, and active ' + ({ 1: 'today', 7: 'this week', 30: 'this month' }[win] || 'in ' + win + 'd') },
+    ];
+  }
+  function funnelGraph(ctx, seg) {
+    var rows = funnelStages(seg, ctx.win);
+    var top = rows.reduce(function (m, r) { return Math.max(m, r.value || 0); }, 0);
+    var g = H.el('div', 'ob-fg');
+    rows.forEach(function (r, i) {
+      /* Between two stages, the step itself: how many of the one above made it. */
+      if (i > 0) {
+        var up = rows[i - 1], step = H.el('div', 'ob-fg-step');
+        step.setAttribute('data-step', up.key + '>' + r.key);
+        step.appendChild(H.el('span', null, ''));
+        var mid = H.el('span', 'ob-fg-conv');
+        mid.appendChild(H.el('i', H.iconClass('icon-caret-down', 'sui-icon-sm')));
+        if (up.missing || r.missing) mid.appendChild(H.el('span', 'ob-sub', 'not measurable until visitors are recorded'));
+        else {
+          var rate = up.value > 0 ? r.value / up.value : null;
+          mid.appendChild(H.el('span', 'ob-fg-rate', pct1(rate)));
+          mid.appendChild(H.el('span', 'ob-sub', ' of ' + up.label.toLowerCase() + ' ' + { activation: 'activated', retention: 'are active users' }[r.key]));
+        }
+        step.appendChild(mid);
+        step.appendChild(H.el('span', null, ''));
+        g.appendChild(step);
+      }
+      var row = H.el('div', 'ob-fg-row' + (r.missing ? ' is-missing' : ''));
+      row.setAttribute('data-funnel', r.key);
+      row.title = DEFS[r.label] || '';
+      var name = H.el('div', 'ob-fg-name');
+      name.appendChild(H.el('span', 'ob-fg-stage', r.stage));
+      name.appendChild(H.el('span', 'ob-fg-label', r.label));
+      name.appendChild(H.el('span', 'ob-sub ob-fg-what', r.what));
+      row.appendChild(name);
+      var track = H.el('div', 'ob-fg-track');
+      var bar = H.el('div', 'ob-fg-bar ob-fg-' + r.key);
+      bar.style.width = r.missing ? '100%' : Math.max(1, (ratio(r.value, top) || 0) * 100) + '%';
+      if (r.missing) bar.appendChild(H.el('span', 'ob-fg-note', 'not recorded yet'));
+      track.appendChild(bar);
+      row.appendChild(track);
+      var num = H.el('div', 'ob-fg-num');
+      num.appendChild(H.el('span', 'ob-fg-value', r.missing ? '—' : int(r.value)));
+      row.appendChild(num);
+      g.appendChild(row);
+    });
+    return g;
+  }
+  function funnelBlock(ctx) {
+    var segs = ctx.segs;
+    var b = block('Pirate funnel', { key: 'funnel', scope: 'Everyone who signed up · active ' + ({ 1: 'today', 7: 'this week', 30: 'this month' }[ctx.win]),
+      def: 'Each stage is part of the one above it. Awareness waits on visitor counts, which no guild records yet.' });
+    if (segs.length === 1) { b.appendChild(funnelGraph(ctx, segs[0])); return b; }
+    var grid1 = H.el('div', 'ob-fg-split');
+    segs.forEach(function (s, i) {
+      var col = H.el('div', 'ob-fg-col');
+      col.appendChild(segLabel(s, i));
+      col.appendChild(funnelGraph(ctx, s));
+      grid1.appendChild(col);
+    });
+    b.appendChild(grid1);
+    return b;
+  }
+
+  // ── OVERVIEW: the funnel, the period's movement, what needs a look ──
   function signalsBlock(ctx) {
     var list = signalsOf(ctx.d);
     if (!list.length) return null;
@@ -1192,7 +1277,11 @@
       if (iss.length && !reading(d)) box.appendChild(actionBtn(plural(iss.length, 'issue', 'issues') + ' · open Data', function () { ctx.go('data'); }, 'to_data'));
       return box;
     }
-    box.appendChild(kpi(ctx, [K.players(ctx), K.active(ctx), K.newPlayers(ctx), K.activated(ctx), K.opens(ctx), K.finished(ctx)], windowStrip(ctx), WIN_WORD[ctx.win]));
+    var head = H.el('div', 'ob-kpi-head ob-overview-head');
+    head.appendChild(windowStrip(ctx));
+    box.appendChild(head);
+    box.appendChild(funnelBlock(ctx));
+    box.appendChild(kpi(ctx, [K.newPlayers(ctx), K.activated(ctx), K.activeUsers(ctx)], chip('Last ' + WIN_WORD[ctx.win]), WIN_WORD[ctx.win]));
     var two = H.el('div', 'ob-two');
     var sig = signalsBlock(ctx);
     if (sig) two.appendChild(sig);
@@ -1200,7 +1289,7 @@
     j.appendChild(journeyTable(segs));
     two.appendChild(j);
     box.appendChild(two);
-    var st = block('Stages', { key: 'stages', scope: segs.length === 1 ? 'Every window' : WIN_WORD[ctx.win], chart: function () { openChart(['new', 'activations', 'refiners_7d', 'raiders_7d']); } });
+    var st = block('Pirate metrics by window', { key: 'stages', scope: segs.length === 1 ? 'Every window' : WIN_WORD[ctx.win], chart: function () { openChart(['new', 'activations', 'refiners_7d', 'raiders_7d']); } });
     st.appendChild(segs.length === 1 ? aarrrTable(d, segs[0]) : aarrrCompare(segs, ctx.win));
     box.appendChild(st);
     return box;
@@ -1508,7 +1597,7 @@
   }
   /* Players since telemetry began, by what they did with Combat Training.
    * A group chose its outcome, so this describes, it does not prove cause. */
-  var IMPACT = [['acted', 'Acted'], ['refined', 'Refined'], ['raided', 'Launched a raid'], ['activated', 'Activated'], ['active_7d', 'Active this week'], ['active_30d', 'Active this month']];
+  var IMPACT = [['acted', 'Acted'], ['refined', 'Refined'], ['raided', 'Initiated a raid'], ['activated', 'Activated'], ['active_7d', 'Active this week'], ['active_30d', 'Active this month']];
   function viewImpact(ctx) {
     var d = ctx.d, box = H.el('div', 'ob-view');
     var rows = (d.tutorial_impact || []).filter(function (r) { return r.players > 0 || r.key === 'all'; });
@@ -2090,9 +2179,9 @@
       ['Active today', winOf(seg, 1).active, last(hs.dau)],
       ['Active this week', winOf(seg, 7).active, last(hs.wau)],
       ['Active this month', winOf(seg, 30).active, last(hs.mau)],
-      ['New players, 7 days', winOf(seg, 7).new, tail(ps.new, 7)],
-      ['New players, 30 days', winOf(seg, 30).new, tail(ps.new, 30)],
-      ['Newly activated, 30 days', winOf(seg, 30).activated, tail(ps.activations, 30)],
+      ['Signups, 7 days', winOf(seg, 7).new, tail(ps.new, 7)],
+      ['Signups, 30 days', winOf(seg, 30).new, tail(ps.new, 30)],
+      ['Activated, 30 days', winOf(seg, 30).activated, tail(ps.activations, 30)],
     ].filter(function (r) { return r[1] != null && r[2] != null; }).map(function (r) {
       var diff = r[2] - r[1], ok = Math.abs(diff) <= Math.max(1, Math.abs(r[1]) * 0.02);
       return { label: r[0], chain: r[1], record: r[2], diff: diff, ok: ok };
@@ -2311,6 +2400,6 @@
 
   T.onboarding = { phaseOf: phaseOf, phaseRows: phaseRows, heatBand: heatBand, issuesOf: issuesOf, runKind: runKind, stepLabel: stepLabel, pct: pct, share: share, topKeys: topKeys,
     headline: headline, tutorialOf: tutorialOf, trendChange: trendChange, trendPoints: trendPoints, ofShare: ofShare, uses: uses, sparkOf: sparkOf, bucketLabel: bucketLabel,
-    fmtKind: fmtKind, argsOf: argsOf, parseArgs: parseArgs, wordOf: wordOf, journeyRows: journeyRows, signalsOf: signalsOf, deltaOf: deltaOf, increments: increments,
+    fmtKind: fmtKind, argsOf: argsOf, funnelStages: funnelStages, parseArgs: parseArgs, wordOf: wordOf, journeyRows: journeyRows, signalsOf: signalsOf, deltaOf: deltaOf, increments: increments,
     pageOf: pageOf, viewOf: viewOf, runWeeks: runWeeks, deltaFor: deltaFor, shareOf: shareOf, reconcileRows: reconcileRows, tsvOf: tsvOf, orderSteps: orderSteps, weekStart: weekStart, durWords: durWords, sourceRows: sourceRows, worstRates: worstRates };
 })();
