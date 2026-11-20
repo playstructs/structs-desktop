@@ -21,6 +21,7 @@
 use serde_json::{json, Value};
 
 use crate::mcp::cosmos_client::CosmosClient;
+use crate::mcp::founders::Signer;
 use crate::mcp::guild_admin::bits;
 use crate::mcp::loop_util::parse_f64 as num;
 use crate::mcp::send_guard::signer_lacks;
@@ -186,16 +187,6 @@ fn connected_players(substation_id: &str) -> Option<Vec<Connected>> {
     })
 }
 
-fn primary_identity() -> Result<(String, String), String> {
-    let gs = crate::game_state::GAME_STATE.read().map_err(|e| e.to_string())?;
-    let pid = gs.player_id.clone().unwrap_or_default();
-    let addr = gs.wallet_address.clone().unwrap_or_default();
-    if pid.is_empty() || addr.is_empty() {
-        return Err("primary identity not synced yet".into());
-    }
-    Ok((pid, addr))
-}
-
 /// The station's numbers, from its LCD entity.
 struct Station {
     owner: String,
@@ -270,7 +261,12 @@ async fn standing(client: &CosmosClient, me: &str, substation_id: &str, owner: &
 /// holds a direct grant on — each with its share, cap and whether you can
 /// change it.
 pub async fn list() -> Result<Value, String> {
-    let (me, _) = primary_identity()?;
+    list_as(&Signer::primary()?).await
+}
+
+/// [`list`] for any signer — a founder sees its guild's substations.
+pub async fn list_as(signer: &Signer) -> Result<Value, String> {
+    let me = signer.player_id.clone();
     let client = CosmosClient::new();
     let (guild, my_rank) = my_guild(&client, &me).await;
     let granted: Vec<String> = client
@@ -321,8 +317,12 @@ pub async fn list() -> Result<Value, String> {
 /// Check a substation action without signing: permissions, the share
 /// before/after, and who it would knock offline.
 pub async fn preview(substation_id: &str, action: &str, args: &Value) -> Result<Value, String> {
+    preview_as(&Signer::primary()?, substation_id, action, args).await
+}
+
+pub async fn preview_as(signer: &Signer, substation_id: &str, action: &str, args: &Value) -> Result<Value, String> {
     let plan = plan(substation_id, action, args)?;
-    let (me, address) = primary_identity()?;
+    let (me, address) = (signer.player_id.clone(), signer.address.clone());
     let client = CosmosClient::new();
     let v = client.query_entity("substation", substation_id).await.map_err(|e| format!("substation {substation_id}: {e}"))?;
     let st = Station::of(&v);
@@ -365,6 +365,7 @@ pub async fn preview(substation_id: &str, action: &str, args: &Value) -> Result<
     }
     Ok(json!({
         "ok": problems.is_empty(),
+        "signed_as": signer.describe(),
         "problems": problems,
         "warnings": warnings,
         "substation_id": substation_id,
@@ -386,13 +387,17 @@ pub async fn preview(substation_id: &str, action: &str, args: &Value) -> Result<
 
 /// Sign a substation action, after re-running the preview.
 pub async fn execute(app: &tauri::AppHandle, substation_id: &str, action: &str, args: &Value) -> Result<Value, String> {
-    let pv = preview(substation_id, action, args).await?;
+    execute_as(app, &Signer::primary()?, substation_id, action, args).await
+}
+
+pub async fn execute_as(app: &tauri::AppHandle, signer: &Signer, substation_id: &str, action: &str, args: &Value) -> Result<Value, String> {
+    let pv = preview_as(signer, substation_id, action, args).await?;
     if pv.get("ok").and_then(|v| v.as_bool()) != Some(true) {
         let why: Vec<&str> = pv["problems"].as_array().map(|a| a.iter().filter_map(|v| v.as_str()).collect()).unwrap_or_default();
         return Err(format!("refused: {}", why.join("; ")));
     }
     let plan = plan(substation_id, action, args)?;
-    let res = crate::mcp::tx_retry::sign_as_primary(app, plan.type_url, plan.payload, format!("substation:{action}")).await?;
+    let res = crate::mcp::tx_retry::sign_once(app, signer.index, plan.type_url, plan.payload, format!("substation:{action}")).await?;
     crate::mcp::board_feed::push(app, crate::mcp::board_feed::Severity::Notice, "energy", plan.summary.clone());
     Ok(json!({
         "ok": true,

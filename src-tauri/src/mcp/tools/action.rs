@@ -90,8 +90,13 @@ pub async fn execute(
         "guild" => action_guild(app_handle, &params.args).await,
         "provider" => action_provider(app_handle, &params.args).await,
         "substation" => action_substation(app_handle, &params.args).await,
+        "treasury" => action_treasury(app_handle, &params.args).await,
+        "founder" => match crate::mcp::founders::op(&params.args).await {
+            Ok(v) => vec![Content::text(serde_json::to_string_pretty(&v).unwrap_or_default())],
+            Err(e) => crate::mcp::handler::fail(format!("founder failed: {e}")),
+        },
         other => vec![Content::text(format!(
-            "Unknown action '{}'. Available: explore, mine, refine, build, activate, deactivate, attack, defend, move_fleet, transfer, deploy, raid, update_primary_reactor, rank_quote, rank_purchase, found_guild, guild, provider, substation, resync",
+            "Unknown action '{}'. Available: explore, mine, refine, build, activate, deactivate, attack, defend, move_fleet, transfer, deploy, raid, update_primary_reactor, rank_quote, rank_purchase, found_guild, founder, guild, treasury, provider, substation, resync",
             other
         ))],
     }
@@ -870,10 +875,14 @@ async fn action_found_guild(app_handle: &tauri::AppHandle, args: &Value) -> Vec<
     // power, cost, steps — and `confirm:true` runs it (resumable). `status`
     // reads the saved plan. The bare three-field form below stays for
     // agents that already speak it.
-    if args.get("name").is_some() || s("op") == "status" || s("op") == "resume" {
+    if args.get("name").is_some() || matches!(s("op").as_str(), "status" | "resume" | "list" | "abandon") {
+        // `label` picks the plan: each founder context keeps its own.
+        let label = s("label");
         let res = match s("op").as_str() {
-            "status" => crate::mcp::guild_founding::get(),
-            "resume" => crate::mcp::guild_founding::start(app_handle.clone(), None).await,
+            "status" => crate::mcp::guild_founding::get_for(&label),
+            "list" => crate::mcp::guild_founding::list_plans(),
+            "abandon" => crate::mcp::guild_founding::abandon_for(&label),
+            "resume" => crate::mcp::guild_founding::start_for(app_handle.clone(), None, &label).await,
             _ => {
                 let choices: crate::mcp::guild_founding::Choices = serde_json::from_value(args.clone()).unwrap_or_default();
                 if args.get("confirm").and_then(|v| v.as_bool()).unwrap_or(false) {
@@ -914,16 +923,25 @@ async fn action_guild(app_handle: &tauri::AppHandle, args: &Value) -> Vec<Conten
     let op = args.get("op").and_then(|v| v.as_str()).unwrap_or("overview");
     let guild_id = args.get("guild_id").and_then(|v| v.as_str()).map(String::from);
     let confirmed = args.get("confirm").and_then(|v| v.as_bool()).unwrap_or(false);
+    // `as: "<label>"` works as that founder; absent = the primary.
+    let signer = match crate::mcp::founders::signer_from_args(args) {
+        Ok(s) => s,
+        Err(e) => return crate::mcp::handler::fail(format!("guild {op} failed: {e}")),
+    };
     let res = match op {
-        "overview" => crate::mcp::guild_admin::overview(guild_id).await,
+        "overview" => crate::mcp::guild_admin::overview_as(&signer, guild_id).await,
+        "join_proxy_challenge" => match args.get("address").and_then(|v| v.as_str()) {
+            Some(a) => crate::mcp::guild_admin::join_proxy_challenge_for(&signer, a).await,
+            None => Err("address is required".into()),
+        },
         "members" => crate::mcp::guild_membership::board(guild_id).await,
         "inbox" => crate::mcp::guild_membership::inbox().await,
         "door" => match guild_id {
             Some(g) => crate::mcp::guild_membership::door_for(g).await,
             None => Err("guild_id required".into()),
         },
-        _ if confirmed => crate::mcp::guild_admin::execute(app_handle, guild_id, op, args).await,
-        _ => crate::mcp::guild_admin::preview(guild_id, op, args).await.map(|mut p| {
+        _ if confirmed => crate::mcp::guild_admin::execute_as(app_handle, &signer, guild_id, op, args).await,
+        _ => crate::mcp::guild_admin::preview_as(&signer, guild_id, op, args).await.map(|mut p| {
             p["note"] = json!("preview only — send confirm:true to sign it");
             p
         }),
@@ -940,13 +958,17 @@ async fn action_guild(app_handle: &tauri::AppHandle, args: &Value) -> Vec<Conten
 async fn action_provider(app_handle: &tauri::AppHandle, args: &Value) -> Vec<Content> {
     let op = args.get("op").and_then(|v| v.as_str()).unwrap_or("list");
     let confirmed = args.get("confirm").and_then(|v| v.as_bool()).unwrap_or(false);
+    let signer = match crate::mcp::founders::signer_from_args(args) {
+        Ok(s) => s,
+        Err(e) => return crate::mcp::handler::fail(format!("provider {op} failed: {e}")),
+    };
     let res = if op == "list" {
-        crate::mcp::providers::list().await
+        crate::mcp::providers::list_as(&signer).await
     } else {
         match args.get("provider_id").and_then(|v| v.as_str()) {
             None => Err("provider_id required (e.g. 10-5)".to_string()),
-            Some(id) if confirmed => crate::mcp::providers::execute(app_handle, id, op, args).await,
-            Some(id) => crate::mcp::providers::preview(id, op, args).await.map(|mut p| {
+            Some(id) if confirmed => crate::mcp::providers::execute_as(app_handle, &signer, id, op, args).await,
+            Some(id) => crate::mcp::providers::preview_as(&signer, id, op, args).await.map(|mut p| {
                 p["note"] = json!("preview only — send confirm:true to sign it");
                 p
             }),
@@ -964,13 +986,17 @@ async fn action_provider(app_handle: &tauri::AppHandle, args: &Value) -> Vec<Con
 async fn action_substation(app_handle: &tauri::AppHandle, args: &Value) -> Vec<Content> {
     let op = args.get("op").and_then(|v| v.as_str()).unwrap_or("list");
     let confirmed = args.get("confirm").and_then(|v| v.as_bool()).unwrap_or(false);
+    let signer = match crate::mcp::founders::signer_from_args(args) {
+        Ok(s) => s,
+        Err(e) => return crate::mcp::handler::fail(format!("substation {op} failed: {e}")),
+    };
     let res = if op == "list" {
-        crate::mcp::substations::list().await
+        crate::mcp::substations::list_as(&signer).await
     } else {
         match args.get("substation_id").and_then(|v| v.as_str()) {
             None => Err("substation_id required (e.g. 4-12)".to_string()),
-            Some(id) if confirmed => crate::mcp::substations::execute(app_handle, id, op, args).await,
-            Some(id) => crate::mcp::substations::preview(id, op, args).await.map(|mut p| {
+            Some(id) if confirmed => crate::mcp::substations::execute_as(app_handle, &signer, id, op, args).await,
+            Some(id) => crate::mcp::substations::preview_as(&signer, id, op, args).await.map(|mut p| {
                 p["note"] = json!("preview only — send confirm:true to sign it");
                 p
             }),
@@ -979,6 +1005,31 @@ async fn action_substation(app_handle: &tauri::AppHandle, args: &Value) -> Vec<C
     match res {
         Ok(v) => vec![Content::text(serde_json::to_string_pretty(&v).unwrap_or_default())],
         Err(e) => crate::mcp::handler::fail(format!("substation {op} failed: {}", translate_error(&e))),
+    }
+}
+
+/// A guild's own power, run by its owner (`as: "<label>"` for a founder):
+/// `{op, guild_id?, as?, ...}`. `op: status` reads; every other op
+/// (guild_treasury::ACTIONS) previews unless `confirm: true`.
+async fn action_treasury(app_handle: &tauri::AppHandle, args: &Value) -> Vec<Content> {
+    let op = args.get("op").and_then(|v| v.as_str()).unwrap_or("status");
+    let guild_id = args.get("guild_id").and_then(|v| v.as_str()).map(String::from);
+    let confirmed = args.get("confirm").and_then(|v| v.as_bool()).unwrap_or(false);
+    let signer = match crate::mcp::founders::signer_from_args(args) {
+        Ok(s) => s,
+        Err(e) => return crate::mcp::handler::fail(format!("treasury {op} failed: {e}")),
+    };
+    let res = match op {
+        "status" => crate::mcp::guild_treasury::status(&signer, guild_id).await,
+        _ if confirmed => crate::mcp::guild_treasury::execute(app_handle, &signer, guild_id, op, args).await,
+        _ => crate::mcp::guild_treasury::preview(&signer, guild_id, op, args).await.map(|mut p| {
+            p["note"] = json!("preview only — send confirm:true to sign it");
+            p
+        }),
+    };
+    match res {
+        Ok(v) => vec![Content::text(serde_json::to_string_pretty(&v).unwrap_or_default())],
+        Err(e) => crate::mcp::handler::fail(format!("treasury {op} failed: {}", translate_error(&e))),
     }
 }
 

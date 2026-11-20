@@ -97,6 +97,11 @@ pub struct VirtualPlayer {
     /// one of them auto-named — is adopted rather than frozen.
     #[serde(default = "default_auto_name")]
     pub auto_name: bool,
+    /// A founder's context label (`founders.rs`): the name a project uses
+    /// to come back to the founder and the guild it holds. Only founders
+    /// carry one; unique among them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
 }
 
 fn default_auto_name() -> bool {
@@ -514,15 +519,15 @@ mod tests {
     fn next_free_index_skips_used() {
         let mut s = VirtualPlayerStore::default();
         assert_eq!(s.next_free_index(), 1);
-        s.players.push(VirtualPlayer { profile: None, index: 1, address: "a".into(), player_id: None, name: "x".into(), created_at: 0.0, role: VPlayerRole::Bait, auto_name: true });
-        s.players.push(VirtualPlayer { profile: None, index: 3, address: "c".into(), player_id: None, name: "z".into(), created_at: 0.0, role: VPlayerRole::Bait, auto_name: true });
+        s.players.push(VirtualPlayer { profile: None, index: 1, address: "a".into(), player_id: None, name: "x".into(), created_at: 0.0, role: VPlayerRole::Bait, auto_name: true, label: None });
+        s.players.push(VirtualPlayer { profile: None, index: 3, address: "c".into(), player_id: None, name: "z".into(), created_at: 0.0, role: VPlayerRole::Bait, auto_name: true, label: None });
         assert_eq!(s.next_free_index(), 2);
     }
 
     #[test]
     fn find_by_index_address_or_player_id() {
         let mut s = VirtualPlayerStore::default();
-        s.players.push(VirtualPlayer { profile: None, index: 2, address: "structs1abc".into(), player_id: Some("1-5".into()), name: "scout".into(), created_at: 0.0, role: VPlayerRole::Bait, auto_name: true });
+        s.players.push(VirtualPlayer { profile: None, index: 2, address: "structs1abc".into(), player_id: Some("1-5".into()), name: "scout".into(), created_at: 0.0, role: VPlayerRole::Bait, auto_name: true, label: None });
         assert!(s.find("2").is_some());
         assert!(s.find("structs1abc").is_some());
         assert!(s.find("1-5").is_some());
@@ -632,6 +637,7 @@ pub async fn spawn_one(
             role,
             profile,
             auto_name,
+            label: None,
         });
         let _ = reg.save();
     }

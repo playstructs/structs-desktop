@@ -20,6 +20,7 @@
 use serde_json::{json, Value};
 
 use crate::mcp::cosmos_client::CosmosClient;
+use crate::mcp::founders::Signer;
 use crate::mcp::guild_admin::bits;
 use crate::mcp::loop_util::parse_f64 as num;
 use crate::mcp::send_guard::signer_lacks;
@@ -132,16 +133,6 @@ pub fn plan(provider_id: &str, action: &str, args: &Value, limits: Limits) -> Re
     }
 }
 
-fn primary_identity() -> Result<(String, String), String> {
-    let gs = crate::game_state::GAME_STATE.read().map_err(|e| e.to_string())?;
-    let pid = gs.player_id.clone().unwrap_or_default();
-    let addr = gs.wallet_address.clone().unwrap_or_default();
-    if pid.is_empty() || addr.is_empty() {
-        return Err("primary identity not synced yet".into());
-    }
-    Ok((pid, addr))
-}
-
 /// The coins at a provider pool (`kind` = "earnings" | "collateral").
 async fn pool(client: &CosmosClient, provider_id: &str, kind: &str) -> Vec<Value> {
     let Ok(v) = client.lcd_get(&format!("/structs/provider_{kind}_address/{provider_id}")).await else {
@@ -183,7 +174,11 @@ pub fn summarise_agreements(rows: &[Value], height: u64, rate: f64) -> (Vec<Valu
 /// The providers the primary owns (and its guild's, marked), with pools,
 /// buyers and terms.
 pub async fn list() -> Result<Value, String> {
-    let (me, _) = primary_identity()?;
+    list_as(&Signer::primary()?).await
+}
+
+pub async fn list_as(signer: &Signer) -> Result<Value, String> {
+    let me = signer.player_id.clone();
     let client = CosmosClient::new();
     let player = client.query_entity("player", &me).await?;
     let guild = player.pointer("/Player/guildId").and_then(|g| g.as_str()).unwrap_or("").to_string();
@@ -231,7 +226,11 @@ pub async fn list() -> Result<Value, String> {
 
 /// Check a provider action without signing.
 pub async fn preview(provider_id: &str, action: &str, args: &Value) -> Result<Value, String> {
-    let (me, address) = primary_identity()?;
+    preview_as(&Signer::primary()?, provider_id, action, args).await
+}
+
+pub async fn preview_as(signer: &Signer, provider_id: &str, action: &str, args: &Value) -> Result<Value, String> {
+    let (me, address) = (signer.player_id.clone(), signer.address.clone());
     let client = CosmosClient::new();
     let p = client.query_entity("provider", provider_id).await.map_err(|e| format!("provider {provider_id}: {e}"))?;
     let p = p.get("Provider").cloned().unwrap_or(Value::Null);
@@ -262,6 +261,7 @@ pub async fn preview(provider_id: &str, action: &str, args: &Value) -> Result<Va
     }
     Ok(json!({
         "ok": problems.is_empty(),
+        "signed_as": signer.describe(),
         "problems": problems,
         "warnings": warnings,
         "provider_id": provider_id,
@@ -277,7 +277,11 @@ pub async fn preview(provider_id: &str, action: &str, args: &Value) -> Result<Va
 
 /// Sign a provider action, after re-running the preview.
 pub async fn execute(app: &tauri::AppHandle, provider_id: &str, action: &str, args: &Value) -> Result<Value, String> {
-    let pv = preview(provider_id, action, args).await?;
+    execute_as(app, &Signer::primary()?, provider_id, action, args).await
+}
+
+pub async fn execute_as(app: &tauri::AppHandle, signer: &Signer, provider_id: &str, action: &str, args: &Value) -> Result<Value, String> {
+    let pv = preview_as(signer, provider_id, action, args).await?;
     if pv.get("ok").and_then(|v| v.as_bool()) != Some(true) {
         let why: Vec<&str> = pv["problems"].as_array().map(|a| a.iter().filter_map(|v| v.as_str()).collect()).unwrap_or_default();
         return Err(format!("refused: {}", why.join("; ")));
@@ -285,7 +289,7 @@ pub async fn execute(app: &tauri::AppHandle, provider_id: &str, action: &str, ar
     let client = CosmosClient::new();
     let p = client.query_entity("provider", provider_id).await?;
     let plan = plan(provider_id, action, args, Limits::of(p.get("Provider").unwrap_or(&Value::Null)))?;
-    let res = crate::mcp::tx_retry::sign_as_primary(app, plan.type_url, plan.payload, format!("provider:{action}")).await?;
+    let res = crate::mcp::tx_retry::sign_once(app, signer.index, plan.type_url, plan.payload, format!("provider:{action}")).await?;
     crate::mcp::board_feed::push(app, crate::mcp::board_feed::Severity::Notice, "energy", plan.summary.clone());
     Ok(json!({
         "ok": true,

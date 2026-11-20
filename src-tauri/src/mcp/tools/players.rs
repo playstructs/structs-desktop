@@ -367,6 +367,14 @@ pub async fn execute(
                     key
                 ))];
             };
+            // A founder holds a community's guild: as a bot it would be
+            // explored, built on and swept. Only the founding plan makes one.
+            if p.role == VPlayerRole::Founder || role == VPlayerRole::Founder {
+                return vec![Content::text(format!(
+                    "Error: {} — founders are made only by found_guild and never change role (structs_action founder {{op:\"list\"}}).",
+                    if p.role == VPlayerRole::Founder { format!("{} is a founder", p.name) } else { "no bot can become a founder".to_string() }
+                ))];
+            }
             p.role = role;
             let (name, idx) = (p.name.clone(), p.index);
             let _ = reg.save();
@@ -1322,6 +1330,11 @@ pub async fn execute(
         }
 
         "create" => {
+            if params.role.as_deref().and_then(VPlayerRole::parse) == Some(VPlayerRole::Founder) {
+                return vec![Content::text(
+                    "Error: founders are made by structs_action found_guild {founder:\"new\", label, ...}, which funds and labels them; create makes fleet players only.".to_string(),
+                )];
+            }
             // An explicit name is the operator's, and the rename heal must never
             // touch it; without one we mint a name from the HD index below.
             let explicit_name = params.name.as_deref().map(str::trim).filter(|n| !n.is_empty());
@@ -1423,6 +1436,7 @@ pub async fn execute(
                                 .and_then(VPlayerRole::parse)
                                 .unwrap_or_default(),
                             auto_name,
+                            label: None,
                         });
                         let _ = reg.save();
                     }
@@ -2124,7 +2138,7 @@ fn roster(app: &tauri::AppHandle, params: &PlayerParams) -> Vec<Content> {
                 return crate::mcp::handler::fail(format!(
                     "roster: unknown role '{}'. Use {}.",
                     r,
-                    VPlayerRole::ALL.iter().map(|r| r.as_str()).collect::<Vec<_>>().join(" | ")
+                    VPlayerRole::ALL.iter().map(|r| r.as_str()).chain(["founder"]).collect::<Vec<_>>().join(" | ")
                 ))
             }
         },
@@ -2287,7 +2301,12 @@ fn render_roster(
 
     let scope: Vec<&RosterLine> = lines
         .iter()
-        .filter(|l| role_filter.map_or(true, |r| l.role == r.as_str()))
+        // Founders hold other communities' guilds, not fleet work: listed
+        // only when asked for by role.
+        .filter(|l| match role_filter {
+            Some(r) => l.role == r.as_str(),
+            None => l.role != VPlayerRole::Founder.as_str(),
+        })
         .collect();
     let live: Vec<&&RosterLine> = scope.iter().filter(|l| l.player_id.is_some()).collect();
     let alpha_known: Vec<f64> = live.iter().filter_map(|l| l.alpha_ualpha).collect();
@@ -2296,6 +2315,10 @@ fn render_roster(
     let mut charges: Vec<u64> = live.iter().filter_map(|l| l.charge).collect();
     charges.sort_unstable();
 
+    let founders_hidden = if role_filter.is_none() { lines.iter().filter(|l| l.role == VPlayerRole::Founder.as_str()).count() } else { 0 };
+    if founders_hidden > 0 {
+        out.push_str(&format!("\n({founders_hidden} founder account(s) not shown — structs_action founder {{op:\"list\"}}, or role:\"founder\")\n"));
+    }
     out.push_str(&format!(
         "\n{}: {} players\n",
         match role_filter {

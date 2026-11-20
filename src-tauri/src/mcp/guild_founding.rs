@@ -44,8 +44,6 @@
 //! old guild's entry substation is moved to the new one; the guild starts
 //! OPEN (minimum 0) with invites and requests closed until the policy step.
 
-use std::sync::atomic::{AtomicBool, Ordering};
-
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
@@ -103,10 +101,22 @@ pub struct Choices {
     /// made for it, funded from the primary's vault, so the primary keeps
     /// its own guild, rank and substation.
     pub founder: String,
+    /// The founder's context label (`founders.rs`): what a project calls
+    /// this founding and its founder, to resume it or act as it later. A
+    /// label implies `founder: "new"`; each label keeps its own plan.
+    pub label: String,
+    /// A labelled founder keeps its guild to itself: the primary is granted
+    /// the guild's controls only when this is true. (The unlabelled ⌘K
+    /// founding always grants them — the card works from the primary.)
+    pub share_controls: bool,
 }
 
 impl Choices {
     pub fn with_defaults(mut self) -> Choices {
+        self.label = crate::mcp::founders::normalize_label(&self.label);
+        if !self.label.is_empty() && self.founder.trim().is_empty() {
+            self.founder = "new".into();
+        }
         if self.members == 0 {
             self.members = 5;
         }
@@ -477,6 +487,16 @@ pub fn steps_for(route: &str, infuse_ualpha: u64, connect: bool) -> Vec<Step> {
 /// funded first (and granted the primary's substation when it is the
 /// entry), founds and signs everything after, and finally hands the primary
 /// the guild's controls, so the primary never moves.
+/// The steps for `c`: [`plan_steps`] less the primary's controls grant for
+/// a labelled founder that keeps its guild to itself.
+pub fn steps_for_choices(c: &Choices, route: &str, infuse_ualpha: u64, connect: bool, grant: bool) -> Vec<Step> {
+    let mut steps = plan_steps(route, infuse_ualpha, connect, c.founder == "new", grant);
+    if !c.label.is_empty() && !c.share_controls {
+        steps.retain(|s| s.id != "controls");
+    }
+    steps
+}
+
 pub fn plan_steps(route: &str, infuse_ualpha: u64, connect: bool, by_founder: bool, grant: bool) -> Vec<Step> {
     let steps = steps_for(route, infuse_ualpha, connect);
     if !by_founder {
@@ -536,6 +556,13 @@ pub fn render_guild_json(guild_id: &str, c: &Choices, services: &Value) -> Value
 /// Pure refusals on the answers alone.
 pub fn choice_refusals(c: &Choices) -> Vec<String> {
     let mut out = Vec::new();
+    if !c.label.is_empty() {
+        if let Some(why) = crate::mcp::founders::label_refusal(&c.label) {
+            out.push(format!("label: {why}"));
+        } else if c.founder != "new" {
+            out.push("label: a label names a new founder; the primary founds without one".into());
+        }
+    }
     if c.name.trim().is_empty() {
         out.push("name the guild".into());
     } else if let Some(why) = name_refusal(&c.name) {
@@ -570,18 +597,23 @@ pub fn choice_refusals(c: &Choices) -> Vec<String> {
 
 // ── Persistence ────────────────────────────────────────────────────────────
 
-fn file_for(player: &str) -> String {
-    format!("guild_founding.{player}.json")
+/// The plan file: one per label, plus the unlabelled one the ⌘K card uses.
+pub fn file_for(player: &str, label: &str) -> String {
+    if label.is_empty() {
+        format!("guild_founding.{player}.json")
+    } else {
+        format!("guild_founding.{player}.{label}.json")
+    }
 }
 
-pub fn load(player: &str) -> Option<FoundState> {
-    let path = crate::mcp::config_store::config_path(&file_for(player))?;
+pub fn load(player: &str, label: &str) -> Option<FoundState> {
+    let path = crate::mcp::config_store::config_path(&file_for(player, label))?;
     let text = std::fs::read_to_string(path).ok()?;
     serde_json::from_str(&text).ok()
 }
 
 fn save(state: &FoundState) -> Result<(), String> {
-    let path = crate::mcp::config_store::config_path(&file_for(&state.founder)).ok_or("no config directory")?;
+    let path = crate::mcp::config_store::config_path(&file_for(&state.founder, &state.choices.label)).ok_or("no config directory")?;
     if let Some(dir) = path.parent() {
         let _ = std::fs::create_dir_all(dir);
     }
@@ -824,7 +856,19 @@ pub async fn preview(choices: Choices) -> Result<Value, String> {
     let guilds = client.list_all_entities("guild", "Guild").await.unwrap_or_default();
     let owned = guilds.iter().find(|g| s(g.get("owner")) == pid).map(|g| s(g.get("id")));
     // A founding already under way owns its guild — that is not a refusal.
-    let resuming = load(&pid).filter(|st| !st.guild_id.is_empty() && !st.finished());
+    let resuming = load(&pid, &c.label).filter(|st| !st.guild_id.is_empty() && !st.finished());
+    // A label names ONE founder: taken by a founder this plan did not make,
+    // it is someone else's context.
+    if !c.label.is_empty() {
+        let mine = load(&pid, &c.label).filter(|st| !st.finished()).map(|st| st.founder_index).unwrap_or(0);
+        let taken = crate::mcp::virtual_players::REGISTRY
+            .read()
+            .ok()
+            .and_then(|r| crate::mcp::founders::label_taken_by(&r.players, &c.label, mine));
+        if let Some(other) = taken {
+            issues.block(format!("label '{}' already names founder {other}; pick another, or work as it with as:\"{}\"", c.label, c.label), "identity");
+        }
+    }
     if let (Some(g), None, false) = (&owned, &resuming, by_founder) {
         issues.block(format!("you own {g}; an owner cannot found another guild, but a founder can"), "identity");
     }
@@ -937,7 +981,7 @@ pub async fn preview(choices: Choices) -> Result<Value, String> {
             "substation",
         );
     }
-    let steps = plan_steps(route, infuse, treasury && moves, by_founder, grant);
+    let steps = steps_for_choices(&c, route, infuse, treasury && moves, grant);
     // Treasury founds before the guild has power: a founder moved off their
     // old entry substation has none until `connect`.
     let unpowered_steps = if treasury && moves {
@@ -1036,32 +1080,108 @@ pub async fn preview(choices: Choices) -> Result<Value, String> {
 
 /// The saved plan, if any, plus whether a run is in flight.
 pub fn get() -> Result<Value, String> {
+    get_for("")
+}
+
+/// The plan saved under `label` ("" = the card's), with its run status.
+pub fn get_for(label: &str) -> Result<Value, String> {
     let (pid, _) = identity()?;
-    Ok(json!({ "state": load(&pid), "running": RUNNING.load(Ordering::SeqCst) }))
+    let label = crate::mcp::founders::normalize_label(label);
+    let (running, queued) = run_status(&label);
+    Ok(json!({ "label": label, "state": load(&pid, &label), "running": running, "queued": queued }))
+}
+
+/// Every saved plan's summary, labelled ones first by label.
+pub fn list_plans() -> Result<Value, String> {
+    let (pid, _) = identity()?;
+    let mut labels: Vec<String> = crate::mcp::founders::founders().into_iter().filter_map(|f| f.label).collect();
+    labels.sort();
+    let mut out: Vec<Value> = labels.iter().filter_map(|l| plan_summary(l)).collect();
+    if load(&pid, "").is_some() {
+        if let Some(v) = plan_summary("") {
+            out.push(v);
+        }
+    }
+    Ok(json!({ "ok": true, "plans": out }))
+}
+
+/// A short, read-only summary of the plan under `label`, if one is saved.
+pub fn plan_summary(label: &str) -> Option<Value> {
+    let (pid, _) = identity().ok()?;
+    let st = load(&pid, label)?;
+    let (running, queued) = run_status(label);
+    let done = st.steps.iter().filter(|s| s.status == "done" || s.status == "skipped").count();
+    let failed = st.steps.iter().find(|s| s.status == "failed");
+    Some(json!({
+        "label": label,
+        "name": st.choices.name,
+        "guild_id": if st.guild_id.is_empty() { Value::Null } else { json!(st.guild_id) },
+        "founder_player": if st.founder_player.is_empty() { Value::Null } else { json!(st.founder_player) },
+        "route": st.route,
+        "substation_id": if st.substation_id.is_empty() { Value::Null } else { json!(st.substation_id) },
+        "steps_done": done,
+        "steps_total": st.steps.len(),
+        "finished": st.finished(),
+        "running": running,
+        "queued": queued,
+        "failed_step": failed.map(|f| json!({ "id": f.id, "error": f.error })),
+    }))
 }
 
 /// Forget an unstarted or finished plan. A plan mid-way cannot be dropped:
 /// the chain already holds what it made, and resuming is the safe path.
 pub fn abandon() -> Result<Value, String> {
+    abandon_for("")
+}
+
+pub fn abandon_for(label: &str) -> Result<Value, String> {
     let (pid, _) = identity()?;
-    if let Some(st) = load(&pid) {
+    let label = crate::mcp::founders::normalize_label(label);
+    if run_status(&label).0 {
+        return Err("that plan is running; let it finish or fail first".into());
+    }
+    if let Some(st) = load(&pid, &label) {
         if st.started() && !st.finished() && !st.guild_id.is_empty() {
             return Err(format!("{} is founded; finish its setup rather than abandon it", st.guild_id));
         }
     }
-    if let Some(path) = crate::mcp::config_store::config_path(&file_for(&pid)) {
+    if let Some(path) = crate::mcp::config_store::config_path(&file_for(&pid, &label)) {
         let _ = std::fs::remove_file(path);
     }
     Ok(json!({ "ok": true }))
 }
 
-static RUNNING: AtomicBool = AtomicBool::new(false);
+/// Plans with a run in flight (queued or executing), by label.
+static RUNNING: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+/// The label whose steps are executing now.
+static ACTIVE: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+/// One founding signs at a time: every run funds its founder from the
+/// primary's vault and reserves the next free HD index, and two at once
+/// would race both. Later runs wait here, in order, as "queued".
+static FOUND_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// (running, queued) for the plan under `label`.
+pub fn run_status(label: &str) -> (bool, bool) {
+    let running = RUNNING.lock().map(|r| r.iter().any(|l| l == label)).unwrap_or(false);
+    let active = ACTIVE.lock().ok().and_then(|a| a.clone());
+    (running, running && active.as_deref() != Some(label))
+}
 
 /// Start (or resume) founding. Answers at once with the saved plan; the steps
 /// run in the background and every change is pushed as `guild-founding`.
+/// The plan is the one under `choices.label` ("" = the card's).
 pub async fn start(app: tauri::AppHandle, choices: Option<Choices>) -> Result<Value, String> {
+    start_for(app, choices, "").await
+}
+
+/// [`start`], resuming the plan under `label` when no choices are given.
+pub async fn start_for(app: tauri::AppHandle, choices: Option<Choices>, label: &str) -> Result<Value, String> {
     let (pid, _) = identity()?;
-    let existing = load(&pid).filter(|st| st.started() && !st.finished());
+    let label = match &choices {
+        Some(c) => crate::mcp::founders::normalize_label(&c.label),
+        None => crate::mcp::founders::normalize_label(label),
+    };
+    let existing = load(&pid, &label).filter(|st| st.started() && !st.finished());
     let state = match (existing, choices) {
         // Mid-way: resume exactly what was planned; new answers do not apply.
         (Some(st), _) => st,
@@ -1087,7 +1207,7 @@ pub async fn start(app: tauri::AppHandle, choices: Option<Choices>) -> Result<Va
                 reactor_id: pv["reactor"]["id"].as_str().unwrap_or("").to_string(),
                 infuse_ualpha: infuse,
                 allocation_mw: pv["power"]["allocation_mw"].as_u64().unwrap_or(0),
-                steps: plan_steps(&route, infuse, connect, by_founder, grant),
+                steps: steps_for_choices(&c, &route, infuse, connect, grant),
                 founder_fund_ualpha: if by_founder { total } else { 0 },
                 route,
                 choices: c,
@@ -1098,27 +1218,51 @@ pub async fn start(app: tauri::AppHandle, choices: Option<Choices>) -> Result<Va
             save(&st)?;
             st
         }
-        (None, None) => return Err("nothing to resume: answer the questions first".into()),
+        (None, None) => {
+            // A finished plan resumes to itself: nothing left to sign.
+            if let Some(st) = load(&pid, &label) {
+                return Ok(json!({ "label": label, "state": st, "running": false, "queued": false }));
+            }
+            return Err(if label.is_empty() { "nothing to resume: answer the questions first".into() } else { format!("no plan labelled '{label}'") });
+        }
     };
-    if RUNNING.swap(true, Ordering::SeqCst) {
-        return Ok(json!({ "state": state, "running": true }));
+    {
+        let mut r = RUNNING.lock().map_err(|e| e.to_string())?;
+        if r.iter().any(|l| *l == label) {
+            let queued = ACTIVE.lock().ok().and_then(|a| a.clone()).as_deref() != Some(label.as_str());
+            return Ok(json!({ "label": label, "state": state, "running": true, "queued": queued }));
+        }
+        r.push(label.clone());
     }
     let snapshot = state.clone();
+    let key = label.clone();
     tauri::async_runtime::spawn(async move {
-        let mut st = state;
-        if let Err(e) = run_steps(&app, &mut st).await {
-            crate::mcp::board_feed::push(&app, crate::mcp::board_feed::Severity::Important, "guild", format!("founding paused: {e}"));
+        let _turn = FOUND_LOCK.lock().await;
+        if let Ok(mut a) = ACTIVE.lock() {
+            *a = Some(key.clone());
         }
-        RUNNING.store(false, Ordering::SeqCst);
+        // Re-read: while queued, the saved plan is the newest word on it.
+        let mut st = load(&state.founder, &key).filter(|s| s.started_ms == state.started_ms).unwrap_or(state);
+        if let Err(e) = run_steps(&app, &mut st).await {
+            let who = if key.is_empty() { String::new() } else { format!(" ({key})") };
+            crate::mcp::board_feed::push(&app, crate::mcp::board_feed::Severity::Important, "guild", format!("founding paused{who}: {e}"));
+        }
+        if let Ok(mut a) = ACTIVE.lock() {
+            *a = None;
+        }
+        if let Ok(mut r) = RUNNING.lock() {
+            r.retain(|l| *l != key);
+        }
         emit(&app, &st);
     });
-    Ok(json!({ "state": snapshot, "running": true }))
+    let queued = ACTIVE.lock().ok().and_then(|a| a.clone()).is_some_and(|a| a != label);
+    Ok(json!({ "label": label, "state": snapshot, "running": true, "queued": queued }))
 }
 
 fn emit(app: &tauri::AppHandle, st: &FoundState) {
     let _ = crate::mcp::events::emit(
         app,
-        crate::mcp::events::AppEvent::Board { name: "guild-founding", payload: json!({ "state": st, "running": RUNNING.load(Ordering::SeqCst) }) },
+        crate::mcp::events::AppEvent::Board { name: "guild-founding", payload: json!({ "label": st.choices.label, "state": st, "running": run_status(&st.choices.label).0 }) },
     );
 }
 
@@ -1458,8 +1602,13 @@ async fn run_one(app: &tauri::AppHandle, client: &CosmosClient, address: &str, s
 
 /// A grid record (`/structs/grid/<type>-<object id>`: 2 capacity, 3 load).
 /// Guild queries carry no grid attributes, so a guild's power is read here.
-async fn grid(client: &CosmosClient, kind: &str, object: &str) -> f64 {
+pub async fn grid(client: &CosmosClient, kind: &str, object: &str) -> f64 {
     client.lcd_get(&format!("/structs/grid/{kind}-{object}")).await.ok().map(|v| num(v.pointer("/gridRecord/value"))).unwrap_or(0.0)
+}
+
+/// Liquid ualpha in `owner`'s vault (a player or a guild).
+pub async fn vault_of(client: &CosmosClient, owner: &str) -> u64 {
+    guild_vault(client, owner).await
 }
 
 async fn guild_vault(client: &CosmosClient, guild: &str) -> u64 {
@@ -1514,6 +1663,7 @@ async fn run_founder_step(app: &tauri::AppHandle, client: &CosmosClient, st: &mu
                     if let Some(p) = v.player_id.filter(|p| !p.is_empty()) {
                         st.founder_player = p;
                         st.founder_address = v.address;
+                        label_founder(st)?;
                         return Ok(String::new());
                     }
                     return Err("the founder signed up but has no player id yet; resume in a minute".into());
@@ -1526,6 +1676,7 @@ async fn run_founder_step(app: &tauri::AppHandle, client: &CosmosClient, st: &mu
             let made = crate::mcp::virtual_players::spawn_one(app, index, name, true, VPlayerRole::Founder, None, None).await?;
             st.founder_address = made.address;
             st.founder_player = made.player_id.ok_or("the founder signed up but has no player id yet; resume in a minute")?;
+            label_founder(st)?;
             Ok(String::new())
         }
         "founder_fund" => {
@@ -1578,6 +1729,14 @@ async fn run_founder_step(app: &tauri::AppHandle, client: &CosmosClient, st: &mu
     }
 }
 
+/// Stamp the plan's label on its founder's registry row.
+fn label_founder(st: &FoundState) -> Result<(), String> {
+    if st.choices.label.is_empty() || st.founder_index == 0 {
+        return Ok(());
+    }
+    crate::mcp::founders::set_label(st.founder_index, &st.choices.label)
+}
+
 /// Build a substation owned by `owner` from `st.allocation_id`, or adopt the
 /// one a resumed run already built from it.
 async fn build_substation(app: &tauri::AppHandle, client: &CosmosClient, st: &mut FoundState, idx: u32, owner: &str) -> Result<String, String> {
@@ -1622,7 +1781,8 @@ async fn build_substation(app: &tauri::AppHandle, client: &CosmosClient, st: &mu
 /// services filled in, plus whether the app itself would accept it.
 pub fn guild_json(guild_id: Option<String>, choices: Option<Choices>, services: Value) -> Result<Value, String> {
     let (pid, _) = identity()?;
-    let saved = load(&pid);
+    let label = choices.as_ref().map(|c| crate::mcp::founders::normalize_label(&c.label)).unwrap_or_default();
+    let saved = load(&pid, &label);
     let c = choices.or_else(|| saved.as_ref().map(|s| s.choices.clone())).unwrap_or_default().with_defaults();
     let id = guild_id.or_else(|| saved.as_ref().map(|s| s.guild_id.clone()).filter(|g| !g.is_empty())).unwrap_or_else(|| "0-?".into());
     let services = if services.is_object() { services } else { json!({ "guild_api": "", "grass_nats_websocket": "" }) };
@@ -1768,6 +1928,26 @@ mod tests {
         let t = ids("treasury", true, false);
         assert_eq!((t.first().map(String::as_str), t.last().map(String::as_str)), (Some("founder_create"), Some("controls")));
         assert!(t.iter().position(|s| s == "founder_fund") < t.iter().position(|s| s == "found"));
+    }
+
+    #[test]
+    fn a_labelled_founder_keeps_its_guild_unless_asked() {
+        let ids = |c: &Choices| steps_for_choices(c, "treasury", 5, false, false).into_iter().map(|s| s.id).collect::<Vec<_>>();
+        let card = Choices { founder: "new".into(), ..Default::default() };
+        assert!(ids(&card).contains(&"controls".to_string()), "the card still grants the primary");
+        let labelled = Choices { name: "Acme".into(), label: "Acme".into(), ..Default::default() }.with_defaults();
+        assert_eq!((labelled.label.as_str(), labelled.founder.as_str()), ("acme", "new"), "a label implies a new founder");
+        assert!(!ids(&labelled).contains(&"controls".to_string()));
+        let shared = Choices { share_controls: true, ..labelled.clone() };
+        assert!(ids(&shared).contains(&"controls".to_string()));
+        assert!(choice_refusals(&Choices { founder: "you".into(), label: "acme".into(), ..labelled.clone() }).iter().any(|r| r.contains("label")));
+        assert!(choice_refusals(&Choices { label: "1-42".into(), ..labelled }).iter().any(|r| r.starts_with("label:")));
+    }
+
+    #[test]
+    fn plan_files_are_per_label() {
+        assert_eq!(file_for("1-194", ""), "guild_founding.1-194.json");
+        assert_eq!(file_for("1-194", "acme"), "guild_founding.1-194.acme.json");
     }
 
     #[test]

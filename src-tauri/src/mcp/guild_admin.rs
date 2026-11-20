@@ -2,8 +2,9 @@
 //! ranks and admin grants, and the guild's own settings — plus the player's
 //! side of joining (request, accept or decline an invite).
 //!
-//! Every action is one chain message signed by the primary's device key
-//! (`tx_retry::sign_as_primary`), and every action is previewed first: the
+//! Every action is one chain message signed by a `founders::Signer` — the
+//! primary's device key, or a founder's (`as: "<label>"`) — and every
+//! action is previewed first: the
 //! same `plan` builds the payload the writer signs, so a preview cannot show
 //! one thing and sign another.
 //!
@@ -23,6 +24,7 @@
 use serde_json::{json, Value};
 
 use crate::mcp::cosmos_client::CosmosClient;
+use crate::mcp::founders::Signer;
 use crate::mcp::loop_util::parse_f64 as num;
 use crate::mcp::send_guard::signer_lacks;
 
@@ -123,7 +125,119 @@ pub const ACTIONS: &[&str] = &[
     "entry_rank", "entry_substation", "join_minimum", "bypass_request", "bypass_invite", "endpoint",
     "name", "rank_sale", "convert_in_fee", "convert_out_fee", "request", "request_revoke",
     "accept_invite", "decline_invite", "join",
+    "primary_reactor", "owner", "pfp", "rank_permission", "rank_permission_revoke",
+    "join_proxy",
 ];
+
+// ── Join by proxy ──────────────────────────────────────────────────────────
+//
+// `MsgGuildMembershipJoinProxy` (v0.23 `msg_server_guild_membership_join_proxy.go`):
+// a member with Membership on the guild signs up a NEW address into the
+// guild it is in — the proxy's own guild, never one named in the message.
+// The joiner proves the address is theirs by signing
+// `GUILD<guild>ADDRESS<address>NONCE<n>` with its key (secp256k1 over
+// SHA-256, 64-byte r||s, hex) and handing over the 33-byte compressed
+// public key (hex); n is the address's proxy nonce (grid attribute 11,
+// 0 for an address the chain has never seen), bumped by every proxy join.
+
+/// The exact text a joiner signs for a proxy join.
+pub fn join_proxy_challenge(guild: &str, address: &str, nonce: u64) -> String {
+    format!("GUILD{guild}ADDRESS{address}NONCE{nonce}")
+}
+
+/// Pure: whether `pubkey_hex` is `address`'s key and `sig_hex` signs the
+/// challenge — the two checks the chain makes, made before anything is sent.
+pub fn verify_join_proof(guild: &str, address: &str, nonce: u64, pubkey_hex: &str, sig_hex: &str) -> Result<(), String> {
+    use k256::ecdsa::signature::Verifier;
+    let pk = hex::decode(pubkey_hex.trim()).map_err(|_| "proof_pub_key is not hex".to_string())?;
+    if pk.len() != 33 {
+        return Err("proof_pub_key must be the 33-byte compressed key".into());
+    }
+    let derived = cosmrs::crypto::secp256k1::VerifyingKey::from_sec1_bytes(&pk)
+        .map(cosmrs::crypto::PublicKey::from)
+        .map_err(|_| "proof_pub_key is not a secp256k1 key".to_string())?
+        .account_id("structs")
+        .map_err(|e| e.to_string())?
+        .to_string();
+    if derived != address {
+        return Err(format!("proof_pub_key belongs to {derived}, not {address}"));
+    }
+    let sig = hex::decode(sig_hex.trim()).map_err(|_| "proof_signature is not hex".to_string())?;
+    if !(64..=65).contains(&sig.len()) {
+        return Err("proof_signature must be 64 or 65 bytes".into());
+    }
+    let vk = k256::ecdsa::VerifyingKey::from_sec1_bytes(&pk).map_err(|_| "proof_pub_key is not a secp256k1 key".to_string())?;
+    let sig = k256::ecdsa::Signature::from_slice(&sig[..64]).map_err(|_| "proof_signature is malformed".to_string())?;
+    vk.verify(join_proxy_challenge(guild, address, nonce).as_bytes(), &sig)
+        .map_err(|_| format!("proof_signature does not sign \"{}\"", join_proxy_challenge(guild, address, nonce)))
+}
+
+/// The address's proxy nonce and player id (if the chain knows it).
+pub async fn proxy_nonce(client: &CosmosClient, address: &str) -> (u64, Option<String>) {
+    let pid = client
+        .lcd_get(&format!("/structs/address/{address}"))
+        .await
+        .ok()
+        .and_then(|v| v.get("playerId").and_then(|p| p.as_str()).map(String::from))
+        .filter(|p| !p.is_empty() && p != "1-0");
+    let Some(pid) = pid else { return (0, None) };
+    let n = client
+        .lcd_get(&format!("/structs/grid/11-{pid}"))
+        .await
+        .ok()
+        .map(|v| num(v.pointer("/gridRecord/value")) as u64)
+        .unwrap_or(0);
+    (n, Some(pid))
+}
+
+/// What a joiner must sign so `signer` can proxy-join them into `signer`'s
+/// guild — read-only, for the front-end that collects the proof.
+pub async fn join_proxy_challenge_for(signer: &Signer, address: &str) -> Result<Value, String> {
+    let address = address.trim();
+    if !address.starts_with("structs1") {
+        return Err(format!("'{address}' is not a structs address"));
+    }
+    let client = CosmosClient::new();
+    let p = client.query_entity("player", &signer.player_id).await?;
+    let guild = p.pointer("/Player/guildId").and_then(|g| g.as_str()).unwrap_or("").to_string();
+    if !guild.starts_with("0-") {
+        return Err(format!("{} is in no guild, so it cannot proxy anyone in", signer.who()));
+    }
+    let (nonce, pid) = proxy_nonce(&client, address).await;
+    Ok(json!({
+        "ok": true,
+        "signed_as": signer.describe(),
+        "guild_id": guild,
+        "address": address,
+        "existing_player": pid,
+        "nonce": nonce,
+        "challenge": join_proxy_challenge(&guild, address, nonce),
+        "how": "the joiner signs `challenge` (UTF-8 bytes, secp256k1 over SHA-256) with the address's key; send join_proxy {address, proof_pub_key: 33-byte compressed hex, proof_signature: 64-byte r||s hex}",
+    }))
+}
+
+/// Permission bits from a number, or from names (`bits::LABELS`, `_` for
+/// spaces) given as an array or a comma-separated string.
+pub fn bits_arg(args: &Value, k: &str) -> Result<u64, String> {
+    let from_name = |n: &str| -> Result<u64, String> {
+        let n = n.trim().to_ascii_lowercase().replace('_', " ");
+        bits::LABELS.iter().find(|(_, l)| *l == n).map(|(b, _)| *b).ok_or_else(|| format!("'{n}' is not a permission ({})", bits::LABELS.iter().map(|(_, l)| l.replace(' ', "_")).collect::<Vec<_>>().join(", ")))
+    };
+    let v = match args.get(k) {
+        Some(Value::Number(n)) => n.as_u64().ok_or_else(|| format!("{k} must be a whole number"))?,
+        Some(Value::String(t)) if t.trim().chars().all(|c| c.is_ascii_digit()) && !t.trim().is_empty() => t.trim().parse().map_err(|_| format!("{k} is too large"))?,
+        Some(Value::String(t)) => t.split(',').filter(|x| !x.trim().is_empty()).map(from_name).collect::<Result<Vec<_>, _>>()?.into_iter().fold(0, |a, b| a | b),
+        Some(Value::Array(a)) => a.iter().map(|x| x.as_str().ok_or_else(|| format!("{k}: names are strings")).and_then(from_name)).collect::<Result<Vec<_>, _>>()?.into_iter().fold(0, |a, b| a | b),
+        _ => return Err(format!("{k} is required (a number, or names like membership,substation_connection)")),
+    };
+    if v == 0 {
+        return Err(format!("{k} names no permission"));
+    }
+    if v & !crate::mcp::delegation::PERM_ALL != 0 {
+        return Err(format!("{k} has bits beyond the 25 the chain knows"));
+    }
+    Ok(v)
+}
 
 fn arg_str(args: &Value, k: &str) -> Option<String> {
     match args.get(k) {
@@ -376,22 +490,81 @@ pub fn plan(guild_id: &str, me: &str, action: &str, args: &Value) -> Result<Plan
                json!({ "guildId": g, "playerId": me, "substationId": sub, "infusionId": infusions }),
                GUILD_MEMBERSHIP, 0, None, format!("Join {g}"))
         }
+        "primary_reactor" => {
+            let r = arg_str(args, "reactor").ok_or("reactor is required")?;
+            let r = id_of_kind(&r, crate::mcp::types::ObjectKind::Reactor, "reactor", "3-1")?;
+            mk(action, Side::Guild, "/structs.structs.MsgGuildUpdatePrimaryReactor",
+               json!({ "guildId": g, "reactorId": r }),
+               ADMIN, ADMIN, None, format!("{g}'s primary reactor becomes {r}"))
+        }
+        "owner" => {
+            let who = player_arg(args)?;
+            if who == me {
+                return Err(format!("you already own {g}"));
+            }
+            mk(action, Side::Guild, "/structs.structs.MsgGuildUpdateOwnerId",
+               json!({ "guildId": g, "owner": who }),
+               0, 0, Some(who.clone()),
+               format!("Hand {g} to {who}: they own it, its vault and everything it owns; you keep only what they grant back"))
+        }
+        "pfp" => {
+            let pfp = arg_str(args, "pfp").ok_or("pfp is required")?;
+            mk(action, Side::Guild, "/structs.structs.MsgGuildUpdatePfp",
+               json!({ "guildId": g, "pfp": pfp }),
+               UPDATE, UPDATE, None, format!("Set {g}'s picture"))
+        }
+        "rank_permission" | "rank_permission_revoke" => {
+            let object = arg_str(args, "object").unwrap_or_else(|| g.to_string());
+            if crate::mcp::types::ObjectId::parse(&object).is_err() {
+                return Err(format!("'{object}' is not an object id"));
+            }
+            let perms = bits_arg(args, "permissions")?;
+            if perms & ADMIN != 0 {
+                return Err("Admin is never rank-derived on v0.22+; grant it directly with grant_admin".into());
+            }
+            let on_guild = object == g;
+            if action == "rank_permission" {
+                let rank = arg_u64(args, "rank")?;
+                if rank == 0 {
+                    return Err("rank 0 is not a rank (1 is the best)".into());
+                }
+                mk(action, Side::Guild, "/structs.structs.MsgPermissionGuildRankSet",
+                   json!({ "objectId": object, "guildId": g, "permission": perms.to_string(), "rank": rank.to_string() }),
+                   ADMIN | perms, if on_guild { ADMIN } else { 0 }, None,
+                   format!("Members of {g} at rank {rank} or better may {} on {object}", bits::describe(perms)))
+            } else {
+                mk(action, Side::Guild, "/structs.structs.MsgPermissionGuildRankRevoke",
+                   json!({ "objectId": object, "guildId": g, "permission": perms.to_string() }),
+                   ADMIN, if on_guild { ADMIN } else { 0 }, None,
+                   format!("No rank in {g} confers {} on {object} any more", bits::describe(perms)))
+            }
+        }
+        "join_proxy" => {
+            let address = arg_str(args, "address").ok_or("address is required (the joiner's structs1… address)")?;
+            if !address.starts_with("structs1") {
+                return Err(format!("'{address}' is not a structs address"));
+            }
+            let pk = arg_str(args, "proof_pub_key").ok_or("proof_pub_key is required (join_proxy_challenge says what to sign)")?;
+            let sig = arg_str(args, "proof_signature").ok_or("proof_signature is required")?;
+            let sub = substation_arg(args)?;
+            let name = arg_str(args, "name").unwrap_or_default();
+            let at = if sub.is_empty() { " (entry substation)".to_string() } else { format!(", connected to {sub}") };
+            mk(action, Side::Guild, "/structs.structs.MsgGuildMembershipJoinProxy",
+               json!({
+                   "address": address, "substationId": sub, "proofPubKey": pk, "proofSignature": sig,
+                   "playerName": name,
+                   "playerPfp": arg_str(args, "pfp").unwrap_or_default(),
+                   "playerPfpClientRenderAttributes": arg_str(args, "pfp_attributes").unwrap_or_default(),
+               }),
+               GUILD_MEMBERSHIP | if sub.is_empty() { 0 } else { SUBSTATION_CONNECTION }, GUILD_MEMBERSHIP, None,
+               format!("Sign {address} up into {g}{at}"))
+        }
         other => return Err(format!("unknown guild action '{other}' (one of: {})", ACTIONS.join(", "))),
     };
     Ok(p)
 }
 
 // ── Chain reads ─────────────────────────────────────────────────────────────
-
-fn primary_identity() -> Result<(String, String), String> {
-    let gs = crate::game_state::GAME_STATE.read().map_err(|e| e.to_string())?;
-    let pid = gs.player_id.clone().unwrap_or_default();
-    let addr = gs.wallet_address.clone().unwrap_or_default();
-    if pid.is_empty() || addr.is_empty() {
-        return Err("primary identity not synced yet".into());
-    }
-    Ok((pid, addr))
-}
 
 /// Every row of a list endpoint, following `next_key` (v0.22 pages hold 1000).
 async fn walk(client: &CosmosClient, path: &str, list_key: &str) -> Result<Vec<Value>, String> {
@@ -475,7 +648,13 @@ pub fn standing_gap(plan: &Plan, owner: bool, direct: u64, ranked: u64) -> Optio
 /// ones that carry admin the chain no longer honours), pending invites and
 /// requests, and the signing player's own standing.
 pub async fn overview(guild_id: Option<String>) -> Result<Value, String> {
-    let (me, address) = primary_identity()?;
+    overview_as(&Signer::primary()?, guild_id).await
+}
+
+/// [`overview`] seen by any signer: "me" is that signer, and a founder's
+/// default guild is the one it is in (the one it founded).
+pub async fn overview_as(signer: &Signer, guild_id: Option<String>) -> Result<Value, String> {
+    let (me, address) = (signer.player_id.clone(), signer.address.clone());
     let client = CosmosClient::new();
     let player = client.query_entity("player", &me).await?;
     let p = player.get("Player").cloned().unwrap_or(Value::Null);
@@ -603,7 +782,11 @@ pub async fn overview(guild_id: Option<String>) -> Result<Value, String> {
 /// would refuse that this can see (key bits certainly; standing, rank order
 /// and member/application state as warnings).
 pub async fn preview(guild_id: Option<String>, action: &str, args: &Value) -> Result<Value, String> {
-    let (me, address) = primary_identity()?;
+    preview_as(&Signer::primary()?, guild_id, action, args).await
+}
+
+pub async fn preview_as(signer: &Signer, guild_id: Option<String>, action: &str, args: &Value) -> Result<Value, String> {
+    let (me, address) = (signer.player_id.clone(), signer.address.clone());
     let client = CosmosClient::new();
     let player = client.query_entity("player", &me).await?;
     let p = player.get("Player").cloned().unwrap_or(Value::Null);
@@ -673,7 +856,47 @@ pub async fn preview(guild_id: Option<String>, action: &str, args: &Value) -> Re
         }
     }
 
+    if action == "join_proxy" {
+        // The chain joins into the PROXY's guild, whatever guild_id says.
+        if !member {
+            problems.push(format!("a proxy signs players into its own guild; {} is not in {guild_id}", if signer.is_primary() { "you are".to_string() } else { signer.who() + " is" }));
+        }
+        let address = plan.payload["address"].as_str().unwrap_or("").to_string();
+        let (nonce, pid) = proxy_nonce(&client, &address).await;
+        if let Err(why) = verify_join_proof(
+            &guild_id,
+            &address,
+            nonce,
+            plan.payload["proofPubKey"].as_str().unwrap_or(""),
+            plan.payload["proofSignature"].as_str().unwrap_or(""),
+        ) {
+            problems.push(why);
+        }
+        if let Some(pid) = pid {
+            if let Ok(t) = client.query_entity("player", &pid).await {
+                let tg = t.pointer("/Player/guildId").and_then(|g| g.as_str()).unwrap_or("");
+                if tg == guild_id {
+                    problems.push(format!("{address} is already {pid}, a member of {guild_id}"));
+                } else if tg.starts_with("0-") {
+                    warnings.push(format!("{address} is already {pid} in {tg}; joining moves it"));
+                }
+            }
+        }
+        let n = plan.payload["playerName"].as_str().unwrap_or("");
+        if !n.is_empty() {
+            if let Some(why) = crate::mcp::guild_founding::name_refusal(n) {
+                problems.push(format!("name: {why}"));
+            }
+        }
+    }
     match action {
+        "owner" if !owner => problems.push(format!("only {guild_id}'s owner can hand it over")),
+        "primary_reactor" => {
+            let r = plan.payload["reactorId"].as_str().unwrap_or("").to_string();
+            if client.query_entity("reactor", &r).await.is_err() {
+                problems.push(format!("no reactor {r} on chain"));
+            }
+        }
         "rank_sale" => {
             let minimum = arg_u64(args, "minimum_rank").unwrap_or(0);
             let entry = num(g.get("entryRank")) as u64;
@@ -766,6 +989,7 @@ pub async fn preview(guild_id: Option<String>, action: &str, args: &Value) -> Re
         "ok": problems.is_empty(),
         "problems": problems,
         "warnings": warnings,
+        "signed_as": signer.describe(),
         "guild_id": guild_id,
         "action": plan.action,
         "summary": plan.summary,
@@ -779,20 +1003,26 @@ pub async fn preview(guild_id: Option<String>, action: &str, args: &Value) -> Re
 /// Sign `action`. Re-runs the preview, refuses on any problem, and signs
 /// exactly the previewed payload with the primary's device key.
 pub async fn execute(app: &tauri::AppHandle, guild_id: Option<String>, action: &str, args: &Value) -> Result<Value, String> {
-    let pv = preview(guild_id.clone(), action, args).await?;
+    execute_as(app, &Signer::primary()?, guild_id, action, args).await
+}
+
+/// Sign `action` as `signer` (the primary or a founder).
+pub async fn execute_as(app: &tauri::AppHandle, signer: &Signer, guild_id: Option<String>, action: &str, args: &Value) -> Result<Value, String> {
+    let pv = preview_as(signer, guild_id.clone(), action, args).await?;
     if pv.get("ok").and_then(|v| v.as_bool()) != Some(true) {
         let why: Vec<&str> = pv["problems"].as_array().map(|a| a.iter().filter_map(|v| v.as_str()).collect()).unwrap_or_default();
         return Err(format!("refused: {}", why.join("; ")));
     }
-    let (me, _) = primary_identity()?;
+    let me = signer.player_id.clone();
     let mut plan = plan(pv["guild_id"].as_str().unwrap_or(""), &me, action, args)?;
     // `join` carries the infusion ids the preview read off the chain.
     if action == "join" {
         plan.payload = pv["payload"].clone();
     }
-    let res = crate::mcp::tx_retry::sign_as_primary(app, plan.type_url, plan.payload, format!("guild:{action}")).await?;
+    let res = crate::mcp::tx_retry::sign_once(app, signer.index, plan.type_url, plan.payload, format!("guild:{action}")).await?;
     Ok(json!({
         "ok": true,
+        "signed_as": signer.describe(),
         "summary": plan.summary,
         "preview": pv,
         "tx": res.get("transactionHash").and_then(|h| h.as_str()).unwrap_or("(pending)"),
@@ -822,6 +1052,52 @@ pub(crate) mod tests {
         assert!(legacy_dec_wire("1.01").is_err(), "a fee above 1");
         assert!(legacy_dec_wire("5%x").is_err());
         assert!(legacy_dec_wire("").is_err());
+    }
+
+    #[test]
+    fn join_proxy_proof_checks_like_the_chain() {
+        use k256::ecdsa::{signature::Signer as _, Signature, SigningKey};
+        let key = SigningKey::from_slice(&[7u8; 32]).unwrap();
+        let pk = key.verifying_key().to_encoded_point(true);
+        let pk_hex = hex::encode(pk.as_bytes());
+        let address = cosmrs::crypto::PublicKey::from(cosmrs::crypto::secp256k1::VerifyingKey::from_sec1_bytes(pk.as_bytes()).unwrap()).account_id("structs").unwrap().to_string();
+        let msg = join_proxy_challenge("0-12", &address, 3);
+        assert_eq!(msg, format!("GUILD0-12ADDRESS{address}NONCE3"));
+        let sig: Signature = key.sign(msg.as_bytes());
+        let sig_hex = hex::encode(sig.to_bytes());
+        assert!(verify_join_proof("0-12", &address, 3, &pk_hex, &sig_hex).is_ok());
+        // A recovery byte on the end is tolerated, as the chain does.
+        assert!(verify_join_proof("0-12", &address, 3, &pk_hex, &format!("{sig_hex}01")).is_ok());
+        // Stale nonce, another guild, another address: refused.
+        assert!(verify_join_proof("0-12", &address, 4, &pk_hex, &sig_hex).unwrap_err().contains("does not sign"));
+        assert!(verify_join_proof("0-13", &address, 3, &pk_hex, &sig_hex).is_err());
+        assert!(verify_join_proof("0-12", "structs1xyz", 3, &pk_hex, &sig_hex).unwrap_err().contains("belongs to"));
+        assert!(verify_join_proof("0-12", &address, 3, "zz", &sig_hex).is_err());
+
+        let p = plan("0-12", "1-70", "join_proxy", &json!({ "address": address, "proof_pub_key": pk_hex, "proof_signature": sig_hex, "name": "Newbie" }), ).unwrap();
+        assert_eq!(p.type_url, "/structs.structs.MsgGuildMembershipJoinProxy");
+        assert_eq!(p.payload["playerName"], "Newbie");
+        assert_eq!(p.payload["substationId"], "");
+        assert_eq!(p.key_bits, bits::GUILD_MEMBERSHIP);
+    }
+
+    #[test]
+    fn new_guild_ops_build_the_chain_payloads() {
+        let p = plan("0-12", "1-70", "primary_reactor", &json!({ "reactor": "3-4" })).unwrap();
+        assert_eq!(p.payload, json!({ "guildId": "0-12", "reactorId": "3-4" }));
+        assert!(plan("0-12", "1-70", "primary_reactor", &json!({ "reactor": "4-4" })).is_err());
+        let p = plan("0-12", "1-70", "owner", &json!({ "player": "1-99" })).unwrap();
+        assert_eq!(p.payload, json!({ "guildId": "0-12", "owner": "1-99" }));
+        assert!(plan("0-12", "1-70", "owner", &json!({ "player": "1-70" })).is_err());
+        let p = plan("0-12", "1-70", "rank_permission", &json!({ "object": "4-9", "permissions": "substation_connection", "rank": 5 })).unwrap();
+        assert_eq!(p.payload, json!({ "objectId": "4-9", "guildId": "0-12", "permission": "1024", "rank": "5" }));
+        assert_eq!(p.key_bits, bits::ADMIN | bits::SUBSTATION_CONNECTION);
+        let p = plan("0-12", "1-70", "rank_permission_revoke", &json!({ "permissions": ["membership", "token mint"] })).unwrap();
+        assert_eq!(p.payload["objectId"], "0-12");
+        assert_eq!(p.payload["permission"], (bits::GUILD_MEMBERSHIP | bits::GUILD_TOKEN_MINT).to_string());
+        assert!(plan("0-12", "1-70", "rank_permission", &json!({ "permissions": "admin", "rank": 1 })).is_err());
+        assert!(plan("0-12", "1-70", "rank_permission", &json!({ "permissions": "nonsense", "rank": 1 })).is_err());
+        assert_eq!(bits_arg(&json!({ "p": 1536 }), "p").unwrap(), 1536);
     }
 
     #[test]
@@ -872,6 +1148,8 @@ pub(crate) mod tests {
             "player": "1-42", "substation": "4-1", "rank": 5, "amount": 1000, "level": "member",
             "endpoint": "https://example.org/guild.json", "name": "Hydro", "base": 10, "step": 5,
             "minimum_rank": 1, "join_enabled": true, "fee": "0.05",
+            "reactor": "3-1", "pfp": "https://example.org/p.png", "permissions": "membership",
+            "address": "structs1abc", "proof_pub_key": "02ab", "proof_signature": "cd",
         });
         for a in ACTIONS {
             let p = plan("0-1", "1-9", a, &args).unwrap_or_else(|e| panic!("{a}: {e}"));
