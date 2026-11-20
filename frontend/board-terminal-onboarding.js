@@ -86,7 +86,7 @@
    * a `level` row shows the change. Grouped by the stage they measure; names
    * match the tiles. */
   var TRENDS = [
-    ['signups_started', 'Signup opens', 'record', 'level', 'Acquisition'], ['signed_up', 'Finished signups', 'record', 'level', 'Acquisition'],
+    ['signups_started', 'Started signup', 'record', 'level', 'Awareness'], ['signed_up', 'Finished signups', 'record', 'level', 'Acquisition'],
     ['new', 'Signups', 'rebuilt', 'daily', 'Acquisition'], ['humans', 'Players', 'record', 'level', 'Acquisition'],
     ['tutorial_players', 'Tutorial players', 'record', 'level', 'Onboarding'], ['tutorial_completed', 'Tutorial finishers', 'record', 'level', 'Onboarding'],
     ['activations', 'Activated', 'rebuilt', 'daily', 'Activation'], ['activated_total', 'Activated, all time', 'rebuilt', 'level', 'Activation'],
@@ -99,12 +99,11 @@
   function trendDef(k) { return TRENDS.filter(function (m) { return m[0] === k; })[0]; }
   /* What each figure means: on hover wherever it is drawn, and listed on Data. */
   var DEFS = {
-    'Unique visitors': 'Distinct people who loaded the game. Not recorded yet: the game client keeps a browser id, but only sends it once someone opens signup.',
+    'Started signup': 'Awareness: signup sessions started on any guild server — the earliest thing recorded. Unique visitors are not recorded yet. Counted since telemetry began.',
     'Signups': 'Players who signed up: human players created on chain.',
     'Active users': 'Activated players who did anything on chain within the window.',
     'Anyone active': 'Every player who did anything on chain within the window, activated or not.',
     'Signups who activated': 'Of the players who signed up in the window, those who have activated.',
-    'Signup opens': 'Signup sessions opened on any guild server: the nearest measured thing to visitors.',
     'Finished signups': 'Signup sessions that reached the end of signup (the employee record).',
     'New players': 'Human players created on chain.',
     'Players': 'Human players on chain in scope: replicants and excluded players left out unless asked for.',
@@ -177,7 +176,7 @@
     if (!(total > 0)) return null;
     return total >= SMALL_N ? pct(n / total) : 'of ' + int(total);
   }
-  /* "30% of signup opens", or "1 of 5 signup opens" while 5 is too few for a percentage. */
+  /* "30% of signup starts", or "1 of 5 signup starts" while 5 is too few for a percentage. */
   function shareOf(n, total, noun) {
     if (!(total > 0)) return null;
     return total >= SMALL_N ? pct(n / total) + ' of ' + noun : int(n) + ' of ' + int(total) + ' ' + noun;
@@ -345,7 +344,7 @@
         if (kind === 'step') prev = r[1];
       });
     }
-    if (su && !bot) part('signup', 'Signup · sessions', [['opened', su.started, 'Signup opens'], ['signed', su.signed_up, 'Finished signups']]);
+    if (su && !bot) part('signup', 'Signup · sessions', [['opened', su.started, 'Started signup'], ['signed', su.signed_up, 'Finished signups']]);
     if (t.offered && !bot) {
       var loaded = (t.steps || []).filter(function (r) { return r.key === 'tutorial.loading'; })[0];
       part('tutorial', 'Combat Training · sample of new signups', [['offered', t.offered, 'Reached the offer'], ['started', loaded ? loaded.reached : null, 'Started'], ['finished', t.completed, 'Finished']]);
@@ -449,7 +448,7 @@
    *   Retention   — active users: activated players who acted in the window
    * [stage, label, value(seg, days) → [main, sub], chart metric, spark key, note]. `days` is '1'|'7'|'30'|'all'. */
   var AARRR = [
-    ['Awareness', 'Unique visitors', function () { return [null]; }, null, null, 'not recorded yet'],
+    ['Awareness', 'Started signup', function (s, w) { var x = srvWin(s, w); return x ? [x.started, x.partial ? 'since ' + shortDay(x.partial) : null] : [null]; }, 'signups_started', 'h:signups_started'],
     ['Acquisition', 'Signups', function (s, w) { return [w === 'all' ? allOf(s).players : winOf(s, w).new]; }, 'new', 'p:new'],
     ['Activation', 'Activated', function (s, w) { var a = allOf(s); return w === 'all' ? [a.activated, ofShare(a.activated, a.players)] : [winOf(s, w).activated]; }, 'activated_total', 'p:activated_total'],
     ['Activation', 'Signups who activated', function (s, w) { if (w === 'all') return [null]; var x = winOf(s, w); return [x.cohort, ofShare(x.cohort, x.new)]; }, 'activations', null],
@@ -1094,7 +1093,7 @@
   function histSeries(d, key) { return isPlain(d) ? ((d.history_series || {}).series || {})[key] : null; }
   var K = {
     opens: function (ctx) {
-      return { key: 'opens', stage: 'Awareness', label: 'Signup opens', count: true, go: function () { ctx.go('acquisition'); }, get: function (s) {
+      return { key: 'opens', stage: 'Awareness', label: 'Started signup', count: true, go: function () { ctx.go('acquisition'); }, get: function (s) {
         var x = srvWin(s, ctx.win), inc = increments(histSeries(ctx.d, 'signups_started') || []);
         return { value: int(x && x.started), raw: x && x.started, scope: x && x.partial ? 'since ' + shortDay(x.partial) : null, delta: x && !x.partial ? deltaFor(x.started, inc, ctx.win, 'daily') : null, spark: sparkOf(ctx.d, s, 'h:signups_started', isPlain(ctx.d)) };
       } };
@@ -1102,7 +1101,7 @@
     finished: function (ctx) {
       return { key: 'finished_signups', stage: 'Acquisition', label: 'Finished signups', count: true, go: function () { ctx.go('acquisition'); }, get: function (s) {
         var x = srvWin(s, ctx.win), inc = increments(histSeries(ctx.d, 'signed_up') || []);
-        return { value: int(x && x.signed_up), raw: x && x.signed_up, sub: x ? shareOf(x.signed_up, x.started, 'signup opens') : null, scope: x && x.partial ? 'since ' + shortDay(x.partial) : null,
+        return { value: int(x && x.signed_up), raw: x && x.signed_up, sub: x ? shareOf(x.signed_up, x.started, 'signup starts') : null, scope: x && x.partial ? 'since ' + shortDay(x.partial) : null,
           delta: x && !x.partial ? deltaFor(x.signed_up, inc, ctx.win, 'daily') : null, spark: sparkOf(ctx.d, s, 'h:signed_up', isPlain(ctx.d)) };
       } };
     },
@@ -1146,13 +1145,19 @@
   };
 
   // ── THE PIRATE FUNNEL: every stage a part of the one above it ──
-  /* Awareness → Acquisition → Activation → Retention over everyone who has
-   * signed up, retention judged over the chosen window. Each stage is a
-   * subset of the one before, so every percentage is "of the stage above". */
+  /* Awareness → Acquisition → Activation → Retention, retention judged over
+   * the chosen window. From Signups down each stage is a subset of the one
+   * above, so every percentage is "of the stage above". Awareness is signup
+   * starts, which the servers only record since telemetry began, so its step
+   * to Signups is the servers' own (started → finished signup) and Signups
+   * opens a new scale. */
   function funnelStages(seg, win) {
-    var a = allOf(seg), x = winOf(seg, win);
+    var a = allOf(seg), x = winOf(seg, win), srv = seg && seg.pirate_server, all = srv && srv.all;
+    var aware = all && all.started != null
+      ? { key: 'awareness', stage: 'Awareness', label: 'Started signup', value: all.started, finished: all.signed_up, ownScale: true, what: 'people who started signing up, since telemetry began' }
+      : { key: 'awareness', stage: 'Awareness', label: 'Started signup', value: null, missing: true, what: 'not recorded for this group' };
     return [
-      { key: 'awareness', stage: 'Awareness', label: 'Unique visitors', value: null, missing: true, what: 'people who found the game' },
+      aware,
       { key: 'acquisition', stage: 'Acquisition', label: 'Signups', value: a.players, what: 'players who signed up' },
       { key: 'activation', stage: 'Activation', label: 'Activated', value: a.activated, what: 'refined alpha and initiated a raid' },
       { key: 'retention', stage: 'Retention', label: 'Active users', value: x.active_activated, what: 'activated, and active ' + ({ 1: 'today', 7: 'this week', 30: 'this month' }[win] || 'in ' + win + 'd') },
@@ -1160,7 +1165,8 @@
   }
   function funnelGraph(ctx, seg) {
     var rows = funnelStages(seg, ctx.win);
-    var top = rows.reduce(function (m, r) { return Math.max(m, r.value || 0); }, 0);
+    /* Signups set the scale below Awareness, which has its own. */
+    var top = rows.reduce(function (m, r) { return r.ownScale ? m : Math.max(m, r.value || 0); }, 0);
     var g = H.el('div', 'ob-fg');
     rows.forEach(function (r, i) {
       /* Between two stages, the step itself: how many of the one above made it. */
@@ -1170,14 +1176,24 @@
         step.appendChild(H.el('span', null, ''));
         var mid = H.el('span', 'ob-fg-conv');
         mid.appendChild(H.el('i', H.iconClass('icon-caret-down', 'sui-icon-sm')));
-        if (up.missing || r.missing) mid.appendChild(H.el('span', 'ob-sub', 'not measurable until visitors are recorded'));
-        else {
+        if (up.missing || r.missing) mid.appendChild(H.el('span', 'ob-sub', 'not measurable for this group'));
+        else if (up.ownScale) {
+          /* The servers' own step: of those who started signup, how many finished it. */
+          mid.appendChild(H.el('span', 'ob-fg-rate', up.value > 0 && up.finished != null ? pct1(up.finished / up.value) : '—'));
+          mid.appendChild(H.el('span', 'ob-sub', ' finished signing up (' + int(up.finished) + ' of ' + int(up.value) + ')'));
+          step.classList.add('is-rescale');
+        } else {
           var rate = up.value > 0 ? r.value / up.value : null;
           mid.appendChild(H.el('span', 'ob-fg-rate', pct1(rate)));
           mid.appendChild(H.el('span', 'ob-sub', ' of ' + up.label.toLowerCase() + ' ' + { activation: 'activated', retention: 'are active users' }[r.key]));
         }
         step.appendChild(mid);
         step.appendChild(H.el('span', null, ''));
+        if (up.ownScale && !r.missing) {
+          step.appendChild(H.el('span', null, ''));
+          step.appendChild(H.el('span', 'ob-sub ob-fg-rescale', 'Signups count every player, also those from before signups were recorded'));
+          step.appendChild(H.el('span', null, ''));
+        }
         g.appendChild(step);
       }
       var row = H.el('div', 'ob-fg-row' + (r.missing ? ' is-missing' : ''));
@@ -1190,8 +1206,8 @@
       row.appendChild(name);
       var track = H.el('div', 'ob-fg-track');
       var bar = H.el('div', 'ob-fg-bar ob-fg-' + r.key);
-      bar.style.width = r.missing ? '100%' : Math.max(1, (ratio(r.value, top) || 0) * 100) + '%';
-      if (r.missing) bar.appendChild(H.el('span', 'ob-fg-note', 'not recorded yet'));
+      bar.style.width = r.missing || r.ownScale ? '100%' : Math.max(1, (ratio(r.value, top) || 0) * 100) + '%';
+      if (r.missing) bar.appendChild(H.el('span', 'ob-fg-note', 'not recorded'));
       track.appendChild(bar);
       row.appendChild(track);
       var num = H.el('div', 'ob-fg-num');
@@ -1203,8 +1219,8 @@
   }
   function funnelBlock(ctx) {
     var segs = ctx.segs;
-    var b = block('Pirate funnel', { key: 'funnel', scope: 'Everyone who signed up · active ' + ({ 1: 'today', 7: 'this week', 30: 'this month' }[ctx.win]),
-      def: 'Each stage is part of the one above it. Awareness waits on visitor counts, which no guild records yet.' });
+    var b = block('Pirate funnel', { key: 'funnel', scope: 'All time · active ' + ({ 1: 'today', 7: 'this week', 30: 'this month' }[ctx.win]),
+      def: 'From Signups down, each stage is part of the one above it. Awareness is people who started signing up, recorded since telemetry began; unique visitors are not recorded yet.' });
     if (segs.length === 1) { b.appendChild(funnelGraph(ctx, segs[0])); return b; }
     var grid1 = H.el('div', 'ob-fg-split');
     segs.forEach(function (s, i) {
@@ -1353,13 +1369,13 @@
     }
     var sctx = Object.assign({}, ctx, { segs: segs });
     box.appendChild(kpi(sctx, [K.opens(ctx), K.finished(ctx), K.newPlayers(ctx),
-      { key: 'dropoff', label: 'Never finished', cls: 'bad', scope: 'all time', def: 'Signup sessions that stopped before the end.', get: function (s) { var h = headline(s); return { value: int(h.started - h.signed), sub: share(h.started - h.signed, h.started) + ' of ' + int(h.started) + ' opens' }; } },
+      { key: 'dropoff', label: 'Never finished', cls: 'bad', scope: 'all time', def: 'Signup sessions that stopped before the end.', get: function (s) { var h = headline(s); return { value: int(h.started - h.signed), sub: share(h.started - h.signed, h.started) + ' of ' + int(h.started) + ' starts' }; } },
       { key: 'signup_time', label: 'Signup takes', scope: 'all time', def: DEFS.Median, get: function (s) { var x = (s.durations || {}).signup; return { value: durWords(x && x.p50), sub: x ? 'typical · one in ten over ' + durWords(x.p90) : null }; } },
     ], windowStrip(ctx), WIN_WORD[ctx.win]));
     var b = block('Signup funnel', { key: 'funnel', scope: 'All time', scopeDef: 'The guild servers keep no date range for their funnels.', chart: function () { openChart(['signups_started', 'signed_up']); } });
     b.appendChild(segs.length === 1 ? funnelSingle(ctx, segs[0], segs[0].signup.steps || [], false) : funnelCompare(segs, function (s) { return s.signup.steps; }));
     box.appendChild(b);
-    var tb = trendsBlock(ctx, ['Acquisition']);
+    var tb = trendsBlock(ctx, ['Awareness', 'Acquisition']);
     if (tb) box.appendChild(tb);
     return box;
   }
@@ -1958,7 +1974,7 @@
       rate: function (g) { return ratio(g.active, g.players) || 0; }, signups: function (g) { return ratio(g.signed_up, g.started) || 0; }, finished: function (g) { var o = g.outcome || {}; return ratio(o.completed, o.offered) || 0; } };
     var t = grid('ob-guilds', [{ label: 'Guild', k: 't', w: 'minmax(18ch, 1.2fr)', sort: 'name' }, { label: 'Active of players', k: 'b', w: 'minmax(10ch, 1.6fr)', opt: true },
       { label: 'Players', k: 'n', w: 'minmax(9ch, .55fr)', sort: 'players' }, { label: 'Active', k: 'n', w: 'minmax(8ch, .55fr)', sort: 'active' }, { label: 'Active %', k: 'n', w: 'minmax(9ch, .5fr)', opt: true, sort: 'rate' },
-      { label: 'Signups', k: 'n', w: 'minmax(14ch, .8fr)', opt: true, sort: 'signups', def: 'Finished signups as a share of signup opens, from the guild\'s own server.' },
+      { label: 'Signups', k: 'n', w: 'minmax(14ch, .8fr)', opt: true, sort: 'signups', def: 'Finished signups as a share of signup starts, from the guild\'s own server.' },
       { label: 'Tutorial', k: 'n', w: 'minmax(14ch, .8fr)', opt: true, sort: 'finished', def: 'Tutorial players who finished, from the guild\'s own server.' }, { label: '', k: 't', w: 'minmax(17ch, .9fr)' }],
       ctx.st.guildSort, ctx.redraw);
     var top = gs.reduce(function (m, g) { return Math.max(m, g.players || 0); }, 0);

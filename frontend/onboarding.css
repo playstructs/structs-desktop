@@ -269,12 +269,15 @@
 .ob-fg-conv { display: flex; justify-content: center; align-items: center; gap: var(--spacing-sm); color: var(--text-body); }
 .ob-fg-conv > i { color: var(--text-hint); }
 .ob-fg-rate { color: var(--accent-primary-active); }
+.ob-fg-rescale { text-align: center; white-space: normal; }
+.ob-fg-step.is-rescale { border-bottom: 1px dashed var(--border-subtle); padding-bottom: var(--spacing-xs); }
 .ob-fg-name { display: flex; flex-direction: column; min-width: 0; }
 .ob-fg-stage { font-family: 'ExtremeHazard', sans-serif; font-size: 8px; line-height: var(--spacing-xl); text-transform: uppercase; color: var(--text-hint); }
 .ob-fg-label { color: var(--text-body); }
 .ob-fg-track { display: flex; justify-content: center; align-items: center; height: calc(var(--spacing-xxxl) + var(--spacing-md)); background: var(--surface-default); }
 .ob-fg-bar { height: 100%; display: flex; align-items: center; justify-content: center; }
-.ob-fg-awareness { border: 1px dashed var(--border-strong); background: var(--page-background); }
+.ob-fg-awareness { background: var(--border-focus-friendly-dark); }
+.ob-fg-row.is-missing .ob-fg-awareness { border: 1px dashed var(--border-strong); background: var(--page-background); }
 .ob-fg-what { white-space: normal; }
 .ob-fg-acquisition { background: var(--accent-secondary); }
 .ob-fg-activation { background: var(--accent-primary); }
