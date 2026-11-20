@@ -984,7 +984,7 @@
       var row = H.el('div', 'ob-row');
       row.setAttribute('data-trend', m[0]);
       var name = chartLink(m[1], m[0]);
-      name.appendChild(H.el('span', 'ob-sub', 'Since ' + pts[0][0]));
+      name.title = 'Since ' + pts[0][0];
       row.appendChild(name);
       var line = H.el('span', 'ob-c ob-spark');
       line.appendChild(window.StructsCards.sparkline(pts.map(function (p) { return p[1]; }), 'player', m[1]));
@@ -1049,8 +1049,11 @@
     var hud = H.el('div', 'ob-hud ob-stages');
     var x = winOf(seg, w), srv = srvOf(seg, w), a = allOf(seg);
     var since = seg.pirate_server && seg.pirate_server.since;
-    var known = srv && srv.started != null;
-    var t1 = tile('Awareness', int(known ? srv.started : null), known || !since ? 'opened signup' : 'record since ' + since);
+    var known = srv && srv.started != null, prior = seg.pirate_server && seg.pirate_server.prior;
+    /* A window the daily record cannot cover yet: what opened since its newest reading. */
+    var t1 = known || !prior ? tile('Awareness', int(known ? srv.started : null), 'opened signup')
+      : tile('Awareness', int(prior.started), 'opened since ' + prior.day);
+    if (!known && since) t1.title = 'Daily record since ' + since;
     var t2 = tile('Acquisition', int(x.new), known ? int(srv.signed_up) + ' finished signup' : 'new players');
     var t3 = tile('Activation', int(x.activated), share(x.cohort, x.new) + ' of new players', 'ok');
     var t4 = tile('Retention', int(x.active), ACTIVE_NAME[w] + ' · ' + share(x.active_activated, a.activated) + ' of activated', 'ok');

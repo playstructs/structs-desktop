@@ -977,7 +977,8 @@ cat > "$FIX" <<'EOF'
               miners: Array.from({ length: 60 }, function (_, i) { return i % 4; }), miners_7d: Array.from({ length: 60 }, function (_, i) { return 9 + (i % 5); }),
               raiders: Array.from({ length: 60 }, function (_, i) { return i % 2; }), raiders_7d: Array.from({ length: 60 }, function (_, i) { return 5 + (i % 4); }) } },
           pirate_server: serverless || key === 'replicant' ? null : { windows: [{ days: 1, started: Math.round(4 * scale), signed_up: Math.round(2 * scale) }, { days: 7, started: Math.round(21 * scale), signed_up: Math.round(9 * scale) }, { days: 30, started: null, signed_up: null }],
-            all: { started: Math.round(2140 * scale), signed_up: Math.round(1091 * scale) }, since: new Date(now - 9 * day).toISOString().slice(0, 10) },
+            all: { started: Math.round(2140 * scale), signed_up: Math.round(1091 * scale) }, since: new Date(now - 9 * day).toISOString().slice(0, 10),
+            prior: { day: '2026-11-11', started: Math.round(40 * scale), signed_up: Math.round(12 * scale) } },
         };
       }
       var segs = f.compare === 'activity' ? [seg('active', 'Active', 0.42), seg('inactive', 'Inactive', 0.58)]

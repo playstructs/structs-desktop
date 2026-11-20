@@ -236,7 +236,15 @@ pub fn server_windows(history: &[Day], now_totals: Option<[f64; 2]>, guild: Opti
             json!({ "days": w, "started": diff(0), "signed_up": diff(1) })
         })
         .collect();
-    json!({ "windows": windows, "all": { "started": cur[0], "signed_up": cur[1] }, "since": since })
+    // Until a window fills, the newest reading before today still says how
+    // many opened since then, over however many days that was.
+    let prior = history
+        .iter()
+        .rev()
+        .filter(|d| d.ts_ms > 0 && epoch_day(d.ts_ms) < today)
+        .find_map(|d| Some((d.day.clone(), server_total(d, guild, 0)?, server_total(d, guild, 1)?)))
+        .map(|(day, s, f)| json!({ "day": day, "started": (cur[0] - s).max(0.0), "signed_up": (cur[1] - f).max(0.0) }));
+    json!({ "windows": windows, "all": { "started": cur[0], "signed_up": cur[1] }, "since": since, "prior": prior })
 }
 
 /// The daily record's own series (humans, every guild): the ones nothing
@@ -418,6 +426,10 @@ mod tests {
         let gap = vec![day(NOW - 9 * 24 * H, 10.0, 4.0)];
         let g = server_windows(&gap, Some([25.0, 9.0]), None, NOW);
         assert!(g["windows"][0]["started"].is_null() && g["windows"][1]["started"].is_null(), "{g}");
+        // …but the reading nine days back still counts what opened since.
+        assert_eq!(g["prior"]["started"], 15.0);
+        assert_eq!(g["prior"]["signed_up"], 5.0);
+        assert!(server_windows(&[], Some([1.0, 1.0]), None, NOW)["prior"].is_null());
         assert!(s["windows"][2]["started"].is_null(), "the record is not a month old");
         let g = server_windows(&h, Some([12.5, 4.5]), Some("0-1"), NOW);
         assert_eq!(g["windows"][0]["signed_up"], 0.5);

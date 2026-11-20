@@ -405,11 +405,43 @@ fn save_windows(w: &Windows) {
 }
 
 fn build(app: &tauri::AppHandle, label: &str, url: &str, title: &str, size: (f64, f64)) -> Result<tauri::WebviewWindow, String> {
-    WebviewWindowBuilder::new(app, label, WebviewUrl::App(url.into()))
-        .title(title)
-        .inner_size(size.0, size.1)
-        .build()
-        .map_err(|e| e.to_string())
+    build_at(app, label, url, title, size, None)
+}
+
+fn build_at(app: &tauri::AppHandle, label: &str, url: &str, title: &str, size: (f64, f64), at: Option<(f64, f64)>) -> Result<tauri::WebviewWindow, String> {
+    let mut b = WebviewWindowBuilder::new(app, label, WebviewUrl::App(url.into())).title(title).inner_size(size.0, size.1);
+    if let Some((x, y)) = at {
+        b = b.position(x, y);
+    }
+    b.build().map_err(|e| e.to_string())
+}
+
+/// Where a new card window goes when others are open: a step down and right
+/// of the first, one step per window already open, wrapping after
+/// `CASCADE_STEPS` so a long session stays on screen. Every card window used
+/// to open at the same default spot, so a second chart sat exactly on top of
+/// the first and read as the same window. `open`: the others' logical
+/// top-left corners.
+const CASCADE_STEP: f64 = 28.0;
+const CASCADE_STEPS: usize = 8;
+fn cascade_from(open: &[(f64, f64)]) -> Option<(f64, f64)> {
+    let first = open.iter().copied().min_by(|a, b| (a.0 + a.1).total_cmp(&(b.0 + b.1)))?;
+    let n = ((open.len() - 1) % CASCADE_STEPS) as f64 + 1.0;
+    Some((first.0 + CASCADE_STEP * n, first.1 + CASCADE_STEP * n))
+}
+
+/// The open card windows' logical top-left corners, this one aside.
+fn open_card_corners(app: &tauri::AppHandle, except: &str) -> Vec<(f64, f64)> {
+    let prefix = format!("{CARD_LABEL_PREFIX}card-");
+    app.webview_windows()
+        .iter()
+        .filter(|(l, _)| l.starts_with(&prefix) && l.as_str() != except)
+        .filter_map(|(_, w)| {
+            let scale = w.scale_factor().ok()?;
+            let p = w.outer_position().ok()?.to_logical::<f64>(scale);
+            Some((p.x, p.y))
+        })
+        .collect()
 }
 
 fn focus(w: &tauri::WebviewWindow) {
@@ -531,7 +563,8 @@ pub fn open_terminal_card(app: tauri::AppHandle, workspace: Option<String>, card
         .map(|t| format!("Structs — {t}"))
         .unwrap_or_else(|| "Structs — Terminal card".into());
     let size = card_window_size(kind.as_deref().unwrap_or(""));
-    let w = build(&app, &label, &format!("board.html?view=terminal&ws={ws_name}&card={id}"), &title, size)?;
+    let at = cascade_from(&open_card_corners(&app, &label));
+    let w = build_at(&app, &label, &format!("board.html?view=terminal&ws={ws_name}&card={id}"), &title, size, at)?;
     let key = format!("{ws_name}/{id}");
     let forget = key.clone();
     w.on_window_event(move |event| {
@@ -2283,6 +2316,18 @@ mod same_card_tests {
         assert_eq!(card_window_size("replication"), (460.0, 450.0));
         assert_eq!(card_window_size("energy"), (460.0, 560.0));
         assert_eq!(card_window_size("onboarding"), (1180.0, 860.0));
+    }
+
+    /// Two charts opened in a row both landed at the default spot, the second
+    /// exactly over the first: it looked like the first chart again.
+    #[test]
+    fn a_new_card_window_steps_off_the_ones_already_open() {
+        assert_eq!(cascade_from(&[]), None, "the first window takes the default spot");
+        assert_eq!(cascade_from(&[(640.0, 119.0)]), Some((668.0, 147.0)));
+        assert_eq!(cascade_from(&[(668.0, 147.0), (640.0, 119.0)]), Some((696.0, 175.0)), "stepped from the first, once per window open");
+        let row = |n: usize| (0..n).map(|i| (640.0 + 28.0 * i as f64, 119.0 + 28.0 * i as f64)).collect::<Vec<_>>();
+        assert_eq!(cascade_from(&row(CASCADE_STEPS)), Some((640.0 + 28.0 * 8.0, 119.0 + 28.0 * 8.0)));
+        assert_eq!(cascade_from(&row(CASCADE_STEPS + 1)), Some((668.0, 147.0)), "wraps rather than walking off screen");
         assert_eq!(card_window_size("armada"), (640.0, 620.0));
         assert_eq!(card_window_size(""), (640.0, 620.0));
     }

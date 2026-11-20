@@ -75,7 +75,7 @@ if (host) {
   const stage = (k) => host.querySelector('.ob-stages .ob-tile[data-stage="' + k + '"]');
   const tileText = (t) => t && [...t.children].map(text).join(' ').toUpperCase();
   check('AARRR opens first: five stages over the last 30 days', host.querySelectorAll('.ob-stages .ob-tile').length === 5 && /^288 ACQUISITION/.test(tileText(stage('acquisition'))) && /^58 ACTIVATION 10% OF NEW PLAYERS$/.test(tileText(stage('activation'))), tileText(stage('acquisition')) + ' | ' + tileText(stage('activation')));
-  check('…awareness older than the daily record is a dash and says since when', /^— AWARENESS RECORD SINCE /.test(tileText(stage('awareness'))), tileText(stage('awareness')));
+  check('…a window older than the daily record shows what opened since its newest reading, and says when', /^40 AWARENESS OPENED SINCE 2026-11-11$/.test(tileText(stage('awareness'))), tileText(stage('awareness')));
   check('…referral is not tracked', /^— REFERRAL NOT TRACKED$/.test(tileText(stage('referral'))));
   const aar = (label) => host.querySelector('.ob-aarrr .ob-row[data-aarrr="' + label + '"]');
   check('AARRR: every stage over 24 hours, 7 days, 30 days and all time', host.querySelectorAll('.ob-aarrr .ob-row[data-aarrr]').length === 10 && text(aar('Opened signup').children[2]) === '4' && text(aar('Opened signup').children[3]) === '21' && text(aar('Opened signup').children[4]) === '—' && text(aar('Opened signup').children[5]) === '2,140', aar('Opened signup') && text(aar('Opened signup')));
@@ -175,6 +175,7 @@ if (host) {
   const tr = (k) => host.querySelector('.ob-trends .ob-row[data-trend="' + k + '"]');
   check('TRENDS: each figure with its line, now, a week and a month', tr('humans') && tr('humans').querySelector('svg') && text(tr('humans').children[2]) === '478' && text(tr('humans').children[3]) === '+14' && text(tr('humans').children[4]) === '+60', tr('humans') && text(tr('humans')));
   check('TRENDS: a server figure starts when the record does', tr('signed_up') && text(tr('signed_up').children[2]) === '119' && text(tr('signed_up').children[4]) === '—', tr('signed_up') && text(tr('signed_up')));
+  check('TRENDS: when a series starts is on hover, not a line under every name', !host.querySelector('.ob-trends .ob-row[data-trend] .ob-sub') && /^Since \d{4}-/.test(tr('humans').querySelector('a.ob-link').title));
   check('TRENDS: a rebuilt series reaches back past the record, and is labelled for what it counts', tr('refiners_7d') && /^Refined in 7 days/.test(text(tr('refiners_7d').children[0])) && !tr('refiners') && /^Ever refined/.test(text(tr('refined').children[0])));
   check('TRENDS: a daily count sums over the window', tr('new') && !/^\+/.test(text(tr('new').children[3])));
   check('TRENDS reads the guild alone: replicants and the windows are off', !host.querySelector('.ob-controls [data-control="guild"]').disabled && host.querySelector('.ob-controls [data-control="reps"]').classList.contains('is-off') && host.querySelector('.ob-controls [data-control="active"]').disabled);
