@@ -51,6 +51,16 @@
 //!
 //! Neither marker is perfect: a human who gives an alt full control reads as
 //! a replicant, and a bot with a name of its own reads as human.
+//!
+//! ## Test accounts
+//!
+//! The guilds keep their own exclusion lists, but those only filter their
+//! report routes: the chain tables, every guild's members and Imperial One
+//! (no API) never see them. So a name rule (`is_test_name`) marks the
+//! accounts testers and QA scripts create, and `snapshot_for(false)` leaves
+//! them out of every figure, the daily record included. The card's
+//! "Include excluded players" brings them back. Data lists who the rule
+//! caught, so a wrong catch is visible.
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -278,6 +288,9 @@ pub struct Snapshot {
     pub refreshed_ms: i64,
     pub replicants_ms: i64,
     pub replicants_source: String,
+    /// Test accounts by name (`is_test_name`), id → (name, guild): in both
+    /// views, so the card can list them; left out of `players`/`stats` in the trimmed one.
+    pub tests: HashMap<String, (String, String)>,
 }
 
 impl Snapshot {
@@ -288,35 +301,103 @@ impl Snapshot {
 }
 
 static GENERATION: AtomicU64 = AtomicU64::new(1);
-static SNAPSHOT: LazyLock<Mutex<Option<(u64, Instant, Arc<Snapshot>)>>> = LazyLock::new(|| Mutex::new(None));
+/// (generation, built, everyone, test accounts left out)
+type Views = (u64, Instant, Arc<Snapshot>, Arc<Snapshot>);
+static SNAPSHOT: LazyLock<Mutex<Option<Views>>> = LazyLock::new(|| Mutex::new(None));
 
 /// The tables changed: the next read may rebuild.
 fn touch() {
     GENERATION.fetch_add(1, Ordering::SeqCst);
 }
 
+/// The card's one clock for "did something": in the snapshot every figure
+/// reads, `last_active_ms` is the latest of `lastAction`, a mine, a refine,
+/// a raid and a played day. `lastAction` alone lags the ledger and the raid
+/// log, so a player who mined or raided could read as "never acted" on one
+/// block and "acted" on the next. A played day counts from its start.
+fn seen(p: &PlayerFacts, stats: Option<&PlayerStats>) -> PlayerFacts {
+    let mut p = p.clone();
+    p.last_active_ms = [
+        p.last_active_ms,
+        p.last_mined_ms,
+        p.last_refined_ms,
+        stats.and_then(|s| s.last_raid_ms),
+        p.play_days.last().map(|d| *d as i64 * DAY_MS),
+    ]
+    .into_iter()
+    .flatten()
+    .max();
+    p
+}
+
+/// Everyone, test accounts included.
 pub fn snapshot() -> Arc<Snapshot> {
+    snapshot_for(true)
+}
+
+/// The shared view; `include_tests: false` leaves test accounts out of
+/// `players` and `stats`, which is what every default figure reads.
+pub fn snapshot_for(include_tests: bool) -> Arc<Snapshot> {
     let generation = GENERATION.load(Ordering::SeqCst);
     let mut held = SNAPSHOT.lock().unwrap_or_else(|p| p.into_inner());
-    if let Some((built, at, s)) = held.as_ref() {
+    if let Some((built, at, all, trimmed)) = held.as_ref() {
         if *built == generation || at.elapsed() < SNAPSHOT_MIN_AGE {
-            return s.clone();
+            return if include_tests { all.clone() } else { trimmed.clone() };
         }
     }
-    let s = {
+    let (all, trimmed) = {
         let u = UNIVERSE.lock().unwrap_or_else(|p| p.into_inner());
-        Arc::new(Snapshot {
-            players: u.players.clone(),
-            stats: u.stats(),
+        let stats = u.stats();
+        let players: HashMap<String, PlayerFacts> = u.players.iter().map(|(id, p)| (id.clone(), seen(p, stats.get(id)))).collect();
+        let tests: HashMap<String, (String, String)> = players
+            .iter()
+            .filter(|(id, p)| !u.replicants.contains_key(*id) && !u.likely.contains(*id) && is_test_name(&p.name))
+            .map(|(id, p)| (id.clone(), (p.name.clone(), p.guild.clone())))
+            .collect();
+        let view = |players: HashMap<String, PlayerFacts>, stats: HashMap<String, PlayerStats>| Snapshot {
+            players,
+            stats,
             replicants: u.replicants.clone(),
             likely: u.likely.clone(),
             refreshed_ms: u.refreshed_ms,
             replicants_ms: u.replicants_ms,
             replicants_source: u.replicants_source.clone(),
-        })
+            tests: tests.clone(),
+        };
+        let trimmed = view(
+            players.iter().filter(|(id, _)| !tests.contains_key(*id)).map(|(k, v)| (k.clone(), v.clone())).collect(),
+            stats.iter().filter(|(id, _)| !tests.contains_key(*id)).map(|(k, v)| (k.clone(), v.clone())).collect(),
+        );
+        (Arc::new(view(players, stats)), Arc::new(trimmed))
     };
-    *held = Some((generation, Instant::now(), s.clone()));
-    s
+    *held = Some((generation, Instant::now(), all.clone(), trimmed.clone()));
+    if include_tests { all } else { trimmed }
+}
+
+/// A test account, by the names testers and QA scripts give them:
+/// - a timestamp after a T (`T2610231510`, `T261020-1555`, `T202711211234`);
+/// - ending, digits aside, in "test" or "tester" (`claudetest2`, `deploytest01`,
+///   `QATester`, `RegTester260926`), or starting with "test";
+/// - QA in capitals at either end (`LogoutQA972`, `QAbot`);
+/// - starting with "tutorial" (`TutorialGuy2`): the tutorial's own testers.
+/// A name of a human's own that happens to match is the cost; Data lists
+/// every catch.
+pub fn is_test_name(name: &str) -> bool {
+    let name = name.trim();
+    if let Some(rest) = name.strip_prefix('T') {
+        let digits = rest.chars().filter(|c| c.is_ascii_digit()).count();
+        if digits >= 8 && rest.chars().all(|c| c.is_ascii_digit() || c == '-') {
+            return true;
+        }
+    }
+    let core = name.trim_end_matches(|c: char| c.is_ascii_digit() || c == '_' || c == '-');
+    let lower = core.to_lowercase();
+    lower.ends_with("test")
+        || lower.ends_with("tester")
+        || lower.starts_with("test")
+        || lower.starts_with("tutorial")
+        || core.starts_with("QA")
+        || core.ends_with("QA")
 }
 
 fn text(v: Option<&Value>) -> String {
@@ -863,6 +944,17 @@ pub fn finish_round(telemetry: &HashSet<String>) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn last_seen_is_the_latest_of_every_clock() {
+        let p = PlayerFacts { last_active_ms: None, last_mined_ms: Some(5 * DAY_MS), play_days: vec![3, 9], ..Default::default() };
+        let r = PlayerStats { last_raid_ms: Some(7 * DAY_MS), ..Default::default() };
+        assert_eq!(seen(&p, Some(&r)).last_active_ms, Some(9 * DAY_MS), "a played day beats a raid and a mine");
+        assert_eq!(seen(&p, None).last_active_ms, Some(9 * DAY_MS));
+        assert_eq!(seen(&PlayerFacts::default(), None).last_active_ms, None, "nothing on any clock: never acted");
+        let q = PlayerFacts { last_active_ms: Some(20 * DAY_MS), last_refined_ms: Some(DAY_MS), ..Default::default() };
+        assert_eq!(seen(&q, None).last_active_ms, Some(20 * DAY_MS));
+    }
+
     use super::*;
     use serde_json::json;
 
@@ -996,6 +1088,17 @@ mod tests {
         p.insert("1-9".into(), PlayerFacts { ledger_v: LEDGER_V, ledger_ms: now - 3_600_000, last_active_ms: Some(now), ..Default::default() });
         assert_eq!(ledger_plan(&p, |_| false, now), vec!["1-50", "1-5", "1-7"]);
         assert_eq!(ledger_plan(&p, |id| id == "1-50", now), vec!["1-5", "1-7", "1-50"], "every human before any replicant");
+    }
+
+    #[test]
+    fn test_accounts_are_known_by_their_names() {
+        for n in ["T2610231510", "T261020-1555", "T202711211234", "T2026112101221", "claudetest2", "deploytest01", "blitztest1",
+                  "QATester", "RegTester260926", "TutorialTest", "TutorialGuy2", "LogoutQA972", "tester", "Test_7"] {
+            assert!(is_test_name(n), "{n}");
+        }
+        for n in ["Tutorian", "Tutorianly", "Thav", "T2", "Trollymog", "Contestant", "mr_robot", "Aqua", "raider", "Qlyve", "", "Jeffomy"] {
+            assert!(!is_test_name(n), "{n}");
+        }
     }
 
     #[test]

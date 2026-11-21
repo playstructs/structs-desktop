@@ -216,6 +216,10 @@ pub fn series(members: &[Member], now: i64) -> Value {
 /// per-guild totals were kept falls back to the summed total.
 fn server_since(d: &Day, cur: &BTreeMap<String, [f64; 2]>, version: &str, guild: Option<&str>) -> Option<[f64; 2]> {
     let s = d.server.as_ref().filter(|s| s.version == version)?;
+    // A day some guild failed on cannot stand for every guild.
+    if s.partial && guild.is_none() {
+        return None;
+    }
     let diff = |now: [f64; 2], then: [f64; 2]| [(now[0] - then[0]).max(0.0), (now[1] - then[1]).max(0.0)];
     match guild {
         Some(g) => Some(diff(*cur.get(g)?, *s.guilds.get(g)?)),
@@ -267,7 +271,13 @@ pub fn server_windows(history: &[Day], cur: Option<&BTreeMap<String, [f64; 2]>>,
         .filter(|d| d.ts_ms > 0 && epoch_day(d.ts_ms) < today)
         .find_map(|d| Some((d.day.clone(), server_since(d, cur, version, guild)?)))
         .map(|(day, x)| json!({ "day": day, "started": x[0], "signed_up": x[1] }));
-    json!({ "windows": windows, "all": { "started": all[0], "signed_up": all[1] }, "since": since, "prior": prior, "version": version })
+    // The longest stretch the record can answer: since its oldest usable day.
+    let oldest = history
+        .iter()
+        .filter(|d| d.ts_ms > 0 && epoch_day(d.ts_ms) < today)
+        .find_map(|d| Some((d.day.clone(), server_since(d, cur, version, guild)?)))
+        .map(|(day, x)| json!({ "day": day, "started": x[0], "signed_up": x[1] }));
+    json!({ "windows": windows, "all": { "started": all[0], "signed_up": all[1] }, "since": since, "prior": prior, "oldest": oldest, "version": version })
 }
 
 /// The daily record's own series (humans, every guild): the ones nothing
@@ -290,8 +300,8 @@ pub fn history_series(history: &[Day], now: i64) -> Value {
             "dau": col(&|r| Some(r.active_1d as f64)),
             "wau": col(&|r| Some(r.active_7d as f64)),
             "mau": col(&|r| Some(r.active_30d as f64)),
-            "signups_started": col(&|r| srv(r, &version).map(|s| s.signups_started)),
-            "signed_up": col(&|r| srv(r, &version).map(|s| s.signed_up)),
+            "signups_started": col(&|r| srv(r, &version).filter(|s| !s.partial).map(|s| s.signups_started)),
+            "signed_up": col(&|r| srv(r, &version).filter(|s| !s.partial).map(|s| s.signed_up)),
         },
         "version": version,
     })
@@ -561,14 +571,15 @@ pub const LEFT_LISTED: usize = 200;
 /// Active users listed; the count is always all of them.
 pub const ACTIVE_LISTED: usize = 200;
 
-/// The active users by name: activated, and did anything on chain in the
-/// last `PLAYING_DAYS`. Most days played (last `PLAYED_WINDOW`) first.
+/// The active users by name: activated, and did anything in the last
+/// `PLAYED_WINDOW` days, so the page can list any of its windows (`within`
+/// = how many in each; the list is cut by `last_ms`). Most days played first.
 pub fn active_users(members: &[Member], ids: &[&str], now: i64) -> Value {
     let today = epoch_day(now);
     let mut rows: Vec<(usize, &Member, &str)> = members
         .iter()
         .zip(ids)
-        .filter(|(m, _)| m.activated() && within(m.facts.last_active_ms, now, PLAYING_DAYS as i64))
+        .filter(|(m, _)| m.activated() && within(m.facts.last_active_ms, now, PLAYED_WINDOW as i64))
         .map(|(m, id)| (m.played_days().iter().filter(|d| **d > today - PLAYED_WINDOW && **d <= today).count(), m, *id))
         .collect();
     rows.sort_by(|a, b| b.0.cmp(&a.0).then(b.1.facts.last_active_ms.cmp(&a.1.facts.last_active_ms)));
@@ -580,7 +591,8 @@ pub fn active_users(members: &[Member], ids: &[&str], now: i64) -> Value {
                 "played_30": n, "raids": m.stats.map(|s| s.raids_initiated), "refined_g": m.facts.refined_g })
         })
         .collect();
-    json!({ "days": PLAYING_DAYS, "total": rows.len(), "players": list })
+    let n = |w: i64| rows.iter().filter(|(_, m, _)| within(m.facts.last_active_ms, now, w)).count();
+    json!({ "days": PLAYED_WINDOW, "total": rows.len(), "within": { "1": n(1), "7": n(7), "30": n(30) }, "players": list })
 }
 
 /// How far back `played` looks.
@@ -798,6 +810,13 @@ mod tests {
         assert_eq!(g["prior"]["signed_up"], 5.0);
         assert!(server_windows(&[], Some(&now), V, None, NOW)["prior"].is_null());
         assert!(s["windows"][2]["started"].is_null(), "the record is not a month old");
+        assert_eq!(s["oldest"]["started"], 15.0, "the oldest usable day answers the longest stretch it can");
+        assert_eq!(s["oldest"]["day"], s["since"]);
+        // A day a guild failed on stands for that guild, never for every guild.
+        let mut part = day(NOW - 8 * 24 * H, 10.0, 4.0);
+        part.server.as_mut().unwrap().partial = true;
+        let p = server_windows(&[part], Some(&now), V, None, NOW);
+        assert!(p["windows"][1]["started"].is_null() && p["oldest"].is_null(), "{p}");
         let g = server_windows(&h, Some(&now), V, Some("0-1"), NOW);
         assert_eq!(g["windows"][0]["signed_up"], 0.5);
         assert_eq!(g["all"]["started"], 12.5);
@@ -948,7 +967,7 @@ mod tests {
     }
 
     #[test]
-    fn active_users_are_activated_players_seen_this_week_most_days_first() {
+    fn active_users_are_activated_players_seen_in_each_window_most_days_first() {
         let a = joiner(60, Some(1), Some(30), &[1, 2, 3]);
         let b = joiner(60, Some(2), Some(30), &[2]);
         let gone = joiner(60, Some(20), Some(30), &[]);
@@ -956,7 +975,8 @@ mod tests {
         let r = raids(24 * 40);
         let ms = [Member { facts: &b, stats: Some(&r) }, Member { facts: &a, stats: Some(&r) }, Member { facts: &gone, stats: Some(&r) }, Member { facts: &unactivated, stats: None }];
         let u = active_users(&ms, &["1-2", "1-1", "1-3", "1-4"], NOW);
-        assert_eq!(u["total"], 2, "activated and seen in 7 days: {u}");
+        assert_eq!(u["total"], 3, "activated and seen in 30 days: {u}");
+        assert_eq!((u["within"]["1"].as_u64(), u["within"]["7"].as_u64(), u["within"]["30"].as_u64()), (Some(0), Some(2), Some(3)), "{u}");
         assert_eq!((u["players"][0]["player_id"].as_str(), u["players"][0]["played_30"].as_u64()), (Some("1-1"), Some(3)), "most days played first");
     }
 

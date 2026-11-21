@@ -40,7 +40,7 @@
 .ob-kpi-head .subnav .sui-screen-nav { padding: 0; }
 #board-layout .ob-kpi-head .ob-windows { flex: 0 1 auto; width: auto; min-width: 0; margin-right: auto; }
 .ob-chip { color: var(--text-hint); border: 1px solid var(--border-subtle); padding: 0 var(--spacing-md); }
-.ob-hud { display: grid; grid-template-columns: repeat(auto-fill, minmax(28ch, 1fr)); gap: var(--spacing-lg); }
+.ob-hud { display: grid; grid-template-columns: repeat(auto-fit, minmax(22ch, 1fr)); gap: var(--spacing-lg); }
 .ob-hud .ob-tile { container: obtile / inline-size; position: relative; align-items: flex-start; justify-content: flex-start; background: var(--page-background); border: 1px solid var(--border-subtle); padding: var(--spacing-lg) var(--spacing-xl); min-width: 0; }
 .ob-hud .ob-tile { display: flex; flex-direction: column; gap: var(--spacing-xs); text-align: left; }
 .ob-tile-top { display: flex; flex-wrap: wrap; justify-content: space-between; gap: var(--spacing-sm); color: var(--text-hint); min-height: var(--spacing-xl); }
@@ -316,4 +316,5 @@
 .ob-scope-line { display: inline-flex; flex-wrap: wrap; align-items: center; gap: var(--spacing-md); }
 .ob-cohort.is-empty > span { color: var(--text-hint); }
 /* Counted before the activity feed reaches back: mines, refines and raids only. */
-.ob-heat.is-partial, .ob-c.is-partial { opacity: .55; }
+/* Before the activity feed's reach: faint, and never coloured as a warning. */
+.ob-heat.is-partial, .ob-c.is-partial { opacity: .55; color: var(--text-hint); }

@@ -39,8 +39,9 @@
 //! database by id or username pattern) out of the aggregate, players and runs
 //! reads unless `filters.include_excluded` asks for everyone; every read of one
 //! card sends the same choice, and the caches key on it. `/player/{id}` and
-//! the chain tables are never filtered, so the sample, lifecycle and cohorts
-//! count everyone either way.
+//! the chain tables are never filtered by the guilds, so the same choice also
+//! leaves out the test accounts the app knows by name
+//! (`onboarding_players::is_test_name`): their sessions, runs and chain facts.
 //!
 //! `recorded_at` is the SERVER's insert time and the client batches steps
 //! that land within 2 s of each other, so a dwell is accurate to a couple of
@@ -958,7 +959,7 @@ fn spawn_crawl(entries: Vec<GuildApiEntry>, idle_hours: u32) {
         let snapshot = PLAYERS.lock().unwrap_or_else(|p| p.into_inner()).clone();
         crate::mcp::cache_store::save_in_background(CACHE_NAME, snapshot);
         crate::mcp::onboarding_players::finish_round(&telemetry_players());
-        crate::mcp::onboarding_history::record_chain(&crate::mcp::onboarding_players::snapshot(), now_ms());
+        crate::mcp::onboarding_history::record_chain(&crate::mcp::onboarding_players::snapshot_for(false), now_ms());
         record_server_totals(&entries_kept).await;
         {
             let mut st = CRAWL.lock().unwrap_or_else(|p| p.into_inner());
@@ -1135,15 +1136,13 @@ fn signup_totals(a: &GuildAggregate) -> Option<[f64; 2]> {
     Some([funnel_started(raw).unwrap_or(0.0), signed])
 }
 
-/// The day's running totals, when every guild that records telemetry
-/// answered: a partial sum would read as a fall in the trend. A guild with
-/// no onboarding routes records nothing, so it is left out rather than
-/// spoiling the day for every other guild.
+/// The day's running totals. A guild with no onboarding routes records
+/// nothing and is left out. A guild that failed to answer is left out too,
+/// and the day is marked `partial`: every other guild's own totals still
+/// count, but the summed totals are not a reading (they would dip).
 fn server_day(version: &str, read: &[(String, &GuildAggregate)]) -> Option<crate::mcp::onboarding_history::ServerDay> {
-    if read.iter().any(|(_, a)| a.error.is_some() && !a.missing) {
-        return None;
-    }
-    let read: Vec<(String, &GuildAggregate)> = read.iter().filter(|(_, a)| !a.missing).cloned().collect();
+    let partial = read.iter().any(|(_, a)| a.error.is_some() && !a.missing);
+    let read: Vec<(String, &GuildAggregate)> = read.iter().filter(|(_, a)| !a.missing && a.error.is_none()).cloned().collect();
     if read.is_empty() {
         return None;
     }
@@ -1156,6 +1155,7 @@ fn server_day(version: &str, read: &[(String, &GuildAggregate)]) -> Option<crate
         tutorial_players: unique("players"),
         tutorial_completed: unique("completed"),
         guilds,
+        partial,
     })
 }
 
@@ -1401,7 +1401,11 @@ pub async fn terminal_onboarding(
     let now = now_ms();
     let cutoff = now - active_days as i64 * 86_400_000;
 
-    let sessions_all = PLAYERS.lock().unwrap_or_else(|p| p.into_inner()).clone();
+    // Test accounts by name leave with the guilds' excluded players.
+    let universe = crate::mcp::onboarding_players::snapshot_for(all);
+    let is_test = |pid: &str| !all && universe.tests.contains_key(pid);
+    let mut sessions_all = PLAYERS.lock().unwrap_or_else(|p| p.into_inner()).clone();
+    sessions_all.retain(|pid, _| !is_test(pid));
     versions = sort_versions(versions.into_iter().chain(sessions_all.values().map(|s| s.version.clone()).filter(|v| !v.is_empty())).collect());
     let version = version
         .filter(|v| !v.trim().is_empty())
@@ -1413,7 +1417,6 @@ pub async fn terminal_onboarding(
     }
     start_history_ticker();
 
-    let universe = crate::mcp::onboarding_players::snapshot();
     let (players, stats, replicants) = (&universe.players, &universe.stats, &universe.replicants);
     let is_rep = |pid: &str| universe.is_replicant(pid);
     let compared_versions: Vec<String> = if clean(&filters.compare).as_deref() == Some("version") {
@@ -1425,7 +1428,13 @@ pub async fn terminal_onboarding(
         compared_versions.iter().map(move |v| async move { ((e.id.clone(), v.clone()), guild_runs(&e.id, api, v, idle_hours, all, fresh).await) })
     }))
     .await;
-    let runs_of: HashMap<(String, String), GuildRuns> = guild_reads.into_iter().collect();
+    let runs_of: HashMap<(String, String), GuildRuns> = guild_reads
+        .into_iter()
+        .map(|(k, mut g)| {
+            g.runs.retain(|r| r.player.as_deref().map_or(true, |p| !is_test(p)));
+            (k, g)
+        })
+        .collect();
     let runs_all = || runs_of.values().flat_map(|g| g.runs.iter());
     let version_of: HashMap<&str, &str> = sessions_all.iter().filter(|(_, s)| !s.events.is_empty()).map(|(pid, s)| (pid.as_str(), s.version.as_str())).collect();
     let interface_of: HashMap<&str, &str> = sessions_all
@@ -1687,11 +1696,12 @@ pub async fn terminal_onboarding(
         .collect();
 
     // How players who took the tutorial fare against those who did not: the
-    // base population, from when telemetry began, so every group had the offer.
+    // base population, joined since the first recorded signup (the same floor
+    // as coverage), so every group had the offer.
     let tutorial_impact: Vec<Value> = {
         let rows: Vec<(&str, crate::mcp::pirate::Member)> = players
             .iter()
-            .filter(|(pid, p)| player_index(pid).map_or(false, |i| i >= TELEMETRY_FLOOR_INDEX) && base.wants(&p.guild, interface_of.get(pid.as_str()).copied().unwrap_or(NO_INTERFACE), is_active(Some(p), cutoff), is_rep(pid)))
+            .filter(|(pid, p)| p.created_ms.zip(telemetry_since).map_or(false, |(c, t)| c >= t) && base.wants(&p.guild, interface_of.get(pid.as_str()).copied().unwrap_or(NO_INTERFACE), is_active(Some(p), cutoff), is_rep(pid)))
             .map(|(pid, p)| (group_of(pid), crate::mcp::pirate::Member { facts: p, stats: stats.get(pid) }))
             .collect();
         crate::mcp::pirate::tutorial_impact(&rows, now)
@@ -1707,6 +1717,11 @@ pub async fn terminal_onboarding(
         crate::mcp::pirate::series(&ms, now)
     };
 
+    let tests: Vec<Value> = {
+        let mut t: Vec<_> = universe.tests.iter().collect();
+        t.sort_by_key(|(id, _)| std::cmp::Reverse(player_index(id).unwrap_or(0)));
+        t.into_iter().map(|(id, (n, g))| json!({ "id": id, "name": n, "guild": g })).collect()
+    };
     let crawl = {
         let st = CRAWL.lock().unwrap_or_else(|p| p.into_inner());
         let u = crate::mcp::onboarding_players::UNIVERSE_CRAWL.lock().unwrap_or_else(|p| p.into_inner()).clone();
@@ -1721,6 +1736,11 @@ pub async fn terminal_onboarding(
             "replicants": { "known": replicants.len(), "likely": universe.likely.len(), "primaries": replicants.values().collect::<HashSet<_>>().len(),
                             "source": universe.replicants_source,
                             "read_ms": if universe.replicants_ms > 0 { json!(universe.replicants_ms) } else { Value::Null } },
+            // Who the name rule caught, left out unless excluded players are included.
+            "tests": {
+                "left_out": !all,
+                "players": tests,
+            },
         })
     };
     let guilds: Vec<Value> = entries
@@ -2140,7 +2160,8 @@ mod tests {
         assert!(day.guilds.contains_key("0-1") && !day.guilds.contains_key("0-2"));
         let mut broken = signup_agg(1.0, 1.0);
         broken.error = Some("Guild API 500".into());
-        assert!(server_day("tutorial-4", &[("0-1".into(), &ok), ("0-3".into(), &broken)]).is_none(), "a real failure still spoils the day");
+        let part = server_day("tutorial-4", &[("0-1".into(), &ok), ("0-3".into(), &broken)]).expect("a failed guild no longer spoils the day");
+        assert!(part.partial && part.guilds.contains_key("0-1") && !part.guilds.contains_key("0-3"), "the answering guild counts; the day is marked partial");
         assert!(server_day("tutorial-4", &[("0-2".into(), &none)]).is_none(), "nobody records telemetry: no day");
     }
 

@@ -1074,7 +1074,8 @@ cat > "$FIX" <<'EOF'
         crawl: { running: true, finished_ms: now - 200000,
           guilds: { '0-1': { candidates: 3, team_skipped: 1, todo: 2, fetched: 2, errors: 0, last_error: null }, '0-5': { candidates: 9810, team_skipped: 0, replicants_skipped: 6000, todo: 3810, fetched: 3810, errors: 0, last_error: null } },
           players: { known: 9612, ledgers: 4100, humans: 445, human_ledgers: 445, refreshed_ms: now - 60000, round: { ledger_todo: 3000, ledger_read: 1200, ledger_errors: 0 } },
-          replicants: { known: 7667, likely: 1500, primaries: 9, source: 'guild', read_ms: now - 60000 } },
+          replicants: { known: 7667, likely: 1500, primaries: 9, source: 'guild', read_ms: now - 60000 },
+          tests: { left_out: true, players: [{ id: '1-14649', name: 'blitztest1', guild: '0-2' }, { id: '1-7565', name: 'T2610231510', guild: '0-2' }] } },
       };
       r.trend_series = segs[0].pirate_series;
       /* A first read before the crawls have found anything: 'reading' while

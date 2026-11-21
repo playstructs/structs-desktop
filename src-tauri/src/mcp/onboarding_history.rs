@@ -19,7 +19,9 @@ const DAY_MS: i64 = 86_400_000;
 /// The definitions a row's figures were counted by. Bump it when one
 /// changes: Trends and the Chart card draw only the newest version's rows as
 /// one line, so a redefinition starts a new line instead of reading as a step.
-pub const DEF_VERSION: u32 = 1;
+/// 2 (2026-11-21): "active" = last seen by any clock (lastAction, a mine, a
+/// refine, a raid, a played day), not `lastAction` alone.
+pub const DEF_VERSION: u32 = 2;
 fn def_v1() -> u32 {
     1
 }
@@ -66,6 +68,10 @@ pub struct ServerDay {
     /// Each guild's own `[signups started, signups finished]`.
     #[serde(default)]
     pub guilds: BTreeMap<String, [f64; 2]>,
+    /// A guild that records telemetry failed to answer: `guilds` holds the
+    /// rest, and the summed totals are not a reading (they would dip).
+    #[serde(default)]
+    pub partial: bool,
 }
 
 /// (metric, unit, label), for the Chart card.
@@ -163,7 +169,9 @@ pub fn record_chain(s: &Snapshot, now: i64) {
 pub fn record_server(server: ServerDay, now: i64) {
     let mut rows = HISTORY.lock().unwrap_or_else(|p| p.into_inner());
     if let Some(last) = rows.last_mut().filter(|r| r.day == day_of(now)) {
-        if last.server.as_ref() != Some(&server) {
+        // A full reading is never replaced by a partial one the same day.
+        let downgrade = server.partial && last.server.as_ref().map_or(false, |s| !s.partial && s.version == server.version);
+        if !downgrade && last.server.as_ref() != Some(&server) {
             last.server = Some(server);
             save(&rows);
         }
@@ -181,7 +189,7 @@ pub fn last_ms() -> i64 {
 }
 
 fn value_of(d: &Day, metric: &str) -> Option<f64> {
-    let s = d.server.as_ref();
+    let s = d.server.as_ref().filter(|s| !s.partial);
     Some(match metric {
         "humans" => d.humans as f64,
         "replicants" => d.replicants as f64,
