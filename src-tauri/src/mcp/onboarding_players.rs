@@ -122,6 +122,78 @@ pub struct PlayerFacts {
     /// Which fold of the ledger the figures came from: an older one is read again.
     #[serde(default)]
     pub ledger_v: u8,
+    /// Days (`epoch_day`, ascending) with a gameplay action in the activity
+    /// feed (`PLAYED_ACTIONS`). The feed serves 30 days, so older days are
+    /// the ones earlier reads kept.
+    #[serde(default)]
+    pub play_days: Vec<i32>,
+    /// When the activity feed was last read for this player; 0 = never.
+    #[serde(default)]
+    pub activity_ms: i64,
+}
+
+/// What counts as playing in the per-player activity feed, as (category,
+/// role): the player DID it, not had it done to them. Mines, refines and raid
+/// starts are also in the ledger and the raid log, which reach further back.
+/// `struct_status` is left out: it also fires when a struct is destroyed, and
+/// the daily counts cannot tell a finished deploy from a loss.
+pub const PLAYED_ACTIONS: &[(&str, &str)] = &[
+    ("struct_block_ore_mine_start", "owner"),
+    ("struct_block_ore_refine_start", "owner"),
+    ("raid_status", "fleet_owner"),
+    ("struct_attack", "attacker"),
+    ("struct_defense_add", "defender"),
+    ("struct_defense_remove", "defender"),
+    ("fleet_arrive", "fleet_owner"),
+    ("fleet_depart", "fleet_owner"),
+    ("struct_block_build_start", "owner"),
+    ("struct_move", "owner"),
+];
+/// How far back the per-player activity feed reaches, in days.
+const ACTIVITY_DAYS: i32 = 30;
+const ACTIVITY_BUDGET: usize = 1_500;
+const ACTIVITY_CONCURRENCY: usize = 6;
+
+/// The days a `/planet-activity/player/{id}/stats` answer says the player
+/// played, merged into what was kept: days inside the feed's window are
+/// replaced by the answer (a complete count there), older ones kept.
+pub fn fold_play_days(kept: &[i32], rows: &[Value], today: i32) -> Vec<i32> {
+    let floor = today - ACTIVITY_DAYS;
+    let mut days: Vec<i32> = kept.iter().copied().filter(|d| *d < floor).collect();
+    for r in rows {
+        let (cat, role) = (text(r.get("category")), text(r.get("role")));
+        if !PLAYED_ACTIONS.iter().any(|(c, ro)| *c == cat && *ro == role) || num(r.get("count")).map_or(true, |n| n <= 0.0) {
+            continue;
+        }
+        if let Some(t) = r.get("bucket").and_then(|v| v.as_str()).and_then(crate::mcp::raid_view::parse_guild_time) {
+            days.push(epoch_day(t as i64));
+        }
+    }
+    days.sort_unstable();
+    days.dedup();
+    days
+}
+
+/// Whose activity to read now: humans who ever acted, never read first, then
+/// those who acted since their last read (at least `LEDGER_REFRESH_MS` ago);
+/// newest player first. Replicants are not players, so never.
+pub fn activity_plan(players: &HashMap<String, PlayerFacts>, is_replicant: impl Fn(&str) -> bool, now: i64) -> Vec<String> {
+    let index = |id: &str| id.split_once('-').and_then(|(_, i)| i.parse::<u64>().ok()).unwrap_or(0);
+    let mut tiers: [Vec<&String>; 2] = Default::default();
+    for (id, p) in players {
+        if !id.starts_with("1-") || is_replicant(id) || p.last_active_ms.is_none() {
+            continue;
+        }
+        if p.activity_ms == 0 {
+            tiers[0].push(id);
+        } else if p.last_active_ms.map_or(false, |a| a > p.activity_ms) && now - p.activity_ms > LEDGER_REFRESH_MS {
+            tiers[1].push(id);
+        }
+    }
+    for t in tiers.iter_mut() {
+        t.sort_by_key(|id| std::cmp::Reverse(index(id)));
+    }
+    tiers.into_iter().flatten().take(ACTIVITY_BUDGET).cloned().collect()
 }
 
 /// The ledger fold that also keeps WHEN: below this, a player's ledger is read again.
@@ -604,6 +676,10 @@ pub struct UniverseCrawl {
     pub ledger_read: usize,
     pub ledger_errors: usize,
     pub ledger_last_error: Option<String>,
+    pub activity_todo: usize,
+    pub activity_read: usize,
+    pub activity_errors: usize,
+    pub activity_last_error: Option<String>,
 }
 
 pub static UNIVERSE_CRAWL: LazyLock<Mutex<UniverseCrawl>> = LazyLock::new(|| Mutex::new(UniverseCrawl::default()));
@@ -730,6 +806,51 @@ pub async fn crawl(replicants_error: Option<String>, guilds: Vec<String>, teleme
             }
         }
     }
+    read_activity(&c).await;
+}
+
+/// The per-player activity feed for the players `activity_plan` picks: the
+/// days they played (`PLAYED_ACTIONS`). A guild without the route stops the
+/// round at the first 404.
+async fn read_activity(c: &GuildApiClient) {
+    use futures_util::StreamExt;
+    let todo = {
+        let u = UNIVERSE.lock().unwrap_or_else(|p| p.into_inner());
+        activity_plan(&u.players, |id| u.is_replicant(id) || u.likely.contains(id), now_ms())
+    };
+    UNIVERSE_CRAWL.lock().unwrap_or_else(|p| p.into_inner()).activity_todo = todo.len();
+    let mut results = futures_util::stream::iter(todo.into_iter().map(|pid| {
+        let c = c.clone();
+        async move {
+            let r = c.planet_activity_player_stats(&pid, None, None).await;
+            (pid, r)
+        }
+    }))
+    .buffer_unordered(ACTIVITY_CONCURRENCY);
+    let mut errors = 0;
+    while let Some((pid, r)) = results.next().await {
+        match r {
+            Ok((rows, _)) => {
+                let now = now_ms();
+                if let Some(p) = UNIVERSE.lock().unwrap_or_else(|p| p.into_inner()).players.get_mut(&pid) {
+                    p.play_days = fold_play_days(&p.play_days, &rows, epoch_day(now));
+                    p.activity_ms = now;
+                }
+                touch();
+                UNIVERSE_CRAWL.lock().unwrap_or_else(|p| p.into_inner()).activity_read += 1;
+            }
+            Err(e) => {
+                errors += 1;
+                let stop = e.starts_with("Guild API 404 ") || errors >= LEDGER_MAX_ERRORS;
+                let mut st = UNIVERSE_CRAWL.lock().unwrap_or_else(|p| p.into_inner());
+                st.activity_errors += 1;
+                st.activity_last_error = Some(e);
+                if stop {
+                    break;
+                }
+            }
+        }
+    }
 }
 
 /// The round is over: settle the second marker on what the crawls found, and persist.
@@ -744,6 +865,38 @@ pub fn finish_round(telemetry: &HashSet<String>) {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn played_days_count_what_the_player_did_and_keep_what_the_feed_no_longer_serves() {
+        let today = epoch_day(parse_ts("2026-11-20 12:00:00+00").unwrap());
+        let row = |day: &str, cat: &str, role: &str, n: &str| json!({ "bucket": format!("{day} 00:00:00+00"), "category": cat, "role": role, "count": n });
+        let rows = vec![
+            row("2026-11-18", "struct_attack", "attacker", "3"),
+            row("2026-11-17", "struct_attack", "target", "9"),      // attacked: done TO them
+            row("2026-11-16", "struct_status", "owner", "1"),       // could be a loss
+            row("2026-11-15", "fleet_depart", "fleet_owner", "1"),
+            row("2026-11-14", "struct_defense_add", "defender", "0"), // nothing happened
+            row("2026-11-13", "struct_block_build_start", "owner", "2"),
+        ];
+        let old = epoch_day(parse_ts("2026-09-01 00:00:00+00").unwrap());
+        let stale = epoch_day(parse_ts("2026-11-10 00:00:00+00").unwrap());
+        let d = fold_play_days(&[old, stale], &rows, today);
+        let label = |d: i32| chrono::DateTime::from_timestamp_millis(d as i64 * DAY_MS).unwrap().format("%m-%d").to_string();
+        assert_eq!(d.iter().map(|x| label(*x)).collect::<Vec<_>>(), ["09-01", "11-13", "11-15", "11-18"], "inside the feed's 30 days the answer replaces what was kept");
+    }
+
+    #[test]
+    fn activity_is_read_for_humans_who_acted_newest_first_then_when_they_acted_since() {
+        let now = 100 * 3_600_000;
+        let mut p = HashMap::new();
+        p.insert("1-5".into(), PlayerFacts { last_active_ms: Some(1), ..Default::default() });
+        p.insert("1-9".into(), PlayerFacts { last_active_ms: Some(1), ..Default::default() });
+        p.insert("1-6".into(), PlayerFacts { ..Default::default() }); // never acted
+        p.insert("1-7".into(), PlayerFacts { last_active_ms: Some(50 * 3_600_000), activity_ms: 10 * 3_600_000, ..Default::default() });
+        p.insert("1-8".into(), PlayerFacts { last_active_ms: Some(5 * 3_600_000), activity_ms: 10 * 3_600_000, ..Default::default() });
+        p.insert("1-4".into(), PlayerFacts { last_active_ms: Some(1), ..Default::default() }); // a replicant
+        assert_eq!(activity_plan(&p, |id| id == "1-4", now), ["1-9", "1-5", "1-7"]);
+    }
 
     #[test]
     fn ledger_totals_count_ore_credits_and_alpha_credits_only() {

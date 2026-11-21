@@ -57,7 +57,7 @@ use crate::guild_directory::GuildApiEntry;
 use crate::mcp::guild_api::GuildApiClient;
 
 pub const PHASES: [&str; 2] = ["signup", "tutorial"];
-const PLAYER_STEP: &str = "signup.employee_record";
+pub const PLAYER_STEP: &str = "signup.employee_record";
 const SUBMIT_STEP: &str = "signup.submit";
 const OFFER_STEP: &str = "orientation.tutorial_offer";
 const LOADING_STEP: &str = "tutorial.loading";
@@ -68,6 +68,9 @@ const FTL_STEP: &str = "tutorial.end.ftl_jump";
 const VERSION_PREFIX: &str = "tutorial-";
 const VERSION_PROBE_MAX: u32 = 12;
 pub const DEFAULT_IDLE_HOURS: u32 = 24;
+/// A session is never settled (and so never read again) before this long
+/// idle, whatever quit window the card uses to call it quit.
+const SETTLE_IDLE_HOURS: u32 = 168;
 
 /// No player below this index can have telemetry: 5,774 was the first index
 /// created after the recorder shipped (2026-10-19 20:56 UTC, local mirror).
@@ -137,7 +140,7 @@ pub struct PlayerSession {
 }
 
 impl PlayerSession {
-    fn reached(&self, key: &str) -> Option<i64> {
+    pub(crate) fn reached(&self, key: &str) -> Option<i64> {
         self.events.iter().find(|e| e.k == key && !e.s).map(|e| e.t)
     }
     fn skipped(&self, key: &str) -> bool {
@@ -328,6 +331,9 @@ struct GuildAggregate {
     new_players: Value,
     player_steps: Vec<Value>,
     error: Option<String>,
+    /// The guild serves no onboarding routes at all (404): it records no
+    /// telemetry, which is not a failed read. Its `error` says so too.
+    missing: bool,
 }
 
 /// (guild, version, idle hours, interface, excluded players included)
@@ -472,7 +478,8 @@ pub fn who_stopped(runs: &[&Run], sessions: &[(&String, &PlayerSession)], now: i
             *e = (last, guild.to_string(), outcome.to_string());
         }
     };
-    for r in runs.iter().filter(|r| r.outcome != "completed") {
+    // A run still in progress has not stopped anywhere yet.
+    for r in runs.iter().filter(|r| r.outcome != "completed" && r.outcome != "playing") {
         if let (Some(p), Some(k)) = (&r.player, &r.furthest) {
             add(k, p, r.last_ms.unwrap_or(0), &r.guild, &r.outcome);
         }
@@ -607,14 +614,17 @@ async fn guild_aggregate(guild: &str, api: &str, version: &str, idle_hours: u32,
         c.onboarding_tutorial_players(version, idle_hours, interface, Some("new"), all),
         c.onboarding_tutorial_player_steps(version, interface, all),
     );
-    let mut a = GuildAggregate { funnels: BTreeMap::new(), outcome: Value::Null, players: Value::Null, new_players: Value::Null, player_steps: Vec::new(), error: None };
+    let mut a = GuildAggregate { funnels: BTreeMap::new(), outcome: Value::Null, players: Value::Null, new_players: Value::Null, player_steps: Vec::new(), error: None, missing: false };
     for (phase, r) in [(PHASES[0], signup), (PHASES[1], tutorial)] {
         match r {
             Ok(Value::Array(rows)) => {
                 a.funnels.insert(phase.to_string(), rows);
             }
             Ok(_) => {}
-            Err(e) => a.error = Some(if missing_route(&e) { "no onboarding telemetry on this guild yet".into() } else { e }),
+            Err(e) => {
+                a.missing |= missing_route(&e);
+                a.error = Some(if missing_route(&e) { "no onboarding telemetry on this guild yet".into() } else { e })
+            }
         }
     }
     match outcome {
@@ -830,7 +840,9 @@ async fn crawl_guild(guild: String, api: String, idle_hours: u32) {
                 let mut s = session_from_rows(&guild, &rows);
                 s.name = name;
                 s.fetched_ms = now_ms();
-                s.settled = is_settled(&s, newest.contains(&pid), s.fetched_ms, idle_hours);
+                // Settled only once idle past a week, whatever the card's quit
+                // window: a short one would freeze a session that resumes.
+                s.settled = is_settled(&s, newest.contains(&pid), s.fetched_ms, idle_hours.max(SETTLE_IDLE_HOURS));
                 PLAYERS.lock().unwrap_or_else(|p| p.into_inner()).insert(pid, s);
                 let mut st = CRAWL.lock().unwrap_or_else(|p| p.into_inner());
                 st.guilds.entry(guild.clone()).or_default().fetched += 1;
@@ -1059,10 +1071,16 @@ fn signup_totals(a: &GuildAggregate) -> Option<[f64; 2]> {
     Some([funnel_started(raw).unwrap_or(0.0), signed])
 }
 
-/// The day's running totals, when every guild answered: a partial sum would
-/// read as a fall in the trend.
+/// The day's running totals, when every guild that records telemetry
+/// answered: a partial sum would read as a fall in the trend. A guild with
+/// no onboarding routes records nothing, so it is left out rather than
+/// spoiling the day for every other guild.
 fn server_day(version: &str, read: &[(String, &GuildAggregate)]) -> Option<crate::mcp::onboarding_history::ServerDay> {
-    if read.is_empty() || read.iter().any(|(_, a)| a.error.is_some()) {
+    if read.iter().any(|(_, a)| a.error.is_some() && !a.missing) {
+        return None;
+    }
+    let read: Vec<(String, &GuildAggregate)> = read.iter().filter(|(_, a)| !a.missing).cloned().collect();
+    if read.is_empty() {
         return None;
     }
     let guilds: BTreeMap<String, [f64; 2]> = read.iter().filter_map(|(g, a)| signup_totals(a).map(|t| (g.clone(), t))).collect();
@@ -1278,11 +1296,7 @@ fn is_active(p: Option<&crate::mcp::onboarding_players::PlayerFacts>, cutoff: i6
     p.and_then(|p| p.last_active_ms).map_or(false, |t| t >= cutoff)
 }
 
-/// How many of a population reached each milestone, in the order a new player
-/// meets them. Not a strict funnel: a raider need not have refined.
 const DAY_MS: i64 = 86_400_000;
-/// Weeks after joining the Retention grid follows.
-const COHORT_WEEKS: i64 = 8;
 
 /// Where every player stands now, by when they last acted. The five buckets
 /// are exclusive, so they sum to the players; `new_7d` is apart from them.
@@ -1299,52 +1313,6 @@ pub fn lifecycle(members: &[&crate::mcp::onboarding_players::PlayerFacts], now: 
     }
     let new_7d = members.iter().filter(|p| p.created_ms.map_or(false, |c| now - c < 7 * DAY_MS)).count();
     json!({ "today": today, "week": week, "month": month, "gone": gone, "never": never, "new_7d": new_7d })
-}
-
-/// One row per ISO week joined: how many joined, how many ever acted, and
-/// `alive[n]` = how many last acted at least n+1 weeks after joining. `lastAction`
-/// keeps only the latest action, so this is survival, not week-by-week return.
-/// A week is left off a row until every member has had that long.
-pub fn cohorts(members: &[&crate::mcp::onboarding_players::PlayerFacts], now: i64) -> Vec<Value> {
-    use chrono::Datelike;
-    let mut weeks: std::collections::BTreeMap<(i32, u32), Vec<(i64, Option<i64>)>> = Default::default();
-    for p in members {
-        let Some(created) = p.created_ms else { continue };
-        let Some(at) = chrono::DateTime::from_timestamp_millis(created) else { continue };
-        let w = at.iso_week();
-        weeks.entry((w.year(), w.week())).or_default().push((created, p.last_active_ms));
-    }
-    weeks
-        .into_iter()
-        .map(|((year, week), rows)| {
-            let newest = rows.iter().map(|r| r.0).max().unwrap_or(now);
-            let alive: Vec<usize> = (1..=COHORT_WEEKS)
-                .take_while(|n| newest + n * 7 * DAY_MS <= now)
-                .map(|n| rows.iter().filter(|(c, last)| last.map_or(false, |l| l >= c + n * 7 * DAY_MS)).count())
-                .collect();
-            json!({ "week": format!("W{week:02}"), "year": year, "n": rows.len(), "acted": rows.iter().filter(|r| r.1.is_some()).count(), "alive": alive })
-        })
-        .collect()
-}
-
-pub fn activation(members: &[(&crate::mcp::onboarding_players::PlayerFacts, Option<&crate::mcp::onboarding_players::PlayerStats>)], cutoff: i64) -> Vec<Value> {
-    let count = |f: &dyn Fn(&crate::mcp::onboarding_players::PlayerFacts, &crate::mcp::onboarding_players::PlayerStats) -> bool| {
-        let none = crate::mcp::onboarding_players::PlayerStats::default();
-        members.iter().filter(|(p, s)| f(p, s.unwrap_or(&none))).count()
-    };
-    let total = members.len();
-    [
-        ("signed_up", total),
-        ("acted", count(&|p, _| p.last_active_ms.is_some())),
-        ("mined", count(&|_, s| s.mined_g.map_or(false, |v| v > 0.0))),
-        ("refined", count(&|_, s| s.refined_g.map_or(false, |v| v > 0.0))),
-        ("planet", count(&|_, s| s.planets > 0.0)),
-        ("raided", count(&|_, s| s.raids_initiated > 0.0)),
-        ("active", count(&|p, _| is_active(Some(p), cutoff))),
-    ]
-    .iter()
-    .map(|(k, n)| json!({ "key": k, "n": n, "rate": if total > 0 { json!(*n as f64 / total as f64) } else { Value::Null } }))
-    .collect()
 }
 
 // ── The read ────────────────────────────────────────────────────────────────
@@ -1480,6 +1448,10 @@ pub async fn terminal_onboarding(
 
     let history_all = crate::mcp::onboarding_history::recent(HISTORY_SHOWN);
     let newest = versions.first().cloned().unwrap_or_else(|| version.clone());
+    // Tracked: the player's own signup session reached the employee record.
+    // Telemetry began with the first one recorded anywhere.
+    let tracked_ids: HashSet<&str> = sessions_all.iter().filter(|(_, s)| s.reached(PLAYER_STEP).is_some()).map(|(p, _)| p.as_str()).collect();
+    let telemetry_since = sessions_all.values().filter_map(|s| s.reached(PLAYER_STEP)).min();
     let out_segs: Vec<Value> = segs
         .iter()
         .map(|seg| {
@@ -1498,7 +1470,6 @@ pub async fn terminal_onboarding(
             let never_acted = members.iter().filter(|(_, p)| p.last_active_ms.is_none()).count();
             let churn_base: Vec<_> = members.iter().filter(|(_, p)| p.last_active_ms.is_some() && p.created_ms.map_or(true, |c| c <= cutoff)).collect();
             let churned = churn_base.iter().filter(|(_, p)| !is_active(Some(p), cutoff)).count();
-            let milestones: Vec<_> = members.iter().map(|(pid, p)| (*p, stats.get(*pid))).collect();
             let facts: Vec<_> = members.iter().map(|(_, p)| *p).collect();
             let st: Vec<&crate::mcp::onboarding_players::PlayerStats> = members.iter().filter_map(|(pid, _)| stats.get(*pid)).collect();
             let gather = |f: &dyn Fn(&crate::mcp::onboarding_players::PlayerStats) -> Option<f64>| st.iter().filter_map(|s| f(s)).collect::<Vec<f64>>();
@@ -1551,26 +1522,43 @@ pub async fn terminal_onboarding(
             let seg_runs: Vec<&Run> = runs_all().filter(|r| run_in(seg, r)).collect();
             let pirate_members: Vec<crate::mcp::pirate::Member> =
                 members.iter().map(|(pid, p)| crate::mcp::pirate::Member { facts: *p, stats: stats.get(*pid) }).collect();
+            let member_ids: Vec<&str> = members.iter().map(|(pid, _)| pid.as_str()).collect();
+            let is_tracked: Vec<bool> = members.iter().map(|(pid, _)| tracked_ids.contains(pid.as_str())).collect();
+            let coverage_rows: Vec<(&str, Option<i64>, bool)> = members.iter().zip(&is_tracked).map(|((_, p), t)| (p.guild.as_str(), p.created_ms, *t)).collect();
             // Signup sessions over a window come from the daily record, which
             // holds the newest design's totals with excluded players left out.
             let server = (seg.interface.is_none() && !all && seg_v == newest && signup_guilds(seg).is_some())
                 .then(|| {
+                    // Every guild that records telemetry must have answered; one
+                    // with no onboarding routes is left out, not a failure.
                     let gs = signup_guilds(seg).unwrap_or_default();
-                    let totals: Vec<[f64; 2]> = gs.iter().filter_map(|g| agg.get(&(g.clone(), seg_v.clone(), None))).filter_map(signup_totals).collect();
-                    let now_totals = (totals.len() == gs.len() && !gs.is_empty()).then(|| totals.iter().fold([0.0, 0.0], |a, t| [a[0] + t[0], a[1] + t[1]]));
-                    crate::mcp::pirate::server_windows(&history_all, now_totals, seg.guild.as_deref(), now)
+                    let read: Vec<(&String, &GuildAggregate)> = gs.iter().filter_map(|g| agg.get(&(g.clone(), seg_v.clone(), None)).map(|a| (g, a))).collect();
+                    let failed = read.len() < gs.len() || read.iter().any(|(_, a)| a.error.is_some() && !a.missing);
+                    let cur: BTreeMap<String, [f64; 2]> = read.iter().filter_map(|(g, a)| signup_totals(a).map(|t| ((*g).clone(), t))).collect();
+                    let cur = (!failed && !cur.is_empty()).then_some(cur);
+                    crate::mcp::pirate::server_windows(&history_all, cur.as_ref(), &seg_v, seg.guild.as_deref(), now)
                 })
                 .unwrap_or(Value::Null);
 
+            // The pirate funnel over tracked players only: those whose signup
+            // was recorded, so no stage counts anyone from before tracking.
+            let tracked = {
+                let signed: Vec<&String> = sess.iter().filter(|(_, s)| s.reached(PLAYER_STEP).is_some()).map(|(pid, _)| *pid).collect();
+                let ms: Vec<crate::mcp::pirate::Member> = signed
+                    .iter()
+                    .filter_map(|pid| players.get(pid.as_str()).map(|p| crate::mcp::pirate::Member { facts: p, stats: stats.get(pid.as_str()) }))
+                    .collect();
+                crate::mcp::pirate::tracked(&ms, signed.len(), now)
+            };
+
             json!({
                 "key": seg.key, "label": seg.label,
+                "tracked": tracked,
                 "players": members.len(), "active": active, "inactive": members.len() - active,
                 "active_rate": ratio(active, members.len()),
                 "never_acted": never_acted, "never_acted_rate": ratio(never_acted, members.len()),
                 "churn_base": churn_base.len(), "churned": churned, "churn_rate": ratio(churned, churn_base.len()),
-                "activation": activation(&milestones, cutoff),
                 "lifecycle": lifecycle(&facts, now),
-                "cohorts": cohorts(&facts, now),
                 "signup": signup.unwrap_or(Value::Null),
                 "tutorial_players": unique,
                 "take_up": new_only,
@@ -1585,6 +1573,11 @@ pub async fn terminal_onboarding(
                 "pirate": crate::mcp::pirate::stages(&pirate_members, now),
                 "pirate_series": crate::mcp::pirate::series(&pirate_members, now),
                 "pirate_server": server,
+                "pirate_cohorts": crate::mcp::pirate::cohorts(&pirate_members, &is_tracked, now),
+                "left": crate::mcp::pirate::left(&pirate_members, &member_ids, now),
+                "played": crate::mcp::pirate::played(&pirate_members, now),
+                "active_users": crate::mcp::pirate::active_users(&pirate_members, &member_ids, now),
+                "coverage": crate::mcp::pirate::coverage(&coverage_rows, telemetry_since),
                 "run_comparison": run_comparison(&seg_runs),
                 "durations": folded["durations"], "daily": folded["daily"], "dwell": dwell,
                 "stats": {
@@ -1683,6 +1676,8 @@ pub async fn terminal_onboarding(
                 "id": e.id, "name": e.name, "tag": e.tag,
                 "status": if e.guild_api.is_none() { "no_api" } else if a.and_then(|a| a.error.as_ref()).is_some() { "error" } else { "ok" },
                 "error": e.error.clone().or_else(|| a.and_then(|a| a.error.clone())),
+                // Serves no onboarding routes: records no telemetry (not a failure).
+                "no_telemetry": a.map_or(false, |a| a.missing),
                 "started": first, "signed_up": signed,
                 "outcome": a.map(|a| a.outcome.clone()).unwrap_or(Value::Null),
                 "runs": human_runs,
@@ -2026,6 +2021,43 @@ mod tests {
     }
 
     #[test]
+    fn a_run_still_in_progress_has_not_stopped() {
+        let rs = vec![run(Some("1-1"), "a", 1, "playing", 0, 100, "tutorial.x"), run(Some("1-2"), "b", 1, "left", 0, 200, "tutorial.x")];
+        let refs: Vec<&Run> = rs.iter().collect();
+        let w = who_stopped(&refs, &[], 100 * 3_600_000, 24, |p| p.to_string());
+        assert_eq!(w["tutorial.x"]["total"].as_u64(), Some(1), "only the one who left: {w}");
+        assert_eq!(w["tutorial.x"]["players"][0]["player_id"], json!("1-2"));
+    }
+
+    fn signup_agg(started: f64, signed: f64) -> GuildAggregate {
+        let mut funnels = BTreeMap::new();
+        funnels.insert(
+            PHASES[0].to_string(),
+            vec![
+                json!({"step_order": 1, "step_key": "signup.connecting", "reached": started, "next_step_key": PLAYER_STEP}),
+                json!({"step_order": 2, "step_key": PLAYER_STEP, "reached": signed, "previous_step_key": "signup.connecting"}),
+            ],
+        );
+        GuildAggregate { funnels, outcome: Value::Null, players: Value::Null, new_players: Value::Null, player_steps: Vec::new(), error: None, missing: false }
+    }
+
+    #[test]
+    fn a_guild_with_no_telemetry_routes_does_not_stop_the_days_totals() {
+        let ok = signup_agg(10.0, 4.0);
+        let mut none = signup_agg(0.0, 0.0);
+        none.funnels.clear();
+        none.error = Some("no onboarding telemetry on this guild yet".into());
+        none.missing = true;
+        let day = server_day("tutorial-4", &[("0-1".into(), &ok), ("0-2".into(), &none)]).expect("0-2 records nothing, so it is left out");
+        assert_eq!((day.signups_started, day.signed_up), (10.0, 4.0));
+        assert!(day.guilds.contains_key("0-1") && !day.guilds.contains_key("0-2"));
+        let mut broken = signup_agg(1.0, 1.0);
+        broken.error = Some("Guild API 500".into());
+        assert!(server_day("tutorial-4", &[("0-1".into(), &ok), ("0-3".into(), &broken)]).is_none(), "a real failure still spoils the day");
+        assert!(server_day("tutorial-4", &[("0-2".into(), &none)]).is_none(), "nobody records telemetry: no day");
+    }
+
+    #[test]
     fn server_answers_sum_and_a_guild_without_the_route_is_no_answer() {
         assert_eq!(sum_rows(&[], &PLAYER_FIELDS), Value::Null);
         let (a, b) = (json!({"players": "3", "completed": 1}), json!({"players": 4, "completed": "2"}));
@@ -2048,34 +2080,6 @@ mod tests {
         let never = PlayerFacts { created_ms: Some(now - DAY_MS), ..Default::default() };
         let l = lifecycle(&[&a, &b, &c, &e, &never], now);
         assert_eq!(l, json!({ "today": 1, "week": 1, "month": 1, "gone": 1, "never": 1, "new_7d": 1 }));
-    }
-
-    #[test]
-    fn a_cohort_counts_only_weeks_its_newest_member_has_lived() {
-        use crate::mcp::onboarding_players::PlayerFacts;
-        // Monday 2026-01-05 and the Friday after: one ISO week.
-        let monday = 1_767_571_200_000;
-        let stayed = PlayerFacts { created_ms: Some(monday), last_active_ms: Some(monday + 15 * DAY_MS), ..Default::default() };
-        let left = PlayerFacts { created_ms: Some(monday + 4 * DAY_MS), last_active_ms: Some(monday + 4 * DAY_MS), ..Default::default() };
-        let never = PlayerFacts { created_ms: Some(monday), ..Default::default() };
-        let unknown = PlayerFacts::default();
-        let rows = cohorts(&[&stayed, &left, &never, &unknown], monday + 19 * DAY_MS);
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0], json!({ "week": "W02", "year": 2026, "n": 3, "acted": 2, "alive": [1, 1] }));
-    }
-
-    #[test]
-    fn activation_counts_each_milestone_against_everyone() {
-        use crate::mcp::onboarding_players::{PlayerFacts, PlayerStats};
-        let acted = PlayerFacts { last_active_ms: Some(500), ..Default::default() };
-        let idle = PlayerFacts { last_active_ms: Some(50), ..Default::default() };
-        let never = PlayerFacts::default();
-        let miner = PlayerStats { mined_g: Some(3.0), planets: 1.0, ..Default::default() };
-        let rows = vec![(&acted, Some(&miner)), (&idle, None), (&never, None), (&never, None)];
-        let a = activation(&rows, 100);
-        let n = |k: &str| a.iter().find(|r| r["key"] == k).unwrap()["n"].as_u64().unwrap();
-        assert_eq!((n("signed_up"), n("acted"), n("mined"), n("refined"), n("planet"), n("raided"), n("active")), (4, 2, 1, 0, 1, 0, 1));
-        assert_eq!(a[1]["rate"].as_f64(), Some(0.5));
     }
 
     #[test]

@@ -207,8 +207,8 @@ const BUDGET = {
   // container breakpoint (180px) at which a figure drops to the 16px body size.
   // +5 (2026-11-20, the pirate funnel): its dashed hairline, stage tag and
   // figure in the display face, the split columns' body-size figure, and its
-  // narrow breakpoint; +1 the dashed rule where Awareness's own scale ends.
-  'onboarding.css': [0, 29],
+  // narrow breakpoint.
+  'onboarding.css': [0, 28],
   // The Sector Blitz cards (2026-11-17): DOM builders only; the stylesheet's
   // px are 1px hairlines and the flex bases at which the race legend and the
   // territory panel stop sitting beside their chart (breakpoints, no token).

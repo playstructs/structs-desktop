@@ -32,34 +32,43 @@
   var invoke = function (cmd, args) { return Board.T.core.invoke(cmd, args || {}); };
 
   /* Sections in the order a player meets them; views are a section's second strip. */
-  var SECTIONS = [['overview', 'Overview'], ['acquisition', 'Acquisition'], ['onboarding', 'Onboarding'], ['engagement', 'Engagement'],
-    ['players', 'Players'], ['guilds', 'Guilds'], ['trends', 'Trends'], ['data', 'Data']];
+  var SECTIONS = [['overview', 'Pirate'], ['acquisition', 'Join'], ['onboarding', 'Learn'], ['engagement', 'Stay'],
+    ['leaving', 'Leaving'], ['data', 'Data']];
   var VIEWS = {
-    onboarding: [['phases', 'Phases'], ['steps', 'Steps'], ['runs', 'Runs'], ['timing', 'Timing'], ['impact', 'By outcome']],
-    engagement: [['activation', 'Activation'], ['retention', 'Retention'], ['distributions', 'Distributions']],
-    players: [['signups', 'New signups'], ['stopped', 'Stopped'], ['runs', 'Tutorial runs']],
-    trends: [['figures', 'Figures'], ['daily', 'Daily']],
+    onboarding: [['steps', 'Steps'], ['first', 'First moves'], ['after', 'After the tutorial'], ['runs', 'Runs']],
+    data: [['health', 'Health'], ['guilds', 'Guilds'], ['record', 'Daily record'], ['distributions', 'Distributions'], ['dictionary', 'Dictionary']],
   };
+  /* Sections that were folded in (2026-11-20), and where a saved card or an
+   * issue's door that names one lands now. */
+  var FOLDED = { trends: ['data', 'record'], guilds: ['data', 'guilds'], players: ['leaving', ''] };
+  var FOLDED_VIEWS = { players: { signups: ['acquisition', ''], runs: ['onboarding', 'runs'], stopped: ['leaving', ''] } };
+  function unfold(page, view) {
+    var to = (FOLDED_VIEWS[page] || {})[view] || FOLDED[page];
+    return to ? [to[0], to[1] || ''] : [page, view];
+  }
+
   /* Words a ⌘K line may use for a section or a view: `TELEMETRY retention`. */
   var ALIASES = {
-    overview: ['overview'], aarrr: ['overview'], pirate: ['overview'], home: ['overview'], signals: ['overview'], journey: ['overview'], stages: ['overview'],
-    acquisition: ['acquisition'], signup: ['acquisition'], signups: ['acquisition'], funnel: ['acquisition'],
-    onboarding: ['onboarding'], tutorial: ['onboarding'], phases: ['onboarding', 'phases'], steps: ['onboarding', 'steps'],
-    runs: ['onboarding', 'runs'], timing: ['onboarding', 'timing'], impact: ['onboarding', 'impact'], outcome: ['onboarding', 'impact'],
-    engagement: ['engagement'], activation: ['engagement', 'activation'], retention: ['engagement', 'retention'], cohorts: ['engagement', 'retention'],
-    distributions: ['engagement', 'distributions'], stats: ['engagement', 'distributions'],
-    players: ['players'], recent: ['players', 'signups'], explorer: ['players'], stopped: ['players', 'stopped'], stuck: ['players', 'stopped'],
-    guilds: ['guilds'], trends: ['trends'], figures: ['trends', 'figures'], daily: ['trends', 'daily'],
-    data: ['data'], health: ['data'], sources: ['data'], exclusions: ['data'], definitions: ['data'], settings: ['data'],
+    overview: ['overview'], aarrr: ['overview'], pirate: ['overview'], home: ['overview'], funnel: ['overview'], weeks: ['overview'], stages: ['overview'],
+    acquisition: ['acquisition'], join: ['acquisition'], signup: ['acquisition'], signups: ['acquisition'],
+    onboarding: ['onboarding'], learn: ['onboarding'], tutorial: ['onboarding'], steps: ['onboarding', 'steps'], phases: ['onboarding', 'steps'], timing: ['onboarding', 'steps'],
+    first: ['onboarding', 'first'], moves: ['onboarding', 'first'], activation: ['onboarding', 'first'],
+    after: ['onboarding', 'after'], impact: ['onboarding', 'after'], outcome: ['onboarding', 'after'], runs: ['onboarding', 'runs'],
+    engagement: ['engagement'], stay: ['engagement'], retention: ['engagement'], cohorts: ['engagement'], triangle: ['engagement'],
+    leaving: ['leaving'], left: ['leaving'], leavers: ['leaving'], stuck: ['leaving'], captivated: ['leaving'], confused: ['leaving'], churn: ['leaving'],
+    players: ['leaving'], explorer: ['leaving'], stopped: ['leaving'], recent: ['acquisition'],
+    data: ['data'], health: ['data', 'health'], sources: ['data', 'health'], exclusions: ['data', 'health'], settings: ['data', 'health'],
+    guilds: ['data', 'guilds'], trends: ['data', 'record'], record: ['data', 'record'], figures: ['data', 'record'], daily: ['data', 'record'],
+    distributions: ['data', 'distributions'], stats: ['data', 'distributions'], definitions: ['data', 'dictionary'], dictionary: ['data', 'dictionary'], words: ['data', 'dictionary'],
   };
+
   /* The tutorial's phases, in play order; a step belongs to the first prefix it starts with. */
   var PHASES = [['signup', 'Signup'], ['orientation', 'Offer'], ['tutorial.intro', 'Intro'], ['tutorial.raid', 'Raid'], ['tutorial.rebuild', 'Rebuild'],
     ['tutorial.defend', 'Defend'], ['tutorial.first_attack', 'First attack'], ['tutorial.bomber', 'Bomber'], ['tutorial.free_play', 'Free play'],
     ['tutorial.new_cmd_ship', 'New Cmd Ship'], ['tutorial.end', 'End']];
-  var IDLE = [{ value: '6', label: '6 hours' }, { value: '24', label: '24 hours' }, { value: '72', label: '3 days' }, { value: '168', label: '7 days' }];
-  var ACTIVE = [{ value: '1', label: '1 day' }, { value: '7', label: '7 days' }, { value: '30', label: '30 days' }];
+  /* Fixed definitions, no longer settings: quit = idle 7 days, active = acted within 7 days. */
+  var QUIT_HOURS = 168, ACTIVE_DAYS = 7;
   var SPLITS = [{ value: '', label: 'Split by: nothing' }, { value: 'interface', label: 'Split by: app' }, { value: 'guild', label: 'Split by: guild' },
-    { value: 'activity', label: 'Split by: active / inactive' }, { value: 'replicant', label: 'Split by: human / replicant' },
     { value: 'version', label: 'Split by: tutorial version' }, { value: 'tutorial', label: 'Split by: tutorial outcome' }];
   /* One name per interface, everywhere it is drawn. */
   var IFACE = { 'structs-webapp': 'Web app', 'structs-desktop': 'Desktop app', none: 'No telemetry' };
@@ -70,11 +79,6 @@
   var OUTCOME_SEG = { finished: 'ob-seg-completed', quit: 'ob-seg-left', skipped: 'ob-seg-declined', none: 'ob-life-never' };
   var STATS = [['mined', 'Ore mined', 'ore'], ['refined', 'Alpha refined', 'alpha'], ['planets', 'Planets completed', 'count'],
     ['raids_initiated', 'Raids initiated', 'count'], ['raids_won', 'Raids won', 'count']];
-  /* [key, label, kind]: `step` converts from the step above; `side` happens
-   * apart from the path (a planet is not needed to raid); `now` is where
-   * players are, not a step. */
-  var MILESTONES = [['signed_up', 'Signed up', 'step'], ['acted', 'Acted', 'step'], ['mined', 'Mined', 'step'], ['refined', 'Refined', 'step'],
-    ['raided', 'Initiated a raid', 'side'], ['activated', 'Activated', 'step'], ['planet', 'Completed a planet', 'side'], ['active', 'Active this week', 'now']];
   var WINDOWS = [{ key: '1', label: '24 hours' }, { key: '7', label: '7 days' }, { key: '30', label: '30 days' }];
   var WIN_WORD = { 1: 'day', 7: '7 days', 30: '30 days' };
   var ACTIVE_NAME = { 1: 'Active today', 7: 'Active this week', 30: 'Active this month' };
@@ -87,10 +91,10 @@
    * match the tiles. */
   var TRENDS = [
     ['signups_started', 'Started signup', 'record', 'level', 'Awareness'], ['signed_up', 'Finished signups', 'record', 'level', 'Acquisition'],
-    ['new', 'Signups', 'rebuilt', 'daily', 'Acquisition'], ['humans', 'Players', 'record', 'level', 'Acquisition'],
+    ['new', 'Joined', 'rebuilt', 'daily', 'Acquisition'], ['humans', 'Players', 'record', 'level', 'Acquisition'],
     ['tutorial_players', 'Tutorial players', 'record', 'level', 'Onboarding'], ['tutorial_completed', 'Tutorial finishers', 'record', 'level', 'Onboarding'],
     ['activations', 'Activated', 'rebuilt', 'daily', 'Activation'], ['activated_total', 'Activated, all time', 'rebuilt', 'level', 'Activation'],
-    ['activated', 'Acted at least once', 'record', 'level', 'Activation'], ['mined', 'Mined at least once', 'record', 'level', 'Activation'],
+    ['acted', 'Acted at least once', 'record', 'level', 'Activation'], ['mined', 'Mined at least once', 'record', 'level', 'Activation'],
     ['refined', 'Refined at least once', 'record', 'level', 'Activation'], ['raided', 'Initiated a raid at least once', 'record', 'level', 'Activation'],
     ['active_1d', 'Active today', 'record', 'level', 'Retention'], ['active_7d', 'Active this week', 'record', 'level', 'Retention'],
     ['active_30d', 'Active this month', 'record', 'level', 'Retention'], ['miners_7d', 'Mined this week', 'rebuilt', 'level', 'Retention'],
@@ -99,15 +103,32 @@
   function trendDef(k) { return TRENDS.filter(function (m) { return m[0] === k; })[0]; }
   /* What each figure means: on hover wherever it is drawn, and listed on Data. */
   var DEFS = {
-    'Started signup': 'Awareness: signup sessions started on any guild server — the earliest thing recorded. Unique visitors are not recorded yet. Counted since telemetry began.',
-    'Signups': 'Players who signed up: human players created on chain.',
+    'Started signup': 'Awareness: signup sessions started on any guild server — the earliest thing recorded. Unique visitors are not recorded yet.',
+    'Joined': 'Human players created on chain. A joiner is counted from that moment.',
+    'Acted': 'Did anything on chain: lastAction set, or a mine, refine or raid on record.',
+    'Refined': 'Refined alpha at least once.',
+    'Raided': 'Initiated a raid at least once.',
+    'Refined or raided': 'Took either road towards activation. The two are drawn side by side: neither comes after the other.',
+    'Newly activated': 'Players whose second of refine and raid landed in the window, whenever they joined.',
+    'Played': 'A gameplay action that day: mine, refine, raid, attack, a defense change, a fleet move, or a struct build or move.',
+    'Playing': 'Played in the last 7 days, of everyone who joined in the window.',
+    'Playing now': 'Played in the last 7 days.',
+    'Week 1': 'Played on a day in the first week after joining (days 0–6), of everyone who joined that week.',
+    'Week 2': 'Played on a day in the second week after joining, of everyone who joined that week.',
+    'Week 4': 'Played on a day in the fourth week after joining, of everyone who joined that week.',
+    'Week 8': 'Played on a day in the eighth week after joining, of everyone who joined that week.',
+    'Signup recorded': 'Joiners whose own signup session was recorded by their guild\'s server.',
+    'Not yet': 'The week\'s last joiner has not lived that long yet.',
+    'Join date': 'Joined before 24 Sep 2026: the date is the indexer\'s floor, not the day they joined.',
+    'Coverage': 'Of the players who joined since the first recorded signup, those whose signup session was recorded.',
+    'Pulse': 'Calendar counts over the window. Never part of the funnel, never divided into it.',
+    'Furthest reached': 'Everyone not active in the last 7 days, each counted once by the furthest stage they reached.',
+    'Brought a player': 'Referral: not recorded by any guild yet.',
     'Active users': 'Activated players who did anything on chain within the window.',
     'Anyone active': 'Every player who did anything on chain within the window, activated or not.',
-    'Signups who activated': 'Of the players who signed up in the window, those who have activated.',
     'Finished signups': 'Signup sessions that reached the end of signup (the employee record).',
-    'New players': 'Human players created on chain.',
     'Players': 'Human players on chain in scope: replicants and excluded players left out unless asked for.',
-    'Activated': 'Refined alpha AND initiated a raid. Dated at the later of the two firsts.',
+    'Activated': 'Refined alpha AND initiated a raid, with no deadline: the window decides how long they had. Dated at the later of the two firsts.',
     'Active': 'Did anything on chain within the window.',
     'Time to activate': 'Typical (median) time from signup to activation.',
     'Take-up': 'New players offered Combat Training who started it.',
@@ -127,7 +148,7 @@
     'Run': 'One start of Combat Training. A player can run it more than once; a replay is started from Help.',
     'No player': 'A run that never recorded who played: its launch message was lost.',
     'Replicant': 'A player that hands another player full control of itself. Left out unless asked for.',
-    'Cohort': 'Players by the week they joined. A cell is the share still acting that many weeks later; a blank cell has not happened yet.',
+    'Cohort': 'Players by the week they joined (Monday UTC). Every count in a row is of that week\'s joiners; a stage the week is too young for reads not yet.',
     'Sample': 'New players\' own signup sessions, read from every guild: timings, skips and who stopped come from these.',
     'Change': 'Against the same length of time just before it. Shown only when the daily series reproduces the figure above it.',
     'Daily record': 'One row a day kept by this app while it runs: humans on chain across every guild. It follows the guild filter only, and starts when the app first recorded.',
@@ -137,15 +158,15 @@
   /* Which scope controls change each section. A control a section ignores is
    * dimmed there, so changing it never looks like a broken page. */
   var USES = {
-    overview: ['iface', 'guild', 'activity', 'reps', 'compare', 'version'],
+    overview: ['iface', 'guild', 'compare', 'version'],
     acquisition: ['iface', 'guild', 'compare', 'version'],
-    onboarding: ['iface', 'guild', 'activity', 'compare', 'version'],
-    engagement: ['iface', 'guild', 'activity', 'reps', 'compare', 'version'],
-    players: ['iface', 'guild', 'activity', 'version'],
-    guilds: ['guild', 'reps', 'version'],
-    trends: ['guild'],
-    data: [],
+    onboarding: ['iface', 'guild', 'compare', 'version'],
+    engagement: ['iface', 'guild', 'compare', 'version'],
+    leaving: ['iface', 'guild', 'compare', 'version'],
+    data: ['guild', 'version'],
   };
+
+
   function uses(page, key) { return (USES[page] || USES.overview).indexOf(key) >= 0; }
   var FLAG_TOP = 3;
   /* Below this many, a percentage claims more than the count can carry. */
@@ -325,41 +346,6 @@
     return main;
   }
 
-  /* The whole path in one table, in three parts that are never divided into
-   * each other: signup SESSIONS (the servers), new players through Combat
-   * Training (the sample), and players in the game (the chain). A part's
-   * first row has no conversion; a step converts from the step above it; a
-   * side row or a "now" row converts from nothing. */
-  function journeyRows(seg) {
-    var out = [], su = seg && seg.signup, t = (seg && seg.tutorial) || {};
-    var bot = seg && seg.key === 'replicant';
-    function part(name, title, rows) {
-      rows = rows.filter(function (r) { return r[1] != null; });
-      if (!rows.length) return;
-      out.push({ part: name, label: title, n: rows[0][1] });
-      var first = rows[0][1], prev = null;
-      rows.forEach(function (r, i) {
-        var kind = r[3] || 'step', step = i && kind === 'step' && prev != null;
-        out.push({ key: r[0], label: r[2], kind: kind, n: r[1], prev: step ? ratio(r[1], prev) : null, base: step ? prev : null, first: i ? ratio(r[1], first) : null, firstN: first });
-        if (kind === 'step') prev = r[1];
-      });
-    }
-    if (su && !bot) part('signup', 'Signup · sessions', [['opened', su.started, 'Started signup'], ['signed', su.signed_up, 'Finished signups']]);
-    if (t.offered && !bot) {
-      var loaded = (t.steps || []).filter(function (r) { return r.key === 'tutorial.loading'; })[0];
-      part('tutorial', 'Combat Training · sample of new signups', [['offered', t.offered, 'Reached the offer'], ['started', loaded ? loaded.reached : null, 'Started'], ['finished', t.completed, 'Finished']]);
-    }
-    var act = (seg && seg.activation) || [];
-    if (act.length) {
-      var all = allOf(seg);
-      part('game', 'In game · players', MILESTONES.map(function (m) {
-        var a = act.filter(function (x) { return x.key === m[0]; })[0];
-        var n = a ? a.n : m[0] === 'activated' ? all.activated : null;
-        return [m[0], n, m[1], m[2]];
-      }));
-    }
-    return out;
-  }
   /* A daily series over the last `days` against the `days` before them. */
   /* A daily series (one entry per calendar day, null where unknown) over its
    * last `days` against the `days` before them. A window with a missing day
@@ -393,6 +379,14 @@
     if (key in row) return row[key];
     return row.server ? row.server[key] : null;
   }
+  /* The daily record's rows counted by its newest definitions (`def`): a
+   * redefinition starts a new line rather than reading as a step. A row
+   * stored before the rename says `activated` for what is now `acted`. */
+  function currentRows(rows) {
+    rows = rows || [];
+    var v = rows.length ? rows[rows.length - 1].def || 1 : 1;
+    return rows.filter(function (r) { return (r.def || 1) === v; }).map(function (r) { return 'acted' in r || !('activated' in r) ? r : Object.assign({ acted: r.activated }, r); });
+  }
   /* One metric as [day, value] pairs, oldest first; missing days are absent. */
   function trendPoints(d, m) {
     var guild = (d.filters || {}).guild, out = [];
@@ -401,7 +395,7 @@
       days.forEach(function (day, i) { if (vals[i] != null) out.push([day, vals[i]]); });
       return out;
     }
-    (d.history || []).forEach(function (r) { var v = trendValue(r, m[0], guild); if (v != null) out.push([r.day, v]); });
+    currentRows(d.history).forEach(function (r) { var v = trendValue(r, m[0], guild); if (v != null) out.push([r.day, v]); });
     return out;
   }
   function dayBefore(day, n) {
@@ -440,23 +434,6 @@
     if (days !== 'all' && s && s.prior) return { started: s.prior.started, signed_up: s.prior.signed_up, partial: s.prior.day };
     return null;
   }
-  /* [stage, label, value(seg, days) → [main, sub], chart metric, spark key, note]. `days` is '1'|'7'|'30'|'all'. */
-  /* The pirate stages, in the owner's words (2026-11-20):
-   *   Awareness   — unique visitors (not recorded by any guild yet)
-   *   Acquisition — signups (players created on chain)
-   *   Activation  — refined alpha AND initiated a raid
-   *   Retention   — active users: activated players who acted in the window
-   * [stage, label, value(seg, days) → [main, sub], chart metric, spark key, note]. `days` is '1'|'7'|'30'|'all'. */
-  var AARRR = [
-    ['Awareness', 'Started signup', function (s, w) { var x = srvWin(s, w); return x ? [x.started, x.partial ? 'since ' + shortDay(x.partial) : null] : [null]; }, 'signups_started', 'h:signups_started'],
-    ['Acquisition', 'Signups', function (s, w) { return [w === 'all' ? allOf(s).players : winOf(s, w).new]; }, 'new', 'p:new'],
-    ['Activation', 'Activated', function (s, w) { var a = allOf(s); return w === 'all' ? [a.activated, ofShare(a.activated, a.players)] : [winOf(s, w).activated]; }, 'activated_total', 'p:activated_total'],
-    ['Activation', 'Signups who activated', function (s, w) { if (w === 'all') return [null]; var x = winOf(s, w); return [x.cohort, ofShare(x.cohort, x.new)]; }, 'activations', null],
-    ['Retention', 'Active users', function (s, w) { if (w === 'all') return [null]; var x = winOf(s, w); return [x.active_activated, ofShare(x.active_activated, allOf(s).activated)]; }, null, null],
-    ['Retention', 'Anyone active', function (s, w) { return [w === 'all' ? allOf(s).acted : winOf(s, w).active, w === 'all' ? 'ever acted' : null]; }, 'active_30d', 'h:mau'],
-  ];
-  /* A series for a trend line: the segment's rebuilt one, or the daily
-   * record's (every guild's humans), which only describes the plain population. */
   function sparkOf(d, seg, key, plain) {
     if (!key) return null;
     var src = key.slice(0, 2) === 'h:' ? (plain ? d.history_series : null) : seg && seg.pirate_series;
@@ -509,14 +486,14 @@
     sourceRows(d).forEach(function (s) { if (s[4]) out.push({ level: 'issue', title: s[0] + ' failing', where: String(s[4]), count: '', page: 'data', fix: 'The next read retries it; Read again now forces one.' }); });
     if (r.source === 'guild') out.push({ level: 'issue', title: 'Replicants read from the guild', where: 'Humans may be overcounted', count: int(r.known) + ' known', page: 'data', fix: 'The chain\'s permission store could not be read, so the guild\'s list was used; it misses older replicants. Read again now retries the chain.' });
     var failing = g.filter(function (x) { return x.status === 'error'; });
-    if (failing.length) out.push({ level: 'issue', title: 'Guilds failing', where: names(failing), count: plural(sum(failing, function (x) { return x.players; }), 'player', 'players'), page: 'guilds', fix: 'Their API answers with an error: open the guild row for the message.' });
+    if (failing.length) out.push({ level: 'issue', title: 'Guilds failing', where: names(failing), count: plural(sum(failing, function (x) { return x.players; }), 'player', 'players'), page: 'data', view: 'guilds', fix: 'Their API answers with an error: open the guild row for the message.' });
     var lost = g.filter(function (x) { return x.no_player > 0; }), noPlayer = sum(g, function (x) { return x.no_player; });
-    if (noPlayer) out.push({ level: 'issue', title: 'Runs with no player', where: names(lost), count: int(noPlayer) + ' of ' + int(sum(g, function (x) { return x.runs; })) + ' runs', page: 'players', view: 'runs', fix: 'The run never recorded who played: the launch message was lost. Older app versions do this.' });
+    if (noPlayer) out.push({ level: 'issue', title: 'Runs with no player', where: names(lost), count: int(noPlayer) + ' of ' + int(sum(g, function (x) { return x.runs; })) + ' runs', page: 'onboarding', view: 'runs', fix: 'The run never recorded who played: the launch message was lost. Older app versions do this.' });
     var dark = g.filter(function (x) { return x.status === 'no_api'; });
-    if (dark.length) out.push({ level: 'notice', title: 'Guilds with no API', where: names(dark), count: plural(sum(dark, function (x) { return x.players; }), 'player', 'players') + ' unseen', page: 'guilds', fix: 'These guilds publish no API, so their signups and tutorial are not counted.' });
+    if (dark.length) out.push({ level: 'notice', title: 'Guilds with no API', where: names(dark), count: plural(sum(dark, function (x) { return x.players; }), 'player', 'players') + ' unseen', page: 'data', view: 'guilds', fix: 'These guilds publish no API, so their signups and tutorial are not counted.' });
     var days = (d.history || []).length, c0 = d.crawl || {};
     if (reconcileRows(d).some(function (r) { return !r.ok; })) out.push({ level: 'notice', title: 'Sources disagree', where: reconcileRows(d).filter(function (r) { return !r.ok; }).map(function (r) { return r.label; }).join(' · '), count: '', page: 'data', fix: 'The chain\'s tables and the daily record give different figures for the same window: see Do the sources agree? on Data.' });
-    if (days < 7 && days > 0) out.push({ level: 'notice', title: 'Daily record is short', where: days ? 'Since ' + d.history[0].day : 'Nothing recorded', count: plural(days, 'day', 'days'), page: 'trends', fix: 'The app records one row a day while it runs; changes over 7 or 30 days need that many.' });
+    if (days < 7 && days > 0) out.push({ level: 'notice', title: 'Daily record is short', where: days ? 'Since ' + d.history[0].day : 'Nothing recorded', count: plural(days, 'day', 'days'), page: 'data', view: 'record', fix: 'The app records one row a day while it runs; changes over 7 or 30 days need that many.' });
     return out;
   }
   /* Players the guild list leaves out: no guild on chain. Only countable when
@@ -527,64 +504,21 @@
     return Math.max(0, (segs[0].players || 0) - sum(d.guilds || [], function (g) { return g.players; }));
   }
 
-  /* What needs a look, in player words, ranked: game findings first, the
-   * data's own trouble as one row at the end. Each is a door to its page. */
-  function signalsOf(d) {
-    var segs = d.segments || [], out = [];
-    if (!segs.length) return out;
-    segs.forEach(function (seg, i) {
-      segSignals(d, seg, i === 0 && segs.length === 1).forEach(function (x) {
-        if (segs.length > 1) { x.seg = i; x.segLabel = segName(seg); x.segKey = seg.key; }
-        out.push(x);
-      });
-    });
-    var rank = { bad: 0, warn: 1, good: 2, info: 3 };
-    out = out.map(function (x, i) { x.i = i; return x; }).sort(function (a, b) { return rank[a.level] - rank[b.level] || a.i - b.i; });
-    out = out.slice(0, segs.length > 1 ? 8 : 6);
-    var issues = issuesOf(d).filter(function (x) { return x.level === 'issue'; });
-    if (issues.length) out.push({ level: 'bad', title: plural(issues.length, 'data issue', 'data issues'), detail: issues.map(function (x) { return x.title; }).join(' · '), value: 'Data', page: 'data', data: true });
-    return out;
-  }
-  function segSignals(d, seg, first) {
-    var out = [], bot = seg.key === 'replicant';
-    var su = bot ? [] : orderSteps((seg.signup && seg.signup.steps) || []).filter(function (r) { return !r.aside && r.dropped > 0 && r.reached >= SMALL_N; });
-    var worst = su.sort(function (a, b) { return b.dropped / b.reached - a.dropped / a.reached; })[0];
-    if (worst) out.push({ level: 'warn', title: 'Most signups stop at ' + stepLabel(worst.key), detail: plural(worst.dropped, 'session stopped', 'sessions stopped') + ' here', value: pct1(worst.dropped / worst.reached) + ' stop rate', page: 'acquisition', key: worst.key });
-    var ph = (bot ? [] : phaseRows(seg)).filter(function (r) { return r.phase > 0 && r.stopped > 0 && r.reached >= SMALL_N; }).sort(function (a, b) { return b.stopped / b.reached - a.stopped / a.reached; })[0];
-    if (ph) out.push({ level: 'warn', title: 'Combat Training loses most at ' + ph.label, detail: plural(ph.stopped, 'player stopped', 'players stopped') + ' in this phase', value: pct1(ph.stopped / ph.reached) + ' stop rate', page: 'onboarding', view: 'phases', key: 'phase:' + ph.phase });
-    var dw = bot ? {} : seg.dwell || {}, slow = Object.keys(dw).filter(function (k) { return dw[k] && dw[k].n >= SMALL_N; }).sort(function (a, b) { return dw[b].p50 - dw[a].p50; })[0];
-    if (slow) out.push({ level: 'info', title: 'Slowest step: ' + (slow.indexOf('signup.') === 0 ? 'Signup · ' : '') + stepLabel(slow), detail: 'one in ten take ' + dur(dw[slow].p90) + ' or more', value: dur(dw[slow].p50) + ' typical', page: 'onboarding', view: 'timing' });
-    var imp = first ? (d.tutorial_impact || []) : [], all = imp.filter(function (r) { return r.key === 'all'; })[0];
-    var best = imp.filter(function (r) { return r.key !== 'all' && r.players >= BEST_N; }).sort(function (a, b) { return b.activated / b.players - a.activated / a.players; })[0];
-    if (best && all && all.players && best.activated / best.players > all.activated / all.players) {
-      out.push({ level: 'good', title: 'Players who ' + ({ finished: 'finished', quit: 'quit', skipped: 'skipped', none: 'never saw' }[best.key] || best.label.toLowerCase()) + ' the tutorial activate most', detail: int(best.activated) + ' of ' + int(best.players) + ' activated, since telemetry began', value: pct(best.activated / best.players) + ' against ' + pct(all.activated / all.players) + ' of all players since then', page: 'onboarding', view: 'impact' });
-    }
-    var co = (seg.cohorts || []).filter(function (c) { return c.n >= SMALL_N && c.alive && c.alive.length; });
-    if (co.length > 1) {
-      var last = co[co.length - 1], rest = co.slice(0, -1);
-      var avg = sum(rest, function (c) { return c.alive[0]; }) / (sum(rest, function (c) { return c.n; }) || 1), now = last.alive[0] / last.n;
-      out.push({ level: now < avg ? 'warn' : 'good', title: 'Joined week of ' + weekStart(last.year, last.week) + ': ' + pct(now) + ' still acting after a week', detail: plural(last.n, 'player joined', 'players joined'), value: pct(avg) + ' in earlier weeks', page: 'engagement', view: 'retention' });
-    }
-    var a = allOf(seg);
-    if (a.players) out.push({ level: 'info', title: pct(a.activated / a.players) + ' of players have activated', detail: int(a.activated) + ' of ' + int(a.players), value: seg.pirate && seg.pirate.time_to_activate ? dur(seg.pirate.time_to_activate.p50) + ' typical to activate' : '', page: 'engagement', view: 'activation' });
-    return out;
-  }
-
   // ── Card params ──
   function argsOf(p) {
-    var a = { idleHours: Number(p.idle) || 24, activeDays: Number(p.active) || 7,
-      filters: { interface: p.iface || null, guild: p.guild || null, activity: p.activity || null, replicants: p.reps === '1', compare: p.compare || null,
+    var a = { idleHours: QUIT_HOURS, activeDays: ACTIVE_DAYS,
+      filters: { interface: p.iface || null, guild: p.guild || null, activity: null, replicants: p.reps === '1', compare: SPLITS.some(function (x) { return x.value && x.value === p.compare; }) ? p.compare : null,
         include_excluded: p.excl === '1' } };
     if (p.version) a.version = p.version;
     return a;
   }
-  function pageOf(p) { return SECTIONS.some(function (s) { return s[0] === p.page; }) ? p.page : 'overview'; }
+  function pageOf(p) { var pg = unfold(p.page, p.view)[0]; return SECTIONS.some(function (s) { return s[0] === pg; }) ? pg : 'overview'; }
   function viewOf(p) {
-    var list = VIEWS[pageOf(p)];
+    var list = VIEWS[pageOf(p)], v = FOLDED[p.page] ? unfold(p.page, p.view)[1] : p.view;
     if (!list) return null;
-    return list.some(function (v) { return v[0] === p.view; }) ? p.view : list[0][0];
+    return list.some(function (x) { return x[0] === v; }) ? v : list[0][0];
   }
-  var SPLIT_WORDS = { interface: 'interface', app: 'interface', guild: 'guild', activity: 'activity', replicant: 'replicant', version: 'version', tutorial: 'tutorial', outcome: 'tutorial' };
+  var SPLIT_WORDS = { interface: 'interface', app: 'interface', guild: 'guild', version: 'version', tutorial: 'tutorial', outcome: 'tutorial' };
   /* `TELEMETRY retention 7d`, `TELEMETRY onboarding runs`, `TELEMETRY guild 0-5 split app`. */
   function parseArgs(rest) {
     var out = {}, words = String(rest || '').trim().toLowerCase().split(/\s+/).filter(Boolean);
@@ -599,13 +533,12 @@
         if (al[1]) out.view = al[1];
         continue;
       }
-      var win = { '24h': '1', '1d': '1', '7d': '7', '30d': '30' }[w];
+      var win = { '24h': '1', '1d': '1', '7d': '7', '30d': '30', all: 'all', alltime: 'all' }[w];
       if (win) { out.win = win; continue; }
       if (/^0-\d+$/.test(w)) { out.guild = w; continue; }
       if (w === 'guild' && nx && /^0-\d+$/.test(nx)) { out.guild = nx; i++; continue; }
       if ((w === 'split' || w === 'by' || w === 'compare') && nx && SPLIT_WORDS[nx.replace(/s$/, '')]) { out.compare = SPLIT_WORDS[nx.replace(/s$/, '')]; i++; continue; }
       if (w === 'replicants') { out.reps = '1'; continue; }
-      if (w === 'active' || w === 'inactive') { out.activity = w; continue; }
       if (w === 'desktop' || w === 'webapp') { out.iface = 'structs-' + w; continue; }
       if (/^tutorial-\d+$/.test(w)) { out.version = w; continue; }
       return null;
@@ -617,10 +550,9 @@
     var page = pageOf(p), view = viewOf(p), parts = ['TELEMETRY'];
     if (page !== 'overview') parts.push(page);
     if (view && VIEWS[page] && view !== VIEWS[page][0][0]) parts.push(view);
-    if (p.win && p.win !== '30') parts.push(p.win === '1' ? '24h' : p.win + 'd');
+    if (p.win && p.win !== '30') parts.push(p.win === '1' ? '24h' : p.win === 'all' ? 'all' : p.win + 'd');
     if (p.guild) parts.push('guild', p.guild);
     if (p.compare) parts.push('split', p.compare);
-    if (p.activity) parts.push(p.activity);
     if (p.reps === '1') parts.push('replicants');
     if (p.iface === 'structs-desktop' || p.iface === 'structs-webapp') parts.push(p.iface.slice(8));
     if (p.version) parts.push(p.version);
@@ -772,7 +704,7 @@
     head.appendChild(sub(who.total > who.players.length ? int(who.players.length) + ' listed of ' + int(who.total) + ' stopped' : plural(who.players.length, 'player', 'players')));
     var ids = who.players.map(function (x) { return x.player_id; }).join('\n');
     head.appendChild(actionBtn('Copy ids', function () { copyText(ids, who.players.length); }, 'copy_ids'));
-    if (step) head.appendChild(actionBtn('All stopped', function () { ctx.st.stepFilter = step; ctx.go('players', 'stopped'); }, 'all_stopped'));
+    if (step) head.appendChild(actionBtn('All stopped', function () { ctx.st.stepFilter = step; ctx.go('leaving'); }, 'all_stopped'));
     box.appendChild(head);
     who.players.forEach(function (x) {
       var r = H.el('div', 'ob-who-row');
@@ -1049,45 +981,6 @@
     var rows = phaseRows(seg);
     return rows.map(function (r, i) { return { key: 'phase:' + r.phase, label: r.label, reached: r.reached, dropped: rows[i + 1] ? r.stopped : null, skipped: r.skipped, previous: i ? 1 : null, next: rows[i + 1] ? 1 : null }; });
   }
-  function journeyTable(segs) {
-    if (segs.length === 1) {
-      var rows = journeyRows(segs[0]);
-      var t = grid('ob-journey-table', [{ label: 'Step', k: 't', w: 'minmax(18ch, 1.3fr)' }, { label: '', k: 'b', w: 'minmax(10ch, 2fr)', opt: true }, { label: 'Reached', k: 'n' },
-        { label: 'Step conversion', k: 'n' }, { label: 'Kept', k: 'n', opt: true, def: 'Share of the part\'s first row.' }]);
-      var top = 0;
-      rows.forEach(function (r) {
-        if (r.part) { top = 0; addRow(t, [cell(r.label + ' · ' + int(r.n), 'ob-part')], { cls: 'is-part', data: { part: r.part } }); return; }
-        top = top || r.n;
-        var weak = r.prev != null && r.prev < 0.5 && r.base >= SMALL_N;
-        var label = r.kind === 'step' ? r.label : (r.kind === 'side' ? '↳ ' : '· ') + r.label;
-        addRow(t, [cell(label, 'ob-step', DEFS[r.label] || (r.kind === 'side' ? 'Happens apart from the path: no step conversion.' : r.kind === 'now' ? 'Where players are now, not a step.' : null)),
-          bar(ratio(r.n, top), r.kind === 'step' ? '' : 'is-aside'), int(r.n), cell(r.prev == null ? '—' : share(r.n, r.base), weak ? 'is-bad' : ''), r.first == null ? '—' : share(r.n, r.firstN)],
-          { data: { journey: r.key }, cls: r.kind === 'step' ? '' : 'is-aside' });
-      });
-      return t;
-    }
-    var cols = [{ label: 'Step', k: 't', w: 'minmax(18ch, 1.3fr)' }];
-    segs.forEach(function (s, i) { cols.push({ label: segLabel(s, i), k: 'n', def: 'Reached, then the step conversion and the share kept of the part\'s first row.' }); });
-    var c = grid('ob-compare ob-journey-table', cols);
-    var per = segs.map(journeyRows), base = per.reduce(function (m, r) { return r.length > m.length ? r : m; }, []);
-    base.forEach(function (r0) {
-      if (r0.part) {
-        addRow(c, [cell(r0.label + ' · ' + per.map(function (rows) { var p = rows.filter(function (x) { return x.part === r0.part; })[0]; return p ? int(p.n) : '—'; }).join(' / '), 'ob-part')], { cls: 'is-part', data: { part: r0.part } });
-        return;
-      }
-      var mark = r0.kind === 'step' ? '' : r0.kind === 'side' ? '↳ ' : '· ';
-      addRow(c, [cell(mark + r0.label, 'ob-step')].concat(per.map(function (rows) {
-        var r = rows.filter(function (x) { return x.key === r0.key; })[0];
-        if (!r) return '—';
-        var bits = [];
-        if (r.prev != null) bits.push(share(r.n, r.base) + ' conv');
-        if (r.first != null) bits.push(share(r.n, r.firstN) + ' kept');
-        return stack(int(r.n), bits.join(' · ') || null);
-      })), { data: { journey: r0.key }, cls: r0.kind === 'step' ? '' : 'is-aside' });
-    });
-    return c;
-  }
-
   // ── Shared KPI figures (the same definition wherever they appear) ──
   function seriesOf(s) { return (s.pirate_series && s.pirate_series.series) || {}; }
   function histSeries(d, key) { return isPlain(d) ? ((d.history_series || {}).series || {})[key] : null; }
@@ -1106,208 +999,254 @@
       } };
     },
     newPlayers: function (ctx) {
-      return { key: 'new', stage: 'Acquisition', label: 'Signups', count: true, def: DEFS.Signups, go: function () { ctx.go('acquisition'); }, get: function (s) {
+      return { key: 'new', stage: 'Acquisition', label: 'Joined', count: true, def: DEFS.Joined, go: function () { ctx.go('acquisition'); }, get: function (s) {
         var v = winOf(s, ctx.win).new;
         return { value: int(v), raw: v, delta: deltaFor(v, seriesOf(s).new, ctx.win, 'daily'), spark: sparkOf(ctx.d, s, 'p:new') };
       } };
     },
     activated: function (ctx) {
-      return { key: 'activated', stage: 'Activation', label: 'Activated', cls: 'ok', count: true, def: DEFS.Activated, go: function () { ctx.go('engagement', 'activation'); }, get: function (s) {
+      return { key: 'activated', stage: 'Activation', label: 'Newly activated', cls: 'ok', count: true, def: DEFS['Newly activated'], go: function () { ctx.go('onboarding', 'first'); }, get: function (s) {
         var x = winOf(s, ctx.win);
-        return { value: int(x.activated), raw: x.activated, sub: x.cohort != null ? int(x.cohort) + ' of them signed up in the window' : null, delta: deltaFor(x.activated, seriesOf(s).activations, ctx.win, 'daily'), spark: sparkOf(ctx.d, s, 'p:activations') };
+        return { value: int(x.activated), raw: x.activated, sub: x.cohort != null ? int(x.cohort) + ' of them joined in the window' : null, delta: deltaFor(x.activated, seriesOf(s).activations, ctx.win, 'daily'), spark: sparkOf(ctx.d, s, 'p:activations') };
       } };
     },
     active: function (ctx) {
-      return { key: 'active', stage: 'Retention', label: activeName(ctx.win), cls: 'ok', def: DEFS.Active, go: function () { ctx.go('engagement', 'retention'); }, get: function (s) {
+      return { key: 'active', stage: 'Retention', label: activeName(ctx.win), cls: 'ok', def: DEFS.Active, go: function () { ctx.go('engagement'); }, get: function (s) {
         var x = winOf(s, ctx.win), key = { 1: 'dau', 7: 'wau', 30: 'mau' }[ctx.win];
         return { value: int(x.active), raw: x.active, sub: shareOf(x.active, allOf(s).players, 'players'), delta: deltaFor(x.active, histSeries(ctx.d, key), ctx.win, 'level'), spark: sparkOf(ctx.d, s, 'h:' + key, isPlain(ctx.d)) };
       } };
     },
     activeUsers: function (ctx) {
-      return { key: 'active_users', stage: 'Retention', label: 'Active users', count: true, def: DEFS['Active users'], go: function () { ctx.go('engagement', 'retention'); }, get: function (s) {
+      return { key: 'active_users', stage: 'Retention', label: 'Active users', count: true, def: DEFS['Active users'], go: function () { ctx.go('engagement'); }, get: function (s) {
         var x = winOf(s, ctx.win), a = allOf(s);
         return { value: int(x.active_activated), raw: x.active_activated, sub: shareOf(x.active_activated, a.activated, 'activated players') };
       } };
     },
     players: function (ctx) {
-      return { key: 'players', stage: 'Population', label: 'Players', scope: 'now', count: true, def: DEFS.Players, go: function () { ctx.go('engagement', 'retention'); }, get: function (s) {
+      return { key: 'players', stage: 'Population', label: 'Players', scope: 'now', count: true, def: DEFS.Players, go: function () { ctx.go('engagement'); }, get: function (s) {
         var v = allOf(s).players != null ? allOf(s).players : s.players;
         var who = s.key === 'replicant' ? 'replicants' : (ctx.d.filters || {}).replicants ? 'players' : 'humans';
         return { value: int(v), raw: v, sub: who + ' on chain', delta: deltaFor(v, seriesOf(s).players_total, ctx.win, 'level'), spark: (seriesOf(s).players_total || []).slice(-30).filter(function (x) { return x != null; }) };
       } };
     },
     stickiness: function (ctx) {
-      return { key: 'stickiness', stage: 'Retention', label: 'Come back daily', scope: 'now', go: function () { ctx.go('engagement', 'retention'); }, get: function (s) {
+      return { key: 'stickiness', stage: 'Retention', label: 'Come back daily', scope: 'now', go: function () { ctx.go('engagement'); }, get: function (s) {
         var sk = (s.pirate || {}).stickiness || {};
         return { value: pct(ratio(sk.dau, sk.mau)), sub: int(sk.dau) + ' today of ' + int(sk.mau) + ' this month' };
       } };
     },
   };
 
-  // ── THE PIRATE FUNNEL: every stage a part of the one above it ──
-  /* Awareness → Acquisition → Activation → Retention, retention judged over
-   * the chosen window. From Signups down each stage is a subset of the one
-   * above, so every percentage is "of the stage above". Awareness is signup
-   * starts, which the servers only record since telemetry began, so its step
-   * to Signups is the servers' own (started → finished signup) and Signups
-   * opens a new scale. */
-  function funnelStages(seg, win) {
-    var a = allOf(seg), x = winOf(seg, win), srv = seg && seg.pirate_server, all = srv && srv.all;
-    var aware = all && all.started != null
-      ? { key: 'awareness', stage: 'Awareness', label: 'Started signup', value: all.started, finished: all.signed_up, ownScale: true, what: 'people who started signing up, since telemetry began' }
-      : { key: 'awareness', stage: 'Awareness', label: 'Started signup', value: null, missing: true, what: 'not recorded for this group' };
-    return [
-      aware,
-      { key: 'acquisition', stage: 'Acquisition', label: 'Signups', value: a.players, what: 'players who signed up' },
-      { key: 'activation', stage: 'Activation', label: 'Activated', value: a.activated, what: 'refined alpha and initiated a raid' },
-      { key: 'retention', stage: 'Retention', label: 'Active users', value: x.active_activated, what: 'activated, and active ' + ({ 1: 'today', 7: 'this week', 30: 'this month' }[win] || 'in ' + win + 'd') },
-    ];
+  // ── PIRATE: the funnel by who joined in the window, the pulse, the weeks ──
+  /* The owner's definitions (2026-11-20): activated = refined AND raided,
+   * with no deadline (the window is the time context); retention counts
+   * everyone who joined; played = any gameplay action that day. */
+  function cohortWin(seg, win) {
+    var c = seg && seg.pirate_cohorts;
+    return c ? (c.windows || []).filter(function (w) { return String(w.days) === String(win); })[0] || null : null;
   }
-  function funnelGraph(ctx, seg) {
-    var rows = funnelStages(seg, ctx.win);
-    /* Signups set the scale below Awareness, which has its own. */
-    var top = rows.reduce(function (m, r) { return r.ownScale ? m : Math.max(m, r.value || 0); }, 0);
-    var g = H.el('div', 'ob-fg');
-    rows.forEach(function (r, i) {
-      /* Between two stages, the step itself: how many of the one above made it. */
-      if (i > 0) {
-        var up = rows[i - 1], step = H.el('div', 'ob-fg-step');
-        step.setAttribute('data-step', up.key + '>' + r.key);
-        step.appendChild(H.el('span', null, ''));
-        var mid = H.el('span', 'ob-fg-conv');
-        mid.appendChild(H.el('i', H.iconClass('icon-caret-down', 'sui-icon-sm')));
-        if (up.missing || r.missing) mid.appendChild(H.el('span', 'ob-sub', 'not measurable for this group'));
-        else if (up.ownScale) {
-          /* The servers' own step: of those who started signup, how many finished it. */
-          mid.appendChild(H.el('span', 'ob-fg-rate', up.value > 0 && up.finished != null ? pct1(up.finished / up.value) : '—'));
-          mid.appendChild(H.el('span', 'ob-sub', ' finished signing up (' + int(up.finished) + ' of ' + int(up.value) + ')'));
-          step.classList.add('is-rescale');
+  /* The funnel's rows for one segment and window, in two groups that are
+   * never divided into each other: signup sessions, then the players who
+   * joined in the window. Every row names the row it is a share of (`of`):
+   * the row above, or `joined` for retention, which counts every joiner. */
+  function pirateRows(seg, win) {
+    var x = srvWin(seg, win), c = cohortWin(seg, win);
+    var v = function (k) { return c ? c[k] : null; };
+    var rows = [
+      { group: 'sessions', key: 'started', stage: 'Awareness', label: 'Started signup', value: x ? x.started : null, of: null, unit: 'sessions' },
+      { group: 'sessions', key: 'signed', stage: 'Acquisition', label: 'Finished signup', value: x ? x.signed_up : null, of: 'started', unit: 'sessions' },
+      { group: 'players', key: 'joined', stage: 'Acquisition', label: 'Joined', value: v('joined'), of: null },
+      { group: 'players', key: 'acted', stage: 'Activation', label: 'Acted', value: v('acted'), of: 'joined' },
+      { group: 'players', key: 'refined_or_raided', stage: 'Activation', label: 'Refined or raided', value: v('refined_or_raided'), of: 'acted', parts: [['Refined', v('refined')], ['Raided', v('raided')]] },
+      { group: 'players', key: 'activated', stage: 'Activation', label: 'Activated', value: v('activated'), of: 'refined_or_raided' },
+      { group: 'players', key: 'playing', stage: 'Retention', label: 'Playing', value: v('playing'), of: 'joined' },
+      { group: 'players', key: 'referred', stage: 'Referral', label: 'Brought a player', value: null, of: 'joined', unrecorded: true },
+    ];
+    var by = {};
+    rows.forEach(function (r) { by[r.key] = r; r.missing = r.value == null; r.ofValue = r.of && by[r.of] ? by[r.of].value : null; r.ofLabel = r.of && by[r.of] ? by[r.of].label : null; });
+    return rows;
+  }
+  /* "36% of acted" — or "3 of 10 acted" while 10 is too few for a percentage. */
+  function ofWords(n, total, word) {
+    if (n == null || !(total > 0)) return null;
+    return total >= SMALL_N ? pct(n / total) + ' of ' + word : int(n) + ' of ' + int(total) + ' ' + word;
+  }
+  function groupScope(seg, win, group) {
+    if (group === 'sessions') {
+      var x = srvWin(seg, win), since = (seg.pirate_server || {}).since;
+      return 'Signup sessions · ' + (win === 'all' ? (since ? 'since ' + shortDay(since) : 'all recorded') : x && x.partial ? 'since ' + shortDay(x.partial) : 'last ' + WIN_WORD[win]);
+    }
+    var c = cohortWin(seg, win);
+    if (!c) return 'Players who joined';
+    return 'Joined ' + (win === 'all' ? 'since ' + shortDay(c.from) : String(win) === '1' ? 'in the last day' : shortDay(c.from) + ' – today') + ' · ' + plural(c.joined, 'player', 'players');
+  }
+  function pirateFunnel(ctx, seg) {
+    var rows = pirateRows(seg, ctx.win), g = H.el('div', 'ob-fg ob-pf');
+    ['sessions', 'players'].forEach(function (group) {
+      var mine = rows.filter(function (r) { return r.group === group; });
+      var top = mine.reduce(function (m, r) { return Math.max(m, r.value || 0); }, 0);
+      var head = H.el('div', 'ob-fg-group');
+      head.setAttribute('data-group', group);
+      head.appendChild(H.el('span', 'ob-sub', groupScope(seg, ctx.win, group)));
+      g.appendChild(head);
+      mine.forEach(function (r) {
+        var row = H.el('div', 'ob-fg-row' + (r.missing ? ' is-missing' : ''));
+        row.setAttribute('data-funnel', r.key);
+        if (r.of) row.setAttribute('data-of', r.of);
+        row.title = DEFS[r.label] || '';
+        var name = H.el('div', 'ob-fg-name');
+        name.appendChild(H.el('span', 'ob-fg-stage', r.stage));
+        name.appendChild(H.el('span', 'ob-fg-label', r.label));
+        var what = r.unrecorded ? 'not recorded' : r.missing ? 'not recorded for this group' : r.parts ? r.parts.map(function (p) { return p[0].toLowerCase() + ' ' + int(p[1]); }).join(' · ')
+          : ofWords(r.value, r.ofValue, (r.ofLabel || '').toLowerCase()) || (r.unit || 'players');
+        name.appendChild(H.el('span', 'ob-sub ob-fg-what', what));
+        row.appendChild(name);
+        var track = H.el('div', 'ob-fg-track');
+        var stageCls = 'ob-fg-' + r.stage.toLowerCase();
+        if (r.parts && !r.missing) {
+          /* Two roads, side by side: neither is a step after the other. */
+          var both = H.el('div', 'ob-fg-parts');
+          r.parts.forEach(function (p, i) {
+            var b = H.el('div', 'ob-fg-bar ' + stageCls + ' ob-fg-part-' + i);
+            b.setAttribute('data-part', p[0].toLowerCase());
+            b.style.width = Math.max(1, (ratio(p[1], top) || 0) * 100) + '%';
+            both.appendChild(b);
+          });
+          track.appendChild(both);
         } else {
-          var rate = up.value > 0 ? r.value / up.value : null;
-          mid.appendChild(H.el('span', 'ob-fg-rate', pct1(rate)));
-          mid.appendChild(H.el('span', 'ob-sub', ' of ' + up.label.toLowerCase() + ' ' + { activation: 'activated', retention: 'are active users' }[r.key]));
+          var bar = H.el('div', 'ob-fg-bar ' + stageCls);
+          bar.style.width = r.missing ? '100%' : Math.max(1, (ratio(r.value, top) || 0) * 100) + '%';
+          if (r.missing) bar.appendChild(H.el('span', 'ob-fg-note', 'not recorded'));
+          track.appendChild(bar);
         }
-        step.appendChild(mid);
-        step.appendChild(H.el('span', null, ''));
-        if (up.ownScale && !r.missing) {
-          step.appendChild(H.el('span', null, ''));
-          step.appendChild(H.el('span', 'ob-sub ob-fg-rescale', 'Signups count every player, also those from before signups were recorded'));
-          step.appendChild(H.el('span', null, ''));
-        }
-        g.appendChild(step);
-      }
-      var row = H.el('div', 'ob-fg-row' + (r.missing ? ' is-missing' : ''));
-      row.setAttribute('data-funnel', r.key);
-      row.title = DEFS[r.label] || '';
-      var name = H.el('div', 'ob-fg-name');
-      name.appendChild(H.el('span', 'ob-fg-stage', r.stage));
-      name.appendChild(H.el('span', 'ob-fg-label', r.label));
-      name.appendChild(H.el('span', 'ob-sub ob-fg-what', r.what));
-      row.appendChild(name);
-      var track = H.el('div', 'ob-fg-track');
-      var bar = H.el('div', 'ob-fg-bar ob-fg-' + r.key);
-      bar.style.width = r.missing || r.ownScale ? '100%' : Math.max(1, (ratio(r.value, top) || 0) * 100) + '%';
-      if (r.missing) bar.appendChild(H.el('span', 'ob-fg-note', 'not recorded'));
-      track.appendChild(bar);
-      row.appendChild(track);
-      var num = H.el('div', 'ob-fg-num');
-      num.appendChild(H.el('span', 'ob-fg-value', r.missing ? '—' : int(r.value)));
-      row.appendChild(num);
-      g.appendChild(row);
+        row.appendChild(track);
+        var num = H.el('div', 'ob-fg-num');
+        num.appendChild(H.el('span', 'ob-fg-value', r.missing ? '—' : int(r.value)));
+        if (!r.missing && r.ofValue > 0 && r.ofValue >= SMALL_N) num.appendChild(H.el('span', 'ob-sub', pct(r.value / r.ofValue)));
+        row.appendChild(num);
+        g.appendChild(row);
+      });
     });
     return g;
   }
-  function funnelBlock(ctx) {
+  function funnelChips(ctx) {
+    var out = [];
+    ctx.segs.forEach(function (s) {
+      var c = cohortWin(s, ctx.win);
+      if (c && c.ledger_unread) out.push(chip(int(c.ledger_unread) + ' not read yet', 'Acted, but their ledger is not read yet: mined, refined and activated are not known for them.'));
+    });
+    return out.slice(0, 1);
+  }
+  function pirateBlock(ctx) {
     var segs = ctx.segs;
-    var b = block('Pirate funnel', { key: 'funnel', scope: 'All time · active ' + ({ 1: 'today', 7: 'this week', 30: 'this month' }[ctx.win]),
-      def: 'From Signups down, each stage is part of the one above it. Awareness is people who started signing up, recorded since telemetry began; unique visitors are not recorded yet.' });
-    if (segs.length === 1) { b.appendChild(funnelGraph(ctx, segs[0])); return b; }
-    var grid1 = H.el('div', 'ob-fg-split');
+    var b = block('Pirate funnel', { key: 'funnel', scope: ctx.win === 'all' ? 'All time' : 'Last ' + WIN_WORD[ctx.win], extra: funnelChips(ctx),
+      def: 'Signup sessions, then the players who joined in the window. Every stage is counted over the same joiners, so far.' });
+    if (segs.length === 1) { b.appendChild(pirateFunnel(ctx, segs[0])); return b; }
+    var cols = H.el('div', 'ob-fg-split');
     segs.forEach(function (s, i) {
       var col = H.el('div', 'ob-fg-col');
       col.appendChild(segLabel(s, i));
-      col.appendChild(funnelGraph(ctx, s));
-      grid1.appendChild(col);
+      col.appendChild(pirateFunnel(ctx, s));
+      cols.appendChild(col);
     });
-    b.appendChild(grid1);
+    b.appendChild(cols);
     return b;
   }
-
-  // ── OVERVIEW: the funnel, the period's movement, what needs a look ──
-  function signalsBlock(ctx) {
-    var list = signalsOf(ctx.d);
-    if (!list.length) return null;
-    var b = block('Signals', { key: 'signals', scope: 'Now' });
-    var box = H.el('div', 'ob-signals');
-    list.forEach(function (x) {
-      var r = H.el('a', 'ob-signal is-' + x.level + (x.data ? ' is-data' : ''));
-      r.href = 'javascript:void(0)';
-      r.setAttribute('data-signal', x.level);
-      r.appendChild(H.el('span', 'ob-src-mark'));
-      var what = H.el('span', 'ob-step');
-      what.appendChild(H.el('span', 'ob-v ob-signal-title', x.title + (x.segLabel ? ' · ' + x.segLabel : '')));
-      if (x.detail) what.appendChild(H.el('span', 'ob-sub ob-signal-detail', x.detail));
-      if (x.value) what.appendChild(H.el('span', 'ob-sub ob-signal-inline', x.value));
-      r.appendChild(what);
-      r.appendChild(H.el('span', 'ob-n ob-sub ob-signal-value', x.value || ''));
-      r.appendChild(H.el('i', H.iconClass('icon-chevron-right', 'sui-icon-sm')));
-      r.addEventListener('click', function () { if (x.key) OB.open[x.key] = true; ctx.go(x.page, x.view); });
-      box.appendChild(r);
+  /* Telemetry saw N of the M who joined since it began; a guild that sent none is named. */
+  function coverageLine(ctx) {
+    var tags = guildTags(ctx.d), segs = ctx.segs, box = H.el('div', 'ob-coverage');
+    box.setAttribute('data-block', 'coverage');
+    segs.forEach(function (s, i) {
+      var c = s.coverage;
+      if (!c || !c.joined) return;
+      var line = H.el('span', 'ob-coverage-line');
+      if (segs.length > 1) line.appendChild(segLabel(s, i));
+      line.appendChild(H.el('span', 'ob-v', 'Telemetry saw ' + int(c.tracked) + ' of ' + int(c.joined)));
+      line.appendChild(sub('joined since ' + shortDay(c.since)));
+      (c.guilds || []).filter(function (g) { return g.joined > 0 && !g.tracked; }).sort(function (a, b) { return b.joined - a.joined; }).forEach(function (g) {
+        line.appendChild(sub('· ' + (tags[g.guild] || g.guild) + ' sent none (' + int(g.joined) + ')'));
+      });
+      box.appendChild(line);
     });
-    b.appendChild(box);
-    return b;
+    if (!box.firstChild) return null;
+    box.appendChild(link('Coverage', function () { ctx.go('data'); }, 'ob-coverage-door'));
+    box.title = DEFS.Coverage;
+    return box;
   }
-  function aarrrTable(d, seg) {
-    var plain = isPlain(d);
-    var t = grid('ob-aarrr', [{ label: 'Stage', k: 't', w: 'minmax(10ch, .7fr)', opt: true }, { label: '', k: 't', w: 'minmax(15ch, 1.2fr)' },
-      { label: '24 hours', k: 'n', opt: true }, { label: '7 days', k: 'n' }, { label: '30 days', k: 'n' }, { label: 'All time', k: 'n' }, { label: '', k: 's', opt: true }]);
-    var last = null;
-    AARRR.forEach(function (r) {
-      var name = chartLink(r[1], r[3]);
-      if (r[5]) name.appendChild(sub(r[5]));
-      var cells = [cell(r[0] === last ? '' : r[0], 'ob-stage-name'), name];
-      ['1', '7', '30', 'all'].forEach(function (w) { var v = r[2](seg, w); cells.push(stack(int(v[0]), v[0] != null ? v[1] : null)); });
-      cells.push(spark(sparkOf(d, seg, r[4], plain), r[1]));
-      addRow(t, cells, { cls: r[0] === last ? '' : 'is-stage', data: { aarrr: r[1] } });
-      last = r[0];
+  /* Calendar counts over the window: never inside the funnel, never divided into it. */
+  function pulseDefs(ctx) {
+    if (ctx.win !== 'all') return [K.newPlayers(ctx), K.active(ctx), K.activeUsers(ctx), K.activated(ctx)];
+    return [
+      { key: 'new', stage: 'Acquisition', label: 'Joined', count: true, def: DEFS.Joined, get: function (s) { var a = allOf(s); return { value: int(a.players), raw: a.players, sub: 'humans on chain' }; } },
+      { key: 'active', stage: 'Activation', label: 'Ever acted', count: true, def: DEFS.Acted, get: function (s) { var a = allOf(s); return { value: int(a.acted), raw: a.acted, sub: shareOf(a.acted, a.players, 'players') }; } },
+      { key: 'activated', stage: 'Activation', label: 'Ever activated', cls: 'ok', count: true, def: DEFS.Activated, get: function (s) { var a = allOf(s); return { value: int(a.activated), raw: a.activated, sub: shareOf(a.activated, a.players, 'players') }; } },
+    ];
+  }
+  var WEEK_COLS = [['joined', 'Joined'], ['tracked', 'Signup recorded', true], ['acted', 'Acted'], ['refined', 'Refined'], ['raided', 'Raided'], ['activated', 'Activated'],
+    ['retained_w1', 'Week 1'], ['retained_w2', 'Week 2'], ['retained_w4', 'Week 4'], ['retained_w8', 'Week 8', true], ['playing', 'Playing now', true]];
+  /* One row per join week: the same funnel, so a better week reads as a better row. */
+  function weekTable(seg) {
+    var t = grid('ob-weeks', [{ label: 'Joined, week of', k: 't', w: 'minmax(11ch, .8fr)' }].concat(WEEK_COLS.map(function (c) { return { label: c[1], k: 'n', opt: !!c[2], def: DEFS[c[1]] }; })));
+    var weeks = ((seg.pirate_cohorts || {}).weeks || []).slice().reverse();
+    weeks.forEach(function (wk) {
+      var name = cell((wk.exact ? '' : '≈ ') + shortDay(wk.week), 'ob-step', wk.exact ? null : DEFS['Join date']);
+      addRow(t, [name].concat(WEEK_COLS.map(function (c) {
+        var v = wk[c[0]];
+        if (v == null) return cell('not yet', 'ob-sub ob-notyet', DEFS['Not yet']);
+        return c[0] === 'joined' ? cell(int(v), 'ob-v') : stack(int(v), wk.joined ? ofShare(v, wk.joined) : null);
+      })), { data: { week: wk.week }, cls: wk.joined ? '' : 'is-empty' });
     });
     return t;
   }
-  function aarrrCompare(segs, w) {
-    var t = grid('ob-compare ob-aarrr-compare', [{ label: 'Stage', k: 't', w: 'minmax(11ch, .8fr)', opt: true }, { label: '', k: 't', w: 'minmax(18ch, 1.4fr)' }]
-      .concat(segs.map(function (s, i) { return { label: segLabel(s, i), k: 'n' }; })));
-    var last = null;
-    AARRR.forEach(function (r) {
-      var cells = [cell(r[0] === last ? '' : r[0], 'ob-stage-name'), cell(r[1], 'ob-step', DEFS[r[1]])];
-      segs.forEach(function (s) { var v = r[2](s, w); cells.push(stack(int(v[0]), v[0] != null ? v[1] : null)); });
-      addRow(t, cells, { cls: r[0] === last ? '' : 'is-stage', data: { aarrr: r[1] } });
-      last = r[0];
-    });
-    return t;
+  /* Three doors: the biggest leak, the learning gap, and who came back. */
+  var LEFT_LABEL = { never_acted: 'Never acted on chain', acted_only: 'Acted, never mined', mined_only: 'Mined, never refined or raided', refined_no_raid: 'Refined, never raided',
+    raided_no_refine: 'Raided, never refined', activated: 'Activated, then left', not_read: 'Not read yet' };
+  var LEFT_ORDER = ['never_acted', 'acted_only', 'mined_only', 'refined_no_raid', 'raided_no_refine', 'activated', 'not_read'];
+  function doorDefs(ctx, seg) {
+    var out = [], l = seg.left, imp = (ctx.d.tutorial_impact || []).filter(function (r) { return r.key === 'finished'; })[0];
+    if (l && l.left) {
+      var big = LEFT_ORDER.filter(function (k) { return k !== 'not_read'; }).sort(function (a, b) { return (l.furthest[b] || 0) - (l.furthest[a] || 0); })[0];
+      out.push({ key: 'door_leaving', stage: 'Biggest leak', label: LEFT_LABEL[big], value: int(l.furthest[big]), sub: shareOf(l.furthest[big], l.left, 'who left'), go: function () { ctx.go('leaving'); } });
+    }
+    if (imp && imp.players) out.push({ key: 'door_learn', stage: 'Learn', label: 'Tutorial finishers who raided', value: int(imp.raided), sub: shareOf(imp.raided, imp.players, 'finishers'), scope: 'every guild', go: function () { ctx.go('onboarding', 'after'); } });
+    var wk = ((seg.pirate_cohorts || {}).weeks || []).filter(function (w) { return w.retained_w2 != null && w.joined > 0; }).pop();
+    if (wk) out.push({ key: 'door_stay', stage: 'Stay', label: 'Played in week 2', value: int(wk.retained_w2), sub: ofWords(wk.retained_w2, wk.joined, 'who joined ' + shortDay(wk.week)), go: function () { ctx.go('engagement'); } });
+    return out;
   }
+  function doorsBlock(ctx) {
+    if (ctx.segs.length !== 1) return null;
+    var defs = doorDefs(ctx, ctx.segs[0]);
+    if (!defs.length) return null;
+    var hud = H.el('div', 'ob-hud ob-doors');
+    hud.setAttribute('data-block', 'doors');
+    defs.forEach(function (k) { hud.appendChild(tile({ key: k.key, stage: k.stage, label: k.label, value: k.value, sub: k.sub, scope: k.scope, go: k.go })); });
+    return hud;
+  }
+  var PIRATE_WINDOWS = WINDOWS.concat([{ key: 'all', label: 'All time' }]);
   function viewOverview(ctx) {
     var d = ctx.d, segs = ctx.segs, box = H.el('div', 'ob-view');
-    if (!segs.length || !segs[0].pirate) {
+    if (!segs.length || !segs[0].pirate_cohorts) {
       box.appendChild(emptyOr(d, 'No players read yet'));
       var iss = issuesOf(d).filter(function (x) { return x.level === 'issue'; });
       if (iss.length && !reading(d)) box.appendChild(actionBtn(plural(iss.length, 'issue', 'issues') + ' · open Data', function () { ctx.go('data'); }, 'to_data'));
       return box;
     }
     var head = H.el('div', 'ob-kpi-head ob-overview-head');
-    head.appendChild(windowStrip(ctx));
+    var strip = H.navStrip(PIRATE_WINDOWS, ctx.win, function (k) { ctx.set({ win: k }); });
+    strip.classList.add('ob-windows');
+    head.appendChild(strip);
     box.appendChild(head);
-    box.appendChild(funnelBlock(ctx));
-    box.appendChild(kpi(ctx, [K.newPlayers(ctx), K.activated(ctx), K.activeUsers(ctx)], chip('Last ' + WIN_WORD[ctx.win]), WIN_WORD[ctx.win]));
-    var two = H.el('div', 'ob-two');
-    var sig = signalsBlock(ctx);
-    if (sig) two.appendChild(sig);
-    var j = block('Journey', { key: 'journey', scope: 'All time', def: 'From opening signup to activating, in three parts that are never divided into each other.' });
-    j.appendChild(journeyTable(segs));
-    two.appendChild(j);
-    box.appendChild(two);
-    var st = block('Pirate metrics by window', { key: 'stages', scope: segs.length === 1 ? 'Every window' : WIN_WORD[ctx.win], chart: function () { openChart(['new', 'activations', 'refiners_7d', 'raiders_7d']); } });
-    st.appendChild(segs.length === 1 ? aarrrTable(d, segs[0]) : aarrrCompare(segs, ctx.win));
-    box.appendChild(st);
+    var cov = coverageLine(ctx);
+    if (cov) box.appendChild(cov);
+    box.appendChild(kpi(ctx, pulseDefs(ctx), chip(ctx.win === 'all' ? 'Pulse · all time' : 'Pulse · last ' + WIN_WORD[ctx.win], DEFS.Pulse), ctx.win === 'all' ? 'all time' : WIN_WORD[ctx.win]));
+    box.appendChild(pirateBlock(ctx));
+    segs.forEach(function (s, i) {
+      var wb = block(segs.length > 1 ? 'By join week · ' + segName(s) : 'By join week', { key: 'weeks', scope: 'Join weeks · Monday UTC', def: DEFS.Cohort });
+      wb.appendChild(weekTable(s));
+      box.appendChild(wb);
+    });
+    var doors = doorsBlock(ctx);
+    if (doors) box.appendChild(doors);
     return box;
   }
 
@@ -1318,7 +1257,7 @@
     var f = ctx.d.filters || {};
     var ignores = f.compare ? 'not split' : (f.interface || f.activity || f.replicants) ? 'not filtered' : '';
     var b = block(title || 'Daily record', { key: 'trends', noTag: true, scope: 'Humans, ' + (OB.tag || 'every guild') + (ignores ? ' · ' + ignores : ''), def: DEFS['Daily record'], chart: function () { openChart(rows.slice(0, 6).map(function (r) { return r[0][0]; })); },
-      extra: [actionBtn('All trends', function () { ctx.go('trends'); }, 'trends')] });
+      extra: [actionBtn('Daily record', function () { ctx.go('data', 'record'); }, 'trends')] });
     b.appendChild(trendTable(ctx, rows, false));
     return b;
   }
@@ -1353,18 +1292,15 @@
     return t;
   }
 
-  // ── ACQUISITION: from opening signup to a player ──
+  // ── JOIN: from opening signup to a player ──
   function viewAcquisition(ctx) {
     var d = ctx.d, box = H.el('div', 'ob-view');
     var segs = ctx.segs.filter(function (s) { return s.signup; });
     if (!segs.length) {
       var f = d.filters || {};
-      if (f.activity || f.compare === 'activity') {
-        box.appendChild(H.stateBlock('empty', 'Activity is only known once signup finishes'));
-        box.appendChild(actionBtn('Clear the activity filter', function () { ctx.set(f.activity ? { activity: '' } : { compare: '' }); }, 'clear_activity'));
-      }
-      else if (f.compare === 'tutorial') box.appendChild(H.stateBlock('empty', 'The tutorial comes after signup'));
+      if (f.compare === 'tutorial') box.appendChild(H.stateBlock('empty', 'The tutorial comes after signup'));
       else box.appendChild(emptyOr(d, 'No signups recorded'));
+      if ((d.recent || []).length) box.appendChild(playerList(ctx, 'signups'));
       return box;
     }
     var sctx = Object.assign({}, ctx, { segs: segs });
@@ -1377,6 +1313,7 @@
     box.appendChild(b);
     var tb = trendsBlock(ctx, ['Awareness', 'Acquisition']);
     if (tb) box.appendChild(tb);
+    box.appendChild(playerList(ctx, 'signups'));
     return box;
   }
 
@@ -1458,62 +1395,20 @@
     });
     return t;
   }
-  function viewPhases(ctx) {
-    var segs = ctx.segs, box = H.el('div', 'ob-view');
-    if (segs.length > 1) {
-      var pc = block('Phases · sample of new signups', { key: 'phases', scope: 'All time', def: DEFS.Sample });
-      pc.appendChild(funnelCompare(segs, phaseSteps, 'Phase'));
-      box.appendChild(pc);
-      return box;
-    }
-    var s = segs[0], phases = phaseRows(s), tt0 = tutorialOf(s);
-    var ob = block('Outcomes · ' + int(tt0.offered) + (tt0.unique ? ' unique players' : ' players'), { key: 'outcomes', scope: 'All time', copy: false });
-    ob.appendChild(outcomeStrip(tt0));
-    box.appendChild(ob);
-    if (phases.length) {
-      var pb = block('Phases · sample of ' + int(phases[0].reached) + ' new signups', { key: 'phases', scope: 'All time', def: DEFS.Sample });
-      pb.appendChild(phaseFunnel(ctx, s, phases));
-      box.appendChild(pb);
-    }
-    return box;
-  }
   /* How far unique players got: the servers' count, replays and logged-in runs in. */
-  function playerFunnel(ctx, rows) {
+  function playerFunnel(ctx, seg, rows) {
     var d = ctx.d;
     var stopTop = worstRates(rows.slice(0, -1), function (r) { return r.reached; }, function (r) { return r.furthest; }, FLAG_TOP);
     var t = grid('ob-steps', [{ label: 'Step', k: 't', w: 'minmax(18ch, 1.6fr)' }, { label: '', k: 'b', opt: true }, { label: 'Reached', k: 'n' }, { label: 'Kept', k: 'n', opt: true },
-      { label: 'Stopped', k: 'n', opt: true }, { label: 'Stop rate', k: 'n' }]);
+      { label: 'Stopped', k: 'n', opt: true }, { label: 'Stop rate', k: 'n' }, { label: 'Median', k: 'n', def: 'Typical time until the next step.' }]);
     rows.forEach(function (r, i) {
-      var last = i === rows.length - 1, flag = stopTop.indexOf(r.key) >= 0;
+      var last = i === rows.length - 1, flag = stopTop.indexOf(r.key) >= 0, w = dwellOf(seg, r.key);
       var row = addRow(t, [cell(stepLabel(r.key), 'ob-step', r.key), bar(r.retained), int(r.reached), rows[0].reached >= SMALL_N ? pct(r.retained) : '—',
-        cell(last ? '—' : int(r.furthest), flag ? 'is-bad' : ''), cell(last ? '—' : pct1(ratio(r.furthest, r.reached)), flag ? 'is-bad' : '')], { data: { step: r.key } });
+        cell(last ? '—' : int(r.furthest), flag ? 'is-bad' : ''), cell(last ? '—' : pct1(ratio(r.furthest, r.reached)), flag ? 'is-bad' : ''), cell(w ? dur(w.p50) : '—', 'ob-sub')], { data: { step: r.key } });
       var who = d.stopped && d.stopped[r.key];
       if (who) drill(t, row, r.key, function () { return whoList(ctx, who, r.key); });
     });
     return t;
-  }
-  function viewSteps(ctx) {
-    var d = ctx.d, segs = ctx.segs, box = H.el('div', 'ob-view');
-    if (segs.length > 1) {
-      var c = block('Steps · sample of new signups', { key: 'steps', scope: 'All time', def: DEFS.Sample });
-      c.appendChild(funnelCompare(segs, function (x) { return x.tutorial && x.tutorial.steps; }));
-      box.appendChild(c);
-      return box;
-    }
-    var s = segs[0], steps = s.player_steps || [];
-    var by = steps.length && ctx.st.count !== 'sample' ? 'unique' : 'sample';
-    var pick = H.navStrip([{ key: 'unique', label: 'Unique players' }, { key: 'sample', label: 'New signups' }], by, function (k) { ctx.st.count = k; ctx.redraw(); });
-    pick.classList.add('ob-count');
-    if (by === 'unique') {
-      var up = block('Steps · ' + int(steps[0].reached) + ' unique players', { key: 'steps', scope: 'All time', extra: [pick], def: DEFS['Tutorial players'] });
-      up.appendChild(playerFunnel(ctx, steps));
-      box.appendChild(up);
-    } else if (s.tutorial && s.tutorial.offered) {
-      var sample = block('Steps · sample of ' + int(s.tutorial.offered) + ' new signups', { key: 'steps', scope: 'All time', extra: steps.length ? [pick] : [], def: DEFS.Sample });
-      sample.appendChild(funnelSingle(ctx, s, s.tutorial.steps || [], true));
-      box.appendChild(sample);
-    } else box.appendChild(emptyOr(d, 'No tutorial steps yet'));
-    return box;
   }
   /* First runs beside later ones: does coming back help? */
   function runCompare(segs) {
@@ -1572,43 +1467,7 @@
     var bc = block('First run against later runs', { key: 'by_run', scope: 'All time' });
     bc.appendChild(runCompare(segs));
     box.appendChild(bc);
-    var lb = block('Newest runs', { key: 'runs', scope: 'Newest ' + int(rows.length) + split, extra: [actionBtn('All in Players', function () { ctx.go('players', 'runs'); }, 'players')] });
-    lb.appendChild(runTable(d, rows.slice(0, 12), ctx.st, ctx.redraw));
-    box.appendChild(lb);
-    return box;
-  }
-  function viewTiming(ctx) {
-    var d = ctx.d, segs = ctx.segs, box = H.el('div', 'ob-view');
-    var b = block('How long each part takes', { key: 'durations', scope: 'All time' });
-    var cols = [{ label: '', k: 't', w: 'minmax(14ch, 1.2fr)' }];
-    if (segs.length === 1) cols = cols.concat([{ label: 'Median', k: 'n' }, { label: 'p90', k: 'n' }, { label: 'Players', k: 'n' }]);
-    else segs.forEach(function (s, i) { cols.push({ label: segLabel(s, i), k: 'n' }); });
-    var t = grid('ob-durations', cols);
-    DURATIONS.forEach(function (k) {
-      var cells = [cell(k[1], 'ob-step')];
-      if (segs.length === 1) { var x = segs[0].durations && segs[0].durations[k[0]]; cells = cells.concat(x ? [dur(x.p50), dur(x.p90), int(x.n)] : ['—', '—', '—']); }
-      else segs.forEach(function (s) { var y = s.durations && s.durations[k[0]]; cells.push(stack(y ? dur(y.p50) : '—', y ? 'p90 ' + dur(y.p90) : null)); });
-      addRow(t, cells, { data: { metric: k[0] } });
-    });
-    b.appendChild(t);
-    box.appendChild(b);
-    var dwell = (segs[0] && segs[0].dwell) || {};
-    var keys = Object.keys(dwell).filter(function (k) { return dwell[k] && dwell[k].n >= 3; }).sort(function (a, b2) { return dwell[b2].p50 - dwell[a].p50; }).slice(0, 15);
-    if (!keys.length) { box.appendChild(emptyOr(d, 'No step timings yet')); return box; }
-    var max = dwell[keys[0]].p90 || dwell[keys[0]].p50 || 1;
-    var sb = block('Slowest steps', { key: 'slowest', scope: 'All time' });
-    var first = segs.length > 1 ? segName(segs[0]) + ' · ' : '';
-    if (segs.length > 1) sb.querySelector('.ob-title').textContent = 'Slowest steps · ranked by ' + segName(segs[0]);
-    var scols = [{ label: 'Step', k: 't', w: 'minmax(20ch, 1.6fr)' }, { label: '', k: 'b', opt: true }, { label: first + 'Median', k: 'n', def: DEFS.Median }, { label: first + 'p90', k: 'n', def: DEFS.p90 }, { label: 'Players', k: 'n', opt: true }]
-      .concat(segs.slice(1).map(function (x, i) { return { label: segLabel(x, i + 1, segName(x) + ' · Median'), k: 'n' }; }));
-    var s = grid('ob-slow', scols);
-    keys.forEach(function (k) {
-      var w = dwell[k];
-      addRow(s, [cell((k.indexOf('signup.') === 0 ? 'Signup · ' : '') + stepLabel(k), 'ob-step', k), bar(w.p50 / max, 'is-time'), dur(w.p50), dur(w.p90), int(w.n)]
-        .concat(segs.slice(1).map(function (x) { var o = x.dwell && x.dwell[k]; return o ? dur(o.p50) : '—'; })), { data: { step: k }, cls: w.n < SMALL_N ? 'is-quiet' : '' });
-    });
-    sb.appendChild(s);
-    box.appendChild(sb);
+    box.appendChild(playerList(ctx, 'runs'));
     return box;
   }
   /* Players since telemetry began, by what they did with Combat Training.
@@ -1633,85 +1492,169 @@
     box.appendChild(b);
     return box;
   }
-  var ONBOARDING = { phases: viewPhases, steps: viewSteps, runs: viewRuns, timing: viewTiming, impact: viewImpact };
+  // ── LEARN: does Combat Training lead to a first real refine and raid? ──
+  /* How long each part of signup and the tutorial takes. */
+  function durationsBlock(ctx) {
+    var segs = ctx.segs;
+    var b = block('How long each part takes', { key: 'durations', scope: 'All time' });
+    var cols = [{ label: '', k: 't', w: 'minmax(14ch, 1.2fr)' }];
+    if (segs.length === 1) cols = cols.concat([{ label: 'Median', k: 'n' }, { label: 'p90', k: 'n' }, { label: 'Players', k: 'n' }]);
+    else segs.forEach(function (s, i) { cols.push({ label: segLabel(s, i), k: 'n' }); });
+    var t = grid('ob-durations', cols);
+    DURATIONS.forEach(function (k) {
+      var cells = [cell(k[1], 'ob-step')];
+      if (segs.length === 1) { var x = segs[0].durations && segs[0].durations[k[0]]; cells = cells.concat(x ? [dur(x.p50), dur(x.p90), int(x.n)] : ['—', '—', '—']); }
+      else segs.forEach(function (s) { var y = s.durations && s.durations[k[0]]; cells.push(stack(y ? dur(y.p50) : '—', y ? 'p90 ' + dur(y.p90) : null)); });
+      addRow(t, cells, { data: { metric: k[0] } });
+    });
+    b.appendChild(t);
+    return b;
+  }
+  /* One step table, signup to the end: by unique players, or by the sample of
+   * new signups' sessions (phases that open into their steps), time a column. */
+  function viewLearnSteps(ctx) {
+    var d = ctx.d, segs = ctx.segs, box = H.el('div', 'ob-view');
+    if (segs.length > 1) {
+      var pc = block('Steps · sample of new signups, by phase', { key: 'phases', scope: 'All time', def: DEFS.Sample });
+      pc.appendChild(funnelCompare(segs, phaseSteps, 'Phase'));
+      box.appendChild(pc);
+      box.appendChild(durationsBlock(ctx));
+      return box;
+    }
+    var s = segs[0], tt0 = tutorialOf(s), steps = s.player_steps || [], phases = phaseRows(s);
+    var ob = block('Outcomes · ' + int(tt0.offered) + (tt0.unique ? ' unique players' : ' players'), { key: 'outcomes', scope: 'All time', copy: false });
+    ob.appendChild(outcomeStrip(tt0));
+    box.appendChild(ob);
+    var by = steps.length && ctx.st.count !== 'sessions' ? 'players' : 'sessions';
+    var pick = H.navStrip([{ key: 'players', label: 'Players' }, { key: 'sessions', label: 'Sessions' }].filter(function (x) { return x.key === 'sessions' || steps.length; }), by, function (k) { ctx.st.count = k; ctx.redraw(); });
+    pick.classList.add('ob-count');
+    if (by === 'players') {
+      var up = block('Steps · ' + int(steps[0].reached) + ' unique players', { key: 'steps', scope: 'All time', extra: [pick], def: DEFS['Tutorial players'] });
+      up.appendChild(playerFunnel(ctx, s, steps));
+      box.appendChild(up);
+    } else if (phases.length) {
+      var pb = block('Steps · sample of ' + int(phases[0].reached) + ' new signups, by phase', { key: 'phases', scope: 'All time', extra: steps.length ? [pick] : [], def: DEFS.Sample });
+      pb.appendChild(phaseFunnel(ctx, s, phases));
+      box.appendChild(pb);
+    }
+    box.appendChild(durationsBlock(ctx));
+    var tb = trendsBlock(ctx, ['Onboarding']);
+    if (tb) box.appendChild(tb);
+    return box;
+  }
+  /* "18 h", "2.3 d": a delay after joining. */
+  function daysWord(x) {
+    if (x == null || !isFinite(x)) return null;
+    return x < 1 ? Math.max(1, Math.round(x * 24)) + ' h' : (x < 10 ? (Math.round(x * 10) / 10) : Math.round(x)) + ' d';
+  }
+  var FIRST = [['mined', 'Mined', 'days_to_mine'], ['refined', 'Refined', 'days_to_refine'], ['raided', 'Raided', 'days_to_raid'], ['activated', 'Activated', 'days_to_activate']];
+  /* The first real moves of who joined in the window: how many, and how long after joining. */
+  function firstDefs(ctx) {
+    return FIRST.map(function (m) {
+      return { key: 'first_' + m[0], stage: 'Activation', label: m[1], cls: m[0] === 'activated' ? 'ok' : null, count: true, def: DEFS[m[1]], get: function (s) {
+        var c = cohortWin(s, ctx.win) || {}, t = daysWord(c[m[2]]);
+        return { value: int(c[m[0]]), raw: c[m[0]], sub: [shareOf(c[m[0]], c.joined, 'joined'), t ? 'typically ' + t + ' after joining' : null].filter(Boolean).join(' · ') || null };
+      } };
+    });
+  }
+  function firstTable(seg) {
+    var t = grid('ob-first', [{ label: 'Joined, week of', k: 't', w: 'minmax(11ch, .8fr)' }, { label: 'Joined', k: 'n' }, { label: 'Acted', k: 'n', opt: true }]
+      .concat(FIRST.map(function (m) { return { label: m[1], k: 'n', def: DEFS[m[1]] }; })));
+    ((seg.pirate_cohorts || {}).weeks || []).slice().reverse().forEach(function (wk) {
+      addRow(t, [cell((wk.exact ? '' : '≈ ') + shortDay(wk.week), 'ob-step', wk.exact ? null : DEFS['Join date']), cell(int(wk.joined), 'ob-v'), stack(int(wk.acted), wk.joined ? ofShare(wk.acted, wk.joined) : null)]
+        .concat(FIRST.map(function (m) { var t0 = daysWord(wk[m[2]]); return stack(int(wk[m[0]]), t0 ? 'after ' + t0 : null); })), { data: { week: wk.week }, cls: wk.joined ? '' : 'is-empty' });
+    });
+    return t;
+  }
+  function viewFirstMoves(ctx) {
+    var d = ctx.d, segs = ctx.segs, box = H.el('div', 'ob-view');
+    if (!segs.length || !segs[0].pirate_cohorts) { box.appendChild(emptyOr(d, 'No players read yet')); return box; }
+    var strip = H.navStrip(PIRATE_WINDOWS, ctx.win, function (k) { ctx.set({ win: k }); });
+    strip.classList.add('ob-windows');
+    var scope = H.el('span', 'ob-scope-line');
+    scope.appendChild(strip);
+    scope.appendChild(chip(groupScope(segs[0], ctx.win, 'players'), DEFS.Joined));
+    box.appendChild(kpi(ctx, firstDefs(ctx), scope, ctx.win === 'all' ? 'all time' : WIN_WORD[ctx.win]));
+    segs.forEach(function (s) {
+      var b = block(segs.length > 1 ? 'First moves by join week · ' + segName(s) : 'First moves by join week', { key: 'first', scope: 'Join weeks · so far · median delay', def: DEFS.Cohort });
+      b.appendChild(firstTable(s));
+      box.appendChild(b);
+    });
+    return box;
+  }
+  var LEARN = { steps: viewLearnSteps, first: viewFirstMoves, after: viewImpact, runs: viewRuns };
   function viewOnboarding(ctx) {
     var d = ctx.d, box = H.el('div', 'ob-view');
     box.appendChild(viewStrip(ctx));
     var t = tutorialOf(ctx.segs[0]);
-    if (ctx.view !== 'runs' && ctx.view !== 'impact' && !t.offered && ctx.segs.length === 1) { box.appendChild(emptyOr(d, 'No tutorial sessions yet')); return box; }
-    if (ctx.view !== 'runs') box.appendChild(kpi(ctx, onboardingKpi(ctx), H.el('span', 'ob-chip', ctx.view === 'impact' ? 'Since telemetry began' : 'All time'), 'all time'));
-    box.appendChild(ONBOARDING[ctx.view](ctx));
-    if (ctx.view === 'phases' || ctx.view === 'steps') { var tb = trendsBlock(ctx, ['Onboarding']); if (tb) box.appendChild(tb); }
+    if (ctx.view === 'steps' && !t.offered && ctx.segs.length === 1) { box.appendChild(emptyOr(d, 'No tutorial sessions yet')); return box; }
+    if (ctx.view === 'steps' || ctx.view === 'after') box.appendChild(kpi(ctx, onboardingKpi(ctx), H.el('span', 'ob-chip', ctx.view === 'after' ? 'Since telemetry began' : 'All time'), 'all time'));
+    box.appendChild(LEARN[ctx.view](ctx));
     return box;
   }
 
-  // ── ENGAGEMENT: activation and retention ──
-  function engagementKpi(ctx) {
-    return [K.active(ctx), K.stickiness(ctx), K.activated(ctx),
-      { key: 'activated_ever', label: 'Activated ever', scope: 'all time', def: DEFS.Activated, get: function (s) { var a = allOf(s); return { value: int(a.activated), sub: share(a.activated, a.players) + ' of ' + int(a.players) + ' players', spark: sparkOf(ctx.d, s, 'p:activated_total') }; } },
-      { key: 'tta', label: 'Time to activate', scope: 'all time', get: function (s) { var p = s.pirate || {}; return { cls: p.time_to_activate && p.time_to_activate.n < SMALL_N ? 'is-off' : null, value: durWords(p.time_to_activate && p.time_to_activate.p50), sub: p.time_to_activate ? 'typical, of ' + int(p.time_to_activate.n) + ' timed' + (p.untimed ? ' · ' + int(p.untimed) + ' not dated yet' : '') : 'none timed yet' }; } },
-      { key: 'never', label: 'Never acted', cls: 'bad', scope: 'all time', get: function (s) { return { value: int(s.never_acted), sub: share(s.never_acted, s.players) + ' of ' + int(s.players) + ' players' }; } },
-    ];
-  }
-  function lifecycleBlock(segs) {
-    var b = block('Last seen', { key: 'lifecycle', scope: 'Now', def: DEFS['Last seen'] });
-    var keys = [['today', 'Today'], ['week', 'Earlier this week'], ['month', 'Earlier this month'], ['gone', '30+ days ago'], ['never', 'Never acted']];
-    segs.forEach(function (s, si) {
-      var lc = s.lifecycle || {}, wrap = H.el('div', 'ob-outcome');
-      wrap.setAttribute('data-seg', s.key);
-      if (segs.length > 1) wrap.appendChild(segLabel(s, si));
-      var strip = H.el('div', 'ob-stack'), legend = H.el('div', 'ob-legend');
-      var total = keys.reduce(function (a, k) { return a + (Number(lc[k[0]]) || 0); }, 0);
-      keys.forEach(function (k) {
-        var n = Number(lc[k[0]]) || 0;
-        var seg = H.el('span', 'ob-seg ob-life-' + k[0]);
-        seg.style.flexGrow = String(n);
-        seg.title = k[1] + ' ' + int(n) + ' · ' + share(n, total);
-        if (n > 0) strip.appendChild(seg);
-        var l = H.el('span', 'ob-key');
-        l.setAttribute('data-life', k[0]);
-        l.appendChild(H.el('span', 'ob-swatch ob-life-' + k[0]));
-        l.appendChild(H.el('span', null, k[1]));
-        l.appendChild(H.el('span', 'ob-v', int(n) + (total >= SMALL_N ? ' · ' + pct(n / total) : '')));
-        legend.appendChild(l);
-      });
-      wrap.appendChild(strip);
-      wrap.appendChild(legend);
-      b.appendChild(wrap);
+  // ── STAY: who comes back, and how often ──
+  var TRI_WEEKS = 8;
+  /* Played in week N after joining, of every joiner that week; a week not lived yet is blank. */
+  function triangle(seg) {
+    var t = H.el('div', 'ob-cohorts ob-triangle');
+    var head = H.el('div', 'ob-cohort ob-cohort-head');
+    ['Week of', 'Joined', 'Acted'].concat(Array.from({ length: TRI_WEEKS }, function (_, i) { return 'Wk ' + (i + 1); })).forEach(function (c) { head.appendChild(H.el('span', null, c)); });
+    t.appendChild(head);
+    ((seg.pirate_cohorts || {}).weeks || []).forEach(function (wk) {
+      var row = H.el('div', 'ob-cohort' + (wk.joined ? '' : ' is-empty'));
+      row.setAttribute('data-week', wk.week);
+      var name = H.el('span', null, (wk.exact ? '' : '≈ ') + shortDay(wk.week));
+      if (!wk.exact) name.title = DEFS['Join date'];
+      row.appendChild(name);
+      row.appendChild(H.el('span', 'ob-v ob-n', int(wk.joined)));
+      row.appendChild(wk.joined ? heatCell(wk.acted, wk.joined) : H.el('span', 'ob-heat ob-heat-none'));
+      for (var i = 1; i <= TRI_WEEKS; i++) {
+        var v = wk['retained_w' + i];
+        row.appendChild(wk.joined && v != null ? heatCell(v, wk.joined) : H.el('span', 'ob-heat ob-heat-none'));
+      }
+      t.appendChild(row);
     });
+    return t;
+  }
+  function activeUsersBlock(ctx) {
+    var au = ctx.segs[0].active_users, tags = guildTags(ctx.d);
+    if (!au) return null;
+    var b = block('Active users · ' + int(au.total), { key: 'active_users', scope: 'Activated · seen in ' + au.days + ' days', def: DEFS['Active users'],
+      extra: au.players.length ? [actionBtn('Copy ids', function () { copyText(au.players.map(function (x) { return x.player_id; }).join('\n'), au.players.length); }, 'copy_ids')] : [] });
+    if (!au.players.length) { b.appendChild(H.stateBlock('empty', 'No active users')); return b; }
+    var t = grid('ob-active-users', [{ label: 'Player', k: 't', w: 'minmax(15ch, 1.3fr)' }, { label: 'Guild', k: 't', opt: true }, { label: 'Days played', k: 'n', def: 'Days with a gameplay action in the last 30.' },
+      { label: 'Raids', k: 'n', opt: true }, { label: 'Joined', k: 'n', opt: true }, { label: 'Seen', k: 'n' }]);
+    au.players.forEach(function (x) {
+      addRow(t, [playerLink(x), cell(tags[x.guild_id] || x.guild_id), cell(int(x.played_30), 'ob-v'), int(x.raids), cell(x.joined_ms ? H.ago(x.joined_ms) : '—', 'ob-sub'), cell(x.last_ms ? H.ago(x.last_ms) : '—', 'ob-sub')], { data: { player: x.player_id } });
+    });
+    if (au.total > au.players.length) b.appendChild(sub(int(au.players.length) + ' listed of ' + int(au.total)));
+    b.appendChild(t);
     return b;
   }
-  /* The path in the game, counted against everyone who signed up. */
-  function activationTable(d, segs) {
-    function of(s, key) {
-      var a = (s.activation || []).filter(function (x) { return x.key === key; })[0];
-      if (!a && key === 'activated') { var all = allOf(s); return { n: all.activated, rate: ratio(all.activated, s.players) }; }
-      return a || {};
-    }
-    var label = function (m) { return m[0] === 'active' ? activeName(d.active_days) : m[1]; };
-    if (segs.length === 1) {
-      var t = grid('ob-activation', [{ label: 'Milestone', k: 't', w: 'minmax(16ch, 1.2fr)' }, { label: '', k: 'b', w: 'minmax(10ch, 2fr)', opt: true }, { label: 'Reached', k: 'n' }, { label: 'Kept', k: 'n', def: 'Share of everyone who signed up.' }]);
-      MILESTONES.forEach(function (m) {
-        var a = of(segs[0], m[0]);
-        addRow(t, [cell((m[2] === 'side' ? '↳ ' : m[2] === 'now' ? '· ' : '') + label(m), 'ob-step', DEFS[m[1]]), bar(a.rate != null ? a.rate : ratio(a.n, segs[0].players), m[2] === 'step' ? '' : 'is-aside'), int(a.n), share(a.n, segs[0].players)],
-          { data: { milestone: m[0] }, cls: m[2] === 'step' ? '' : 'is-aside' });
-      });
-      return t;
-    }
-    var c = grid('ob-compare ob-activation', [{ label: 'Milestone', k: 't', w: 'minmax(16ch, 1.4fr)' }].concat(segs.map(function (s, i) { return { label: segLabel(s, i), k: 'n' }; })));
-    MILESTONES.forEach(function (m) {
-      addRow(c, [cell((m[2] === 'side' ? '↳ ' : m[2] === 'now' ? '· ' : '') + label(m), 'ob-step')].concat(segs.map(function (s) { var a = of(s, m[0]); return stack(int(a.n), ofShare(a.n, s.players)); })),
-        { data: { milestone: m[0] }, cls: m[2] === 'step' ? '' : 'is-aside' });
-    });
-    return c;
+  function stayDefs(ctx) {
+    return [K.activeUsers(ctx), K.active(ctx), K.stickiness(ctx),
+      { key: 'played', stage: 'Retention', label: 'Played', scope: 'last 30 days', def: DEFS.Played, get: function (s) { var p = s.played || {}; return { value: int(p.players), raw: p.players, sub: shareOf(p.players, s.players, 'players') }; } }];
   }
-  function viewActivation(ctx) {
-    var box = H.el('div', 'ob-view');
-    var b = block('Milestones', { key: 'milestones', scope: 'All time', chart: function () { openChart(['activated_total', 'refiners_7d', 'raiders_7d', 'miners_7d']); } });
-    b.appendChild(activationTable(ctx.d, ctx.segs));
-    box.appendChild(b);
+  function viewStay(ctx) {
+    var d = ctx.d, segs = ctx.segs, box = H.el('div', 'ob-view');
+    if (!segs.length || !segs[0].pirate_cohorts) { box.appendChild(emptyOr(d, 'No players read yet')); return box; }
+    box.appendChild(kpi(ctx, stayDefs(ctx), windowStrip(ctx), WIN_WORD[ctx.win]));
+    segs.forEach(function (s, i) {
+      var b = block(segs.length > 1 ? 'Played, by weeks since joining · ' + segName(s) : 'Played, by weeks since joining', { key: 'triangle', scope: 'Join weeks · every joiner', def: DEFS.Cohort });
+      b.appendChild(triangle(s));
+      box.appendChild(b);
+    });
+    var two = H.el('div', 'ob-two');
+    var cap = captivatedBlock(ctx, 'Days played');
+    if (cap) two.appendChild(cap);
+    if (segs.length === 1) { var au = activeUsersBlock(ctx); if (au) two.appendChild(au); }
+    if (two.firstChild) box.appendChild(two);
+    var tb = trendsBlock(ctx, ['Retention']);
+    if (tb) box.appendChild(tb);
     return box;
   }
+
   /* Below SMALL_N a cell is a count, drawn quieter: a percentage claims more than it can carry. */
   function heatCell(n, total) {
     if (n == null) return H.el('span', 'ob-heat ob-heat-none');
@@ -1719,45 +1662,6 @@
     var c = H.el('span', 'ob-heat ' + (small ? 'ob-heat-count' : 'ob-heat-' + heatBand(rate)), small ? int(n) : Math.round(rate * 100) + '%');
     c.title = int(n) + ' of ' + int(total);
     return c;
-  }
-  function cohortGrid(rows) {
-    var weeks = 8;
-    var t = H.el('div', 'ob-cohorts');
-    var head = H.el('div', 'ob-cohort ob-cohort-head');
-    ['Week of', 'Joined', 'Acted'].concat(Array.from({ length: weeks }, function (_, i) { return (i + 1) + ' wk'; })).forEach(function (c) { head.appendChild(H.el('span', null, c)); });
-    t.appendChild(head);
-    rows.forEach(function (c) {
-      var row = H.el('div', 'ob-cohort');
-      row.setAttribute('data-week', c.year + '-' + c.week);
-      row.appendChild(H.el('span', null, weekStart(c.year, c.week)));
-      row.appendChild(H.el('span', 'ob-v ob-n', int(c.n)));
-      row.appendChild(heatCell(c.acted, c.n));
-      for (var i = 0; i < weeks; i++) row.appendChild(heatCell((c.alive || [])[i], c.n));
-      t.appendChild(row);
-    });
-    return t;
-  }
-  /* The last cohorts big enough to read, by how many outlasted their first week. */
-  function weekOne(s) {
-    var rows = (s.cohorts || []).filter(function (c) { return c.n >= 10 && c.alive && c.alive.length; }).slice(-7);
-    if (!rows.length) return null;
-    var g = H.el('div', 'ob-week1');
-    g.style.setProperty('--ob-weeks', rows.length);
-    rows.forEach(function (c) {
-      var rate = ratio(c.alive[0], c.n);
-      var col = H.el('div', 'ob-week');
-      col.setAttribute('data-week', c.week);
-      col.appendChild(H.el('span', 'ob-v', share(c.alive[0], c.n)));
-      var track = H.el('span', 'ob-week-track');
-      var fill = H.el('span', 'ob-week-fill ob-heat-' + heatBand(rate));
-      fill.style.height = (rate * 100) + '%';
-      track.appendChild(fill);
-      col.appendChild(track);
-      col.appendChild(H.el('span', null, weekStart(c.year, c.week)));
-      col.appendChild(sub(int(c.n) + ' joined'));
-      g.appendChild(col);
-    });
-    return g;
   }
   function distBlock(title, segs, pick, kind) {
     var b = block(title, { key: 'dist', scope: 'All time' });
@@ -1787,46 +1691,157 @@
     }
     return b;
   }
-  function viewRetention(ctx) {
-    var d = ctx.d, segs = ctx.segs, box = H.el('div', 'ob-view');
-    if (segs.length === 1) {
-      var w1 = weekOne(segs[0]);
-      if (w1) { var wb = block('Still acting after one week', { key: 'week_one', scope: 'By week joined' }); wb.appendChild(w1); box.appendChild(wb); }
+  // ── LEAVING: how far they got, where they stuck, who stays, who is lost ──
+  /* The players behind a leaving row, newest seen first. */
+  function leftList(ctx, rows, total) {
+    var tags = guildTags(ctx.d), box = H.el('div', 'ob-who');
+    var head = H.el('div', 'ob-who-head');
+    head.appendChild(sub(total > rows.length ? int(rows.length) + ' listed of ' + int(total) : plural(rows.length, 'player', 'players')));
+    head.appendChild(actionBtn('Copy ids', function () { copyText(rows.map(function (x) { return x.player_id; }).join('\n'), rows.length); }, 'copy_ids'));
+    box.appendChild(head);
+    rows.forEach(function (x) {
+      var r = H.el('div', 'ob-who-row');
+      r.setAttribute('data-player', x.player_id);
+      r.appendChild(playerLink(x));
+      r.appendChild(cell(tags[x.guild_id] || x.guild_id, 'ob-n'));
+      r.appendChild(cell(x.joined_ms ? 'joined ' + H.ago(x.joined_ms) : '—', 'ob-n ob-sub'));
+      r.appendChild(cell(x.last_ms ? 'seen ' + H.ago(x.last_ms) : 'never acted', 'ob-n ob-sub'));
+      box.appendChild(r);
+    });
+    return box;
+  }
+  /* Where every player is now, by when they last did anything on chain. */
+  function lifecycleBlock(segs) {
+    var b = block('Last seen', { key: 'lifecycle', scope: 'Now', def: DEFS['Last seen'] });
+    var keys = [['today', 'Today'], ['week', 'Earlier this week'], ['month', 'Earlier this month'], ['gone', '30+ days ago'], ['never', 'Never acted']];
+    segs.forEach(function (s, si) {
+      var lc = s.lifecycle || {}, wrap = H.el('div', 'ob-outcome');
+      wrap.setAttribute('data-seg', s.key);
+      if (segs.length > 1) wrap.appendChild(segLabel(s, si));
+      var strip = H.el('div', 'ob-stack'), legend = H.el('div', 'ob-legend');
+      var total = keys.reduce(function (a, k) { return a + (Number(lc[k[0]]) || 0); }, 0);
+      keys.forEach(function (k) {
+        var n = Number(lc[k[0]]) || 0;
+        var seg = H.el('span', 'ob-seg ob-life-' + k[0]);
+        seg.style.flexGrow = String(n);
+        seg.title = k[1] + ' ' + int(n) + ' · ' + share(n, total);
+        if (n > 0) strip.appendChild(seg);
+        var l = H.el('span', 'ob-key');
+        l.setAttribute('data-life', k[0]);
+        l.appendChild(H.el('span', 'ob-swatch ob-life-' + k[0]));
+        l.appendChild(H.el('span', null, k[1]));
+        l.appendChild(H.el('span', 'ob-v', int(n) + (total >= SMALL_N ? ' · ' + pct(n / total) : '')));
+        legend.appendChild(l);
+      });
+      wrap.appendChild(strip);
+      wrap.appendChild(legend);
+      b.appendChild(wrap);
+    });
+    return b;
+  }
+  function leftBuckets(l) { return LEFT_ORDER.filter(function (k) { return k !== 'not_read' || (l.furthest || {})[k] > 0; }); }
+  function furthestBlock(ctx) {
+    var segs = ctx.segs, l0 = segs[0].left;
+    var b = block('How far they got before they left', { key: 'furthest', scope: 'Gone ' + l0.days + ' days · ' + int(l0.left) + ' of ' + int(l0.players) + ' players', def: DEFS['Furthest reached'] });
+    if (segs.length > 1) {
+      var t2 = grid('ob-compare', [{ label: 'Furthest reached', k: 't', w: 'minmax(22ch, 1.6fr)' }].concat(segs.map(function (s, i) { return { label: segLabel(s, i), k: 'n' }; })));
+      leftBuckets(l0).forEach(function (k) {
+        addRow(t2, [cell(LEFT_LABEL[k], 'ob-step')].concat(segs.map(function (s) { var l = s.left || {}; var n = (l.furthest || {})[k]; return stack(int(n), ofShare(n, l.left)); })), { data: { bucket: k } });
+      });
+      b.appendChild(t2);
+      return b;
     }
-    segs.forEach(function (s, i) {
-      if (!(s.cohorts || []).length) return;
-      var c = block('Still acting, by week joined', { key: 'cohorts', def: DEFS.Cohort, scope: 'By week joined', extra: segs.length > 1 ? [segLabel(s, i)] : [] });
-      c.appendChild(cohortGrid(s.cohorts));
-      box.appendChild(c);
+    var top = leftBuckets(l0).reduce(function (m, k) { return Math.max(m, l0.furthest[k] || 0); }, 0);
+    var t = grid('ob-furthest', [{ label: 'Furthest reached', k: 't', w: 'minmax(22ch, 1.4fr)' }, { label: 'Players', k: 'n' }, { label: 'Share', k: 'n', def: 'Of the players who left.' }, { label: '', k: 'b', opt: true }]);
+    leftBuckets(l0).forEach(function (k) {
+      var n = l0.furthest[k] || 0, who = (l0.who || {})[k] || [];
+      var r = addRow(t, [cell(LEFT_LABEL[k], 'ob-step', DEFS[LEFT_LABEL[k]]), cell(int(n), 'ob-v'), cell(share(n, l0.left)), bar(ratio(n, top), k === 'activated' ? 'ok' : '')], { data: { bucket: k } });
+      if (n > 0) drill(t, r, 'left:' + k, function () { return leftList(ctx, who, n); });
     });
-    var cb = block('Churn', { key: 'churn', scope: 'Now' });
-    var t = grid('ob-compare', [{ label: '', k: 't', w: 'minmax(16ch, 1.4fr)' }].concat(segs.map(function (s, i) { return { label: segs.length > 1 ? segLabel(s, i) : 'Everyone', k: 'n' }; })));
-    [['Players', function (s) { return int(s.players); }],
-     [activeName(d.active_days), function (s) { return stack(int(s.active), ofShare(s.active, s.players)); }],
-     ['Inactive', function (s) { return stack(int(s.inactive), ofShare(s.inactive, s.players)); }],
-     ['Never acted', function (s) { return stack(int(s.never_acted), ofShare(s.never_acted, s.players)); }],
-     ['Churn', function (s) { return stack(int(s.churned), ofShare(s.churned, s.churn_base) + ' of ' + int(s.churn_base) + ' who acted'); }]].forEach(function (m) {
-      addRow(t, [cell(m[0], 'ob-step', DEFS[m[0]])].concat(segs.map(m[1])), { data: { metric: m[0] } });
+    b.appendChild(t);
+    return b;
+  }
+  /* Where recorded signups stopped, then what the tutorial's finishers did next. */
+  function stuckBlock(ctx) {
+    var seg = ctx.segs[0], cov = seg.coverage;
+    var rows = phaseRows(seg).filter(function (r) { return r.stopped > 0; });
+    var t0 = tutorialOf(seg);
+    if (!rows.length && !(t0 && t0.completed)) return null;
+    var b = block('Stuck', { key: 'stuck', scope: 'Recorded signups' + (cov ? ' · since ' + shortDay(cov.since) : ''), extra: [actionBtn('Phases', function () { ctx.go('onboarding', 'steps'); }, 'to_phases')] });
+    var t = grid('ob-stuck', [{ label: 'Last step they recorded', k: 't', w: 'minmax(22ch, 1.4fr)' }, { label: 'Players', k: 'n' }, { label: 'Of reached', k: 'n', def: DEFS['Stop rate'] }]);
+    rows.forEach(function (r) {
+      addRow(t, [cell(r.phase === 0 ? 'Finished signup, nothing after' : 'Left in ' + r.label, 'ob-step'), cell(int(r.stopped), 'ob-v'), cell(share(r.stopped, r.reached))], { data: { phase: r.phase } });
     });
-    cb.appendChild(t);
-    box.appendChild(cb);
-    box.appendChild(distBlock('Play length of inactive players after signup', segs, function (s) { return s.play_length; }, 'secs'));
-    return box;
+    if (t0 && t0.completed != null) addRow(t, [cell('Finished Combat Training', 'ob-step'), cell(int(t0.completed), 'ob-v'), cell(share(t0.completed, t0.offered))], { data: { phase: 'finished' }, cls: 'is-stage' });
+    b.appendChild(t);
+    var imp = (ctx.d.tutorial_impact || []).filter(function (r) { return r.key === 'finished'; })[0];
+    if (imp && imp.players) {
+      var t2 = grid('ob-after', [{ label: 'The finishers, afterwards on chain', k: 't', w: 'minmax(22ch, 1.4fr)' }, { label: 'Players', k: 'n' }, { label: 'Of finishers', k: 'n' }]);
+      [['acted', 'Acted'], ['mined', 'Mined'], ['refined', 'Refined'], ['raided', 'Initiated a real raid'], ['activated', 'Activated']].forEach(function (m) {
+        addRow(t2, [cell(m[1], 'ob-step'), cell(int(imp[m[0]]), 'ob-v'), cell(share(imp[m[0]], imp.players))], { data: { after: m[0] } });
+      });
+      var sc = H.el('div', 'ob-block-sub');
+      sc.appendChild(chip('Every guild · ' + plural(imp.players, 'finisher', 'finishers'), 'Tutorial finishers since telemetry began; this table does not follow the filters.'));
+      b.appendChild(sc);
+      b.appendChild(t2);
+    }
+    return b;
   }
-  function viewDistributions(ctx) {
-    var box = H.el('div', 'ob-view');
-    STATS.forEach(function (st) { box.appendChild(distBlock(st[1], ctx.segs, function (s) { return s.stats && s.stats[st[0]]; }, st[2])); });
-    return box;
+  var PLAYED_BUCKETS = [[1, 1, '1 day'], [2, 2, '2 days'], [3, 3, '3 days'], [4, 7, '4–7 days'], [8, 14, '8–14 days'], [15, 30, '15–30 days']];
+  /* Days played in the last 30, of those who played at all. */
+  function playedRows(p) {
+    var days = (p && p.days) || [];
+    return PLAYED_BUCKETS.map(function (bk) {
+      var n = 0;
+      for (var i = bk[0]; i <= bk[1]; i++) n += days[i - 1] || 0;
+      return { key: bk[0] + '-' + bk[1], label: bk[2], n: n };
+    });
   }
-  var ENGAGEMENT = { activation: viewActivation, retention: viewRetention, distributions: viewDistributions };
-  function viewEngagement(ctx) {
-    var d = ctx.d, box = H.el('div', 'ob-view');
-    box.appendChild(viewStrip(ctx));
-    if (!ctx.segs.length || !ctx.segs[0].pirate) { box.appendChild(emptyOr(d, 'No players read yet')); return box; }
-    box.appendChild(kpi(ctx, engagementKpi(ctx), windowStrip(ctx), WIN_WORD[ctx.win]));
-    box.appendChild(lifecycleBlock(ctx.segs));
-    box.appendChild(ENGAGEMENT[ctx.view](ctx));
-    if (ctx.view !== 'distributions') { var tb = trendsBlock(ctx, ctx.view === 'activation' ? ['Activation'] : ['Retention']); if (tb) box.appendChild(tb); }
+  function captivatedBlock(ctx, title) {
+    var p = ctx.segs[0].played;
+    if (!p) return null;
+    var extra = p.activity_unread ? [chip(int(p.activity_unread) + ' activity not read', 'Acted, but the activity feed is not read yet: only their mines, refines and raids count as played.')] : [];
+    var b = block(title || 'Captivated', { key: 'captivated', scope: 'Days played, last ' + p.window + ' · ' + plural(p.players, 'player', 'players'), def: DEFS.Played, extra: extra });
+    var rows = playedRows(p), top = rows.reduce(function (m, r) { return Math.max(m, r.n); }, 0);
+    var t = grid('ob-played', [{ label: 'Played on', k: 't', w: 'minmax(12ch, .8fr)' }, { label: 'Players', k: 'n' }, { label: 'Share', k: 'n' }, { label: '', k: 'b' }]);
+    rows.forEach(function (r) { addRow(t, [cell(r.label, 'ob-step'), cell(int(r.n), 'ob-v'), cell(share(r.n, p.players)), bar(ratio(r.n, top))], { data: { played: r.key } }); });
+    b.appendChild(t);
+    return b;
+  }
+  /* What could show confusion, with what is recorded today and what is not. */
+  function confusedRows(seg) {
+    var dw = seg.dwell || {}, l = seg.left || {};
+    var slow = Object.keys(dw).filter(function (k) { var x = dw[k]; return x && x.n >= SMALL_N && x.p50 > 0 && x.p90 >= 4 * x.p50; });
+    return [
+      { key: 'slow', label: 'Slow steps', value: slow.length, sub: 'p90 at least 4× the median', page: ['onboarding', 'steps'] },
+      { key: 'replays', label: 'Replayed Combat Training', value: seg.runs ? seg.runs.replays : null, sub: 'runs started from Help', page: ['onboarding', 'runs'] },
+      { key: 'acted_only', label: 'Acted, then left before mining', value: l.furthest ? l.furthest.acted_only : null, sub: 'players' },
+      { key: 'failed_tx', label: 'Failed or refused transactions', value: null, unrecorded: true },
+      { key: 'help', label: 'Help, FAQ or Comms opened early', value: null, unrecorded: true },
+    ];
+  }
+  function confusedBlock(ctx) {
+    var b = block('Confused', { key: 'confused', scope: 'Signs, and whether they are recorded' });
+    var t = grid('ob-confused', [{ label: 'Sign', k: 't', w: 'minmax(24ch, 1.6fr)' }, { label: '', k: 'n' }, { label: '', k: 't', opt: true }]);
+    confusedRows(ctx.segs[0]).forEach(function (r) {
+      var name = r.page ? link(r.label, function () { ctx.go(r.page[0], r.page[1]); }, 'ob-step') : cell(r.label, 'ob-step');
+      addRow(t, [name, r.unrecorded ? cell('not recorded', 'ob-sub ob-notyet') : cell(int(r.value), 'ob-v'), cell(r.unrecorded ? '' : r.sub, 'ob-sub')], { data: { sign: r.key }, cls: r.unrecorded ? 'is-empty' : '' });
+    });
+    b.appendChild(t);
+    return b;
+  }
+  function viewLeaving(ctx) {
+    var d = ctx.d, segs = ctx.segs, box = H.el('div', 'ob-view');
+    if (!segs.length || !segs[0].left) { box.appendChild(emptyOr(d, 'No players read yet')); return box; }
+    box.appendChild(furthestBlock(ctx));
+    box.appendChild(lifecycleBlock(segs));
+    if (segs.length === 1) {
+      var two = H.el('div', 'ob-two');
+      [stuckBlock(ctx), captivatedBlock(ctx)].forEach(function (n) { if (n) two.appendChild(n); });
+      if (two.firstChild) box.appendChild(two);
+      box.appendChild(confusedBlock(ctx));
+    }
+    box.appendChild(playerList(ctx, 'stopped'));
     return box;
   }
 
@@ -1851,16 +1866,18 @@
     q = q.toLowerCase();
     return [x.name, x.player_id, tags[x.guild_id], x.guild_id, ifaceName(x.interface), x.step && stepLabel(x.step)].some(function (v) { return v && String(v).toLowerCase().indexOf(q) >= 0; });
   }
-  function searchBox(ctx) {
+  function searchBox(ctx, kind) {
+    var qk = 'q_' + (kind || '');
     var lab = H.el('label', 'sui-input-text ob-search');
     var inp = H.el('input');
     inp.type = 'text';
     inp.placeholder = 'Name, id or guild';
-    inp.value = ctx.st.q || '';
+    inp.value = ctx.st[qk] || '';
+    lab.setAttribute('data-list', kind || '');
     inp.addEventListener('input', function () {
-      ctx.st.q = inp.value;
+      ctx.st[qk] = inp.value;
       clearTimeout(ctx.st.qt);
-      ctx.st.qt = setTimeout(function () { ctx.redraw(); var n = ctx.host.querySelector('.ob-search input'); if (n) { n.focus(); n.setSelectionRange(n.value.length, n.value.length); } }, 150);
+      ctx.st.qt = setTimeout(function () { ctx.redraw(); var n = ctx.host.querySelector('.ob-search[data-list="' + (kind || '') + '"] input'); if (n) { n.focus(); n.setSelectionRange(n.value.length, n.value.length); } }, 150);
     });
     lab.appendChild(inp);
     return lab;
@@ -1887,35 +1904,32 @@
     });
     return out;
   }
-  function viewPlayers(ctx) {
-    var d = ctx.d, box = H.el('div', 'ob-view'), tags = guildTags(d);
-    var recent = d.recent || [], runs = d.runs || [], stopped = stoppedRows(d);
+  /* The named players behind the card, one list wherever it is drawn: the
+   * newest signups (Join), everyone named as stopping (Leaving), the newest
+   * tutorial runs (Learn ▸ Runs). A search, outcome or phase pills, a sort. */
+  var LIST_TITLE = { signups: 'Newest signups', stopped: 'Stopped, by name', runs: 'Newest runs' };
+  function playerList(ctx, kind) {
+    var d = ctx.d, tags = guildTags(d);
+    var all = kind === 'runs' ? d.runs || [] : kind === 'stopped' ? stoppedRows(d) : d.recent || [];
     var stoppedTotal = Object.keys(d.stopped || {}).reduce(function (a, k) { return a + (d.stopped[k].total || 0); }, 0);
-    box.appendChild(viewStrip(ctx));
-    var all = ctx.view === 'runs' ? runs : ctx.view === 'stopped' ? stopped : recent;
-    box.appendChild(kpi(Object.assign({}, ctx, { segs: [{}] }), [
-      { key: 'signups', label: 'New signups', get: function () { return { value: int(recent.length), sub: 'newest sampled' }; }, go: function () { ctx.go('players', 'signups'); } },
-      { key: 'stopped', label: 'Stopped', cls: 'bad', get: function () { return { value: int(stopped.length), sub: 'named' + (OB.tag ? ' in ' + OB.tag : '') + ', of ' + int(stoppedTotal) + ' stopped in every guild' }; }, go: function () { ctx.go('players', 'stopped'); } },
-      { key: 'runs', label: 'Tutorial runs', def: DEFS.Run, get: function () { return { value: int(runs.length), sub: 'newest read' }; }, go: function () { ctx.go('players', 'runs'); } },
-      { key: 'finished', label: 'Finished', cls: 'ok', get: function () { var n = all.filter(function (x) { return x.outcome === 'completed'; }).length; return { value: int(n), sub: share(n, all.length) + ' of this list' }; } },
-      { key: 'playing', label: 'Playing now', get: function () { var n = all.filter(function (x) { return x.outcome === 'playing' || x.outcome === 'deciding'; }).length; return { value: int(n), sub: 'in this list' }; } },
-    ], H.el('span', 'ob-chip', 'Newest only'), 'newest'));
-    if (!all.length) { box.appendChild(ctx.view === 'runs' ? H.stateBlock('empty', 'No tutorial runs yet') : ctx.view === 'stopped' ? H.stateBlock('empty', 'No one named as stopped yet') : emptyOr(d, 'No sessions sampled yet')); return box; }
-    var pk = 'pill_' + ctx.view, p;
-    if (ctx.view === 'stopped') p = pills(ctx, all, pk, PHASES.map(function (x, i) { return i; }), function (k) { return PHASES[k][1]; }, function (x) { return x.phase; });
+    var scope = kind === 'stopped' ? 'As named by the servers' + (stoppedTotal > all.length ? ' · ' + int(all.length) + ' of ' + int(stoppedTotal) : '') : kind === 'runs' ? 'Newest read' : 'Newest sampled';
+    var b = block(LIST_TITLE[kind], { key: 'list_' + kind, scope: scope + (ctx.segs.length > 1 ? ' · not split' : '') });
+    if (!all.length) { b.appendChild(H.stateBlock('empty', kind === 'runs' ? 'No tutorial runs yet' : kind === 'stopped' ? 'No one named as stopped yet' : 'No sessions sampled yet')); return b; }
+    var pk = 'pill_' + kind, p;
+    if (kind === 'stopped') p = pills(ctx, all, pk, PHASES.map(function (x, i) { return i; }), function (k) { return PHASES[k][1]; }, function (x) { return x.phase; });
     else p = pills(ctx, all, pk, ['completed', 'declined', 'left', 'deciding', 'playing'], function (k) { return OUTCOME_LABEL[k]; }, function (x) { return x.outcome; });
-    if (ctx.view === 'stopped' && ctx.st.stepFilter && !all.some(function (x) { return x.step === ctx.st.stepFilter; })) ctx.st.stepFilter = null;
-    var rows = all.filter(function (x) { return (p.show === '' || (ctx.view === 'stopped' ? x.phase === p.show : x.outcome === p.show)) && (ctx.view !== 'stopped' || !ctx.st.stepFilter || x.step === ctx.st.stepFilter) && matches(x, ctx.st.q, tags); });
-    var title = ({ runs: 'Runs', stopped: 'Stopped players', signups: 'New signups' })[ctx.view];
-    var b = block(title + ' · ' + int(rows.length) + (rows.length !== all.length ? ' of ' + int(all.length) : ''), { key: 'players', scope: ctx.view === 'stopped' ? 'As named by the servers' : 'Newest',
-      extra: [actionBtn('Copy ids', function () { copyText(rows.map(function (x) { return x.player_id; }).filter(Boolean).join('\n'), rows.length); }, 'copy_ids')] });
+    if (kind === 'stopped' && ctx.st.stepFilter && !all.some(function (x) { return x.step === ctx.st.stepFilter; })) ctx.st.stepFilter = null;
+    var q = ctx.st['q_' + kind];
+    var rows = all.filter(function (x) { return (p.show === '' || (kind === 'stopped' ? x.phase === p.show : x.outcome === p.show)) && (kind !== 'stopped' || !ctx.st.stepFilter || x.step === ctx.st.stepFilter) && matches(x, q, tags); });
+    b.querySelector('.ob-title').textContent = LIST_TITLE[kind] + ' · ' + int(rows.length) + (rows.length !== all.length ? ' of ' + int(all.length) : '');
+    b.querySelector('.ob-actions').insertBefore(actionBtn('Copy ids', function () { copyText(rows.map(function (x) { return x.player_id; }).filter(Boolean).join('\n'), rows.length); }, 'copy_ids'), b.querySelector('.ob-actions').lastChild);
     var bar1 = H.el('div', 'ob-find');
-    bar1.appendChild(searchBox(ctx));
+    bar1.appendChild(searchBox(ctx, kind));
     bar1.appendChild(p.node);
-    if (ctx.view === 'stopped' && ctx.st.stepFilter) bar1.appendChild(link(stepLabel(ctx.st.stepFilter) + ' ×', function () { ctx.st.stepFilter = null; ctx.redraw(); }, 'ob-pill is-on'));
+    if (kind === 'stopped' && ctx.st.stepFilter) bar1.appendChild(link(stepLabel(ctx.st.stepFilter) + ' ×', function () { ctx.st.stepFilter = null; ctx.redraw(); }, 'ob-pill is-on'));
     b.appendChild(bar1);
-    if (ctx.view === 'runs') b.appendChild(runTable(d, rows, ctx.st, ctx.redraw));
-    else if (ctx.view === 'stopped') {
+    if (kind === 'runs') b.appendChild(runTable(d, rows, ctx.st, ctx.redraw));
+    else if (kind === 'stopped') {
       ctx.st.stopSort = ctx.st.stopSort || { key: 'seen', dir: -1 };
       var sacc = { player: function (x) { return (x.name || x.player_id || '').toLowerCase(); }, step: function (x) { return x.phase * 1000 + (x.step || '').length; }, guild: function (x) { return tags[x.guild_id] || ''; }, seen: function (x) { return x.last_ms || 0; } };
       var st = grid('ob-stopped', [{ label: 'Player', k: 't', w: 'minmax(15ch, 1.1fr)', sort: 'player' }, { label: 'Stopped at', k: 't', w: 'minmax(20ch, 1.6fr)', sort: 'step' },
@@ -1943,8 +1957,7 @@
       b.appendChild(t);
     }
     if (!rows.length) b.appendChild(H.stateBlock('empty', 'No one matches'));
-    box.appendChild(b);
-    return box;
+    return b;
   }
 
   // ── GUILDS ──
@@ -1959,7 +1972,7 @@
     box.setAttribute('data-more', g.id);
     return box;
   }
-  function viewGuilds(ctx) {
+  function dataGuilds(ctx) {
     var d = ctx.d, box = H.el('div', 'ob-view'), gs = d.guilds || [];
     var crawl = (d.crawl && d.crawl.guilds) || {}, mine = (d.filters || {}).guild;
     var none = unguilded(d);
@@ -1996,7 +2009,7 @@
       focus.title = mine === g.id ? 'Clear the guild filter' : 'Filter every page to this guild';
       doors.appendChild(focus);
       if (live) {
-        var stuck = link('Stopped', function () { ctx.set({ guild: g.id, page: 'players', view: 'stopped' }); }, 'ob-focus');
+        var stuck = link('Stopped', function () { ctx.set({ guild: g.id, page: 'leaving', view: '' }); }, 'ob-focus');
         stuck.setAttribute('data-act', 'stopped');
         stuck.title = 'This guild\'s players who stopped in signup or Combat Training';
         doors.appendChild(stuck);
@@ -2015,10 +2028,9 @@
   }
 
   // ── TRENDS ──
-  function viewTrends(ctx) {
+  function dataRecord(ctx) {
     var d = ctx.d, box = H.el('div', 'ob-view');
     var hist = d.history || [], last = hist[hist.length - 1] || {};
-    box.appendChild(viewStrip(ctx));
     function lvl(k, label, cls) {
       return { key: k, label: label, cls: cls, get: function () {
         var p = trendPoints(d, trendDef(k));
@@ -2027,18 +2039,21 @@
       } };
     }
     box.appendChild(kpi(Object.assign({}, ctx, { segs: [{}], win: '7' }), [lvl('humans', 'Players'), lvl('active_7d', 'Active this week', 'ok'),
-      { key: 'new', label: 'New players', get: function () { var p = trendPoints(d, trendDef('new')); return { value: int(trendChange(p, 30, 'daily')), sub: 'in the last 30 days', spark: p.slice(-30).map(function (x) { return x[1]; }) }; } },
+      { key: 'new', label: 'Joined', get: function () { var p = trendPoints(d, trendDef('new')); return { value: int(trendChange(p, 30, 'daily')), sub: 'in the last 30 days', spark: p.slice(-30).map(function (x) { return x[1]; }) }; } },
       { key: 'record', label: 'Daily record', get: function () { return { value: hist.length ? int(hist.length) : '—', sub: hist.length ? 'days since ' + shortDay(hist[0].day) : 'nothing recorded yet' }; } },
     ], H.el('span', 'ob-chip', last.day ? 'Through ' + shortDay(last.day) : 'No record yet'), last.day ? 'through ' + shortDay(last.day) : ''));
-    if (ctx.view === 'daily') { box.appendChild(viewDaily(ctx)); return box; }
     var rows = TRENDS.map(function (m) { return [m, trendPoints(d, m)]; }).filter(function (r) { return r[1].length; });
-    if (!rows.length) { box.appendChild(emptyOr(d, 'No days recorded yet')); return box; }
+    if (!rows.length) { box.appendChild(emptyOr(d, 'No days recorded yet')); box.appendChild(viewDaily(ctx)); return box; }
+    /* A break: rows counted by an older definition are kept, not drawn. */
+    var older = hist.length - currentRows(hist).length;
     var picked = ctx.st.picked = (ctx.st.picked || []).filter(function (k) { return rows.some(function (r) { return r[0][0] === k; }); });
     var go = actionBtn(picked.length ? 'Chart ' + picked.length : 'Chart', function () { openChart(picked.length ? picked : ['humans', 'active_7d']); }, 'chart_picked');
     go.title = 'Tick up to six figures to chart them together';
-    var b = block('Figures', { key: 'figures', noTag: true, scope: 'Humans, ' + (OB.tag || 'every guild') + ((ctx.d.filters || {}).compare ? ' · not split' : ''), def: DEFS['Daily record'], extra: [go] });
+    var extra = older ? [chip(plural(older, 'earlier day', 'earlier days') + ' under an older definition, not drawn', 'A definition changed: the line starts again where it did.'), go] : [go];
+    var b = block('Figures', { key: 'figures', noTag: true, scope: 'Humans, ' + (OB.tag || 'every guild') + ((ctx.d.filters || {}).compare ? ' · not split' : ''), def: DEFS['Daily record'], extra: extra });
     b.appendChild(trendTable(ctx, rows, true));
     box.appendChild(b);
+    box.appendChild(viewDaily(ctx));
     return box;
   }
   function viewDaily(ctx) {
@@ -2085,7 +2100,7 @@
     foot.appendChild(H.el('span', null, parts.join(' · ')));
     return foot;
   }
-  function viewData(ctx) {
+  function dataHealth(ctx) {
     var d = ctx.d, box = H.el('div', 'ob-view'), g = d.guilds || [];
     var issues = issuesOf(d), src = sourceRows(d), failing = src.filter(function (s) { return s[4]; }).length, read = src.filter(function (s) { return s[5] && !s[4]; }).length;
     var nIssues = issues.filter(function (x) { return x.level === 'issue'; }).length;
@@ -2115,6 +2130,18 @@
       });
       ib.appendChild(list);
       box.appendChild(ib);
+    }
+    var cov = (ctx.segs[0] || {}).coverage;
+    if (cov && cov.joined) {
+      var tags = guildTags(d);
+      var cb = block('Coverage · ' + int(cov.tracked) + ' of ' + int(cov.joined), { key: 'coverage', scope: 'Joined since ' + shortDay(cov.since), def: DEFS.Coverage });
+      var ct = grid('ob-cov', [{ label: 'Guild', k: 't' }, { label: 'Joined', k: 'n' }, { label: 'Signup recorded', k: 'n', def: DEFS['Signup recorded'] }, { label: 'Share', k: 'n' }, { label: '', k: 'b', opt: true }]);
+      (cov.guilds || []).slice().sort(function (a, b) { return b.joined - a.joined; }).forEach(function (g) {
+        addRow(ct, [cell(tags[g.guild] || g.guild, 'ob-step', g.guild), cell(int(g.joined), 'ob-v'), cell(int(g.tracked)), cell(share(g.tracked, g.joined)), bar(ratio(g.tracked, g.joined), g.tracked ? '' : 'bad')],
+          { data: { guild: g.guild }, cls: g.tracked ? '' : 'is-bad' });
+      });
+      cb.appendChild(ct);
+      box.appendChild(cb);
     }
     var sb = block('Sources · ' + read + ' of ' + src.length + ' read' + (failing ? ' · ' + failing + ' failing' : ''), { key: 'sources', scope: 'Every guild', noTag: true });
     var t = grid('ob-sources', [{ label: 'Source', k: 't', w: 'minmax(16ch, 1fr)' }, { label: 'Holds', k: 't', w: 'minmax(18ch, 1.2fr)' }, { label: 'Read', k: 't', w: 'minmax(12ch, .8fr)', opt: true },
@@ -2163,8 +2190,10 @@
     box.appendChild(cov);
     var set = block('Settings', { key: 'settings', copy: false, noTag: true });
     var form = H.el('div', 'ob-settings');
-    form.appendChild(H.field('Active means acted within', control('active', H.selectBox(String(d.active_days || 7), ACTIVE, function (v) { ctx.set({ active: v === '7' ? '' : v }); }))));
-    form.appendChild(H.field('Quit means idle for', control('idle', H.selectBox(String(d.idle_hours || 24), IDLE, function (v) { ctx.set({ idle: v === '24' ? '' : v }); }))));
+    var reps = H.checkbox(!!(d.filters || {}).replicants, 'Include replicants', function (v) { ctx.set({ reps: v ? '1' : '' }); });
+    reps.classList.add('ob-reps-switch');
+    reps.setAttribute('data-control', 'reps');
+    form.appendChild(reps);
     var ex = H.checkbox(!!(d.filters || {}).include_excluded, 'Include excluded players', function (v) { ctx.set({ excl: v ? '1' : '' }); });
     ex.classList.add('ob-ex-switch');
     ex.setAttribute('data-control', 'excl');
@@ -2173,12 +2202,31 @@
     box.appendChild(set);
     var rc = reconcileBlock(ctx);
     if (rc) box.appendChild(rc);
+    box.appendChild(footLine(d));
+    return box;
+  }
+  function dataDistributions(ctx) {
+    var box = H.el('div', 'ob-view');
+    STATS.forEach(function (st) { box.appendChild(distBlock(st[1], ctx.segs, function (s) { return s.stats && s.stats[st[0]]; }, st[2])); });
+    box.appendChild(distBlock('Play length of inactive players after signup', ctx.segs, function (s) { return s.play_length; }, 'secs'));
+    return box;
+  }
+  /* Every word on the card, once: the captions read from this. */
+  function dataDictionary(ctx) {
+    var box = H.el('div', 'ob-view');
     var gl = block('Definitions', { key: 'definitions', noTag: true });
     var dt = grid('ob-defs', [{ label: 'Term', k: 't', w: 'minmax(16ch, .6fr)' }, { label: 'Means', k: 't', w: 'minmax(20ch, 2fr)' }]);
     Object.keys(DEFS).forEach(function (k) { addRow(dt, [cell(k, 'ob-step ob-v'), cell(DEFS[k], 'ob-wrap')], { data: { term: k } }); });
     gl.appendChild(dt);
     box.appendChild(gl);
-    box.appendChild(footLine(d));
+    box.appendChild(footLine(ctx.d));
+    return box;
+  }
+  var DATA = { health: dataHealth, guilds: dataGuilds, record: dataRecord, distributions: dataDistributions, dictionary: dataDictionary };
+  function viewData(ctx) {
+    var box = H.el('div', 'ob-view');
+    box.appendChild(viewStrip(ctx));
+    box.appendChild(DATA[ctx.view](ctx));
     return box;
   }
   /* Do the chain's figures and the daily record agree? The same window from
@@ -2195,9 +2243,9 @@
       ['Active today', winOf(seg, 1).active, last(hs.dau)],
       ['Active this week', winOf(seg, 7).active, last(hs.wau)],
       ['Active this month', winOf(seg, 30).active, last(hs.mau)],
-      ['Signups, 7 days', winOf(seg, 7).new, tail(ps.new, 7)],
-      ['Signups, 30 days', winOf(seg, 30).new, tail(ps.new, 30)],
-      ['Activated, 30 days', winOf(seg, 30).activated, tail(ps.activations, 30)],
+      ['Joined, 7 days', winOf(seg, 7).new, tail(ps.new, 7)],
+      ['Joined, 30 days', winOf(seg, 30).new, tail(ps.new, 30)],
+      ['Newly activated, 30 days', winOf(seg, 30).activated, tail(ps.activations, 30)],
     ].filter(function (r) { return r[1] != null && r[2] != null; }).map(function (r) {
       var diff = r[2] - r[1], ok = Math.abs(diff) <= Math.max(1, Math.abs(r[1]) * 0.02);
       return { label: r[0], chain: r[1], record: r[2], diff: diff, ok: ok };
@@ -2235,7 +2283,7 @@
   }
   function emptyOr(d, text) { return reading(d) ? H.stateBlock('loading', progress(d)) : H.stateBlock('empty', text); }
   /* Sections folded from the crawls; Acquisition, Guilds, Trends and Data come from the servers' own reads. */
-  var CRAWLED = { overview: 1, onboarding: 1, engagement: 1 };
+  var CRAWLED = { overview: 1, onboarding: 1, engagement: 1, leaving: 1 };
 
   // ── The frame: sections, scope bar, status ──
   function viewStrip(ctx) {
@@ -2244,7 +2292,7 @@
     s.classList.add('ob-subnav');
     return s;
   }
-  var DEFAULTS = { iface: '', guild: '', activity: '', reps: '', compare: '', version: '' };
+  var DEFAULTS = { iface: '', guild: '', compare: '', version: '' };
   function scopeBar(ctx, p) {
     var d = ctx.d, page = ctx.page, set = ctx.set;
     var o = d.options || {}, f = d.filters || {};
@@ -2261,15 +2309,10 @@
       }
       bar1.appendChild(node);
     }
-    var both = f.compare === 'replicant';
-    put('reps', H.selectBox(both || f.replicants ? '1' : '', [{ value: '', label: 'Humans only' }, { value: '1', label: 'Humans + replicants' }], function (v) { set({ reps: v }); }), !!f.replicants && !both);
-    if (both) bar1.lastChild.disabled = true;
     var guilds = [{ value: '', label: 'Every guild' }].concat((o.guilds || []).map(function (g) { return { value: g.id, label: g.label + ' · ' + g.id }; }));
     put('guild', H.selectBox(f.guild || '', guilds, function (v) { set({ guild: v }); }), !!f.guild);
     var ifaces = [{ value: '', label: 'Any app' }].concat((o.interfaces || []).map(function (i) { return { value: i, label: ifaceName(i) }; }));
     put('iface', H.selectBox(f.interface || '', ifaces, function (v) { set({ iface: v }); }), !!f.interface);
-    var days = d.active_days || 7;
-    put('activity', H.selectBox(f.activity || '', [{ value: '', label: 'Active or not' }, { value: 'active', label: 'Active ' + days + 'd' }, { value: 'inactive', label: 'Inactive ' + days + 'd' }], function (v) { set({ activity: v }); }), !!f.activity);
     var versions = (d.versions || []).map(function (v) { return { value: v, label: v.replace(/^tutorial-/, 'Tutorial v') }; });
     if (versions.length > 1) {
       put('version', H.selectBox(d.version, versions, function (v) { set({ version: v === versions[0].value ? '' : v }); }), !!p.version && p.version !== versions[0].value);
@@ -2302,8 +2345,7 @@
     }
     var notes = [];
     if ((d.filters || {}).include_excluded) notes.push('excluded in');
-    if ((d.active_days || 7) !== 7) notes.push('active ' + d.active_days + 'd');
-    if ((d.idle_hours || 24) !== 24) notes.push('quit ' + (d.idle_hours % 24 ? d.idle_hours + 'h' : d.idle_hours / 24 + 'd'));
+    if ((d.filters || {}).replicants) notes.push('replicants in');
     if (notes.length) a.appendChild(H.el('span', 'ob-ex-off', notes.join(' · ')));
     if (c.running) a.appendChild(H.el('i', H.iconClass('icon-in-progress', 'sui-icon-sm')));
     a.appendChild(sub(c.finished_ms ? (c.running ? 'Reading · read ' : 'Read ') + H.ago(c.finished_ms) + ' ago' : c.running ? 'First read' : 'Not read yet'));
@@ -2312,7 +2354,7 @@
   }
 
   // ── The card ──
-  var DRAW = { overview: viewOverview, acquisition: viewAcquisition, onboarding: viewOnboarding, engagement: viewEngagement, players: viewPlayers, guilds: viewGuilds, trends: viewTrends, data: viewData };
+  var DRAW = { overview: viewOverview, acquisition: viewAcquisition, onboarding: viewOnboarding, engagement: viewStay, leaving: viewLeaving, data: viewData };
   T.register('onboarding', {
     label: 'Telemetry', argHint: '[section] [view] [7d] [guild 0-5] [split guild]', parseArgs: parseArgs,
     describe: function (p) {
@@ -2328,13 +2370,16 @@
       var args = argsOf(p), key = JSON.stringify(args);
       /* A change the card makes itself; a page or window change can redraw from the last read. */
       function set(patch) { st.nav = true; T.setParams(ctx.id, Object.assign({}, p, patch)); }
-      function go(page, view) { set({ page: page === 'overview' ? '' : page, view: view || '' }); }
+      function go(page, view) { var to = unfold(page, view || ''); set({ page: to[0] === 'overview' ? '' : to[0], view: to[1] || '' }); }
       function draw(d) {
         st.last = d;
         host.innerHTML = '';
         var page = pageOf(p);
         OB.tag = p.guild ? (guildTags(d)[p.guild] || p.guild) : null;
-        var c = { d: d, segs: d.segments || [], page: page, view: viewOf(p), win: { 1: '1', 7: '7', 30: '30' }[p.win] || '30', st: st, set: set, go: go, host: host,
+        /* All time is the Pirate page's own window; elsewhere it reads as 30 days. */
+        var win = { 1: '1', 7: '7', 30: '30', all: 'all' }[p.win] || '30';
+        if (win === 'all' && page !== 'overview' && !(page === 'onboarding' && viewOf(p) === 'first')) win = '30';
+        var c = { d: d, segs: d.segments || [], page: page, view: viewOf(p), win: win, st: st, set: set, go: go, host: host,
           redraw: function () { draw(st.last); } };
         var wrap = H.el('div', 'ob');
         wrap.setAttribute('data-page', page);
@@ -2356,7 +2401,8 @@
         scope.appendChild(side);
         wrap.appendChild(scope);
         var main = H.el('div', 'ob-main');
-        if (CRAWLED[page] && reading(d) && !hasData(d)) main.appendChild(H.stateBlock('loading', progress(d)));
+        /* Learn ▸ Runs comes from the servers, not the crawl: it draws while the crawl runs. */
+        if (CRAWLED[page] && !(page === 'onboarding' && c.view === 'runs') && reading(d) && !hasData(d)) main.appendChild(H.stateBlock('loading', progress(d)));
         else main.appendChild(DRAW[page](c));
         wrap.appendChild(main);
         host.appendChild(wrap);
@@ -2364,7 +2410,7 @@
         clearTimeout(st.soon);
         if (reading(d)) st.soon = setTimeout(function () { st.stale = true; T.refresh(ctx.id); }, 5000);
       }
-      /* 1–8 open the sections, [ and ] step through a section's views. */
+      /* 1–6 open the sections, [ and ] step through a section's views. */
       if (!host._obKeys) {
         host._obKeys = true;
         host.addEventListener('keydown', function (e) {
@@ -2416,6 +2462,6 @@
 
   T.onboarding = { phaseOf: phaseOf, phaseRows: phaseRows, heatBand: heatBand, issuesOf: issuesOf, runKind: runKind, stepLabel: stepLabel, pct: pct, share: share, topKeys: topKeys,
     headline: headline, tutorialOf: tutorialOf, trendChange: trendChange, trendPoints: trendPoints, ofShare: ofShare, uses: uses, sparkOf: sparkOf, bucketLabel: bucketLabel,
-    fmtKind: fmtKind, argsOf: argsOf, funnelStages: funnelStages, parseArgs: parseArgs, wordOf: wordOf, journeyRows: journeyRows, signalsOf: signalsOf, deltaOf: deltaOf, increments: increments,
+    fmtKind: fmtKind, argsOf: argsOf, pirateRows: pirateRows, playedRows: playedRows, confusedRows: confusedRows, parseArgs: parseArgs, wordOf: wordOf, deltaOf: deltaOf, increments: increments,
     pageOf: pageOf, viewOf: viewOf, runWeeks: runWeeks, deltaFor: deltaFor, shareOf: shareOf, reconcileRows: reconcileRows, tsvOf: tsvOf, orderSteps: orderSteps, weekStart: weekStart, durWords: durWords, sourceRows: sourceRows, worstRates: worstRates };
 })();

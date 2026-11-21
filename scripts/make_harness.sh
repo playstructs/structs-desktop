@@ -936,9 +936,6 @@ cat > "$FIX" <<'EOF'
           never_acted: Math.round(players * 0.1), never_acted_rate: 0.1,
           churn_base: Math.round(players * 0.9), churned: Math.round(players * 0.55), churn_rate: 0.61,
           lifecycle: { today: Math.round(players * 0.1), week: Math.round(players * 0.32), month: Math.round(players * 0.2), gone: Math.round(players * 0.28), never: Math.round(players * 0.1), new_7d: Math.round(120 * scale) },
-          cohorts: [{ week: 'W40', year: 2026, n: Math.round(400 * scale), acted: Math.round(360 * scale), alive: [Math.round(200 * scale), Math.round(120 * scale), Math.round(40 * scale)] },
-            { week: 'W41', year: 2026, n: 12, acted: 9, alive: [3, 1] }, { week: 'W42', year: 2026, n: Math.round(90 * scale), acted: Math.round(80 * scale), alive: [Math.round(9 * scale)] }, { week: 'W43', year: 2026, n: 30, acted: 11, alive: [] }],
-          activation: [['signed_up', 1], ['acted', 0.9], ['mined', 0.5], ['refined', 0.4], ['planet', 0.3], ['raided', 0.08], ['active', 0.42]].map(function (m) { return { key: m[0], n: Math.round(players * m[1]), rate: m[1] }; }),
           tutorial_players: serverless ? null : { players: Math.round(1102 * scale), new_players: Math.round(1000 * scale), existing_players: Math.round(102 * scale), started: Math.round(920 * scale), completed: Math.round(402 * scale),
             declined: Math.round(182 * scale), left_at_offer: Math.round(50 * scale), left_during_tutorial: Math.round(422 * scale), in_progress: Math.round(46 * scale), revisited: Math.round(30 * scale) },
           take_up: serverless ? null : { players: Math.round(1000 * scale), started: Math.round(830 * scale) },
@@ -949,6 +946,9 @@ cat > "$FIX" <<'EOF'
           tutorial: { steps: t, offered: Math.round(1102 * scale), completed: Math.round(402 * scale), declined: Math.round(182 * scale), left: Math.round(472 * scale), playing: Math.round(46 * scale), deciding: 0,
             completion_rate: 0.365, decline_rate: 0.165, quit_rate: 0.428 },
           sessions: Math.round(1102 * scale),
+          /* The funnel over tracked players: recorded signups (of 2,140 signup starts), and of them. */
+          tracked: { signups: Math.round(1091 * scale), read: Math.round(1080 * scale), activated: Math.round(96 * scale),
+            active_activated: { 1: Math.round(4 * scale), 7: Math.round(22 * scale), 30: Math.round(51 * scale) } },
           runs: { runs: Math.round(40 * scale), players: Math.round(31 * scale), repeat: Math.round(9 * scale), replays: Math.round(6 * scale), existing: Math.round(11 * scale), no_player: Math.round(2 * scale), completed: Math.round(24 * scale), left: Math.round(12 * scale), playing: Math.round(4 * scale) },
           durations: { signup: { n: 813, p50: 212, p90: 640 }, chain_wait: { n: 813, p50: 34, p90: 70 }, to_offer: { n: 790, p50: 49, p90: 120 },
             decision: { n: 760, p50: 6, p90: 31 }, tutorial: { n: 301, p50: 742, p90: 1510 }, total: { n: 301, p50: 1020, p90: 2100 } },
@@ -983,6 +983,41 @@ cat > "$FIX" <<'EOF'
               refiners: Array.from({ length: 60 }, function (_, i) { return i % 3; }), refiners_7d: Array.from({ length: 60 }, function (_, i) { return 8 + (i % 6); }),
               miners: Array.from({ length: 60 }, function (_, i) { return i % 4; }), miners_7d: Array.from({ length: 60 }, function (_, i) { return 9 + (i % 5); }),
               raiders: Array.from({ length: 60 }, function (_, i) { return i % 2; }), raiders_7d: Array.from({ length: 60 }, function (_, i) { return 5 + (i % 4); }) } },
+          /* Join-week cohorts and join windows (pirate::cohorts): every stage
+           * a subset of the one above, a week too young for a stage null. */
+          pirate_cohorts: (function () {
+            var sc = function (x) { return Math.round(x * scale); };
+            var monday = now - ((new Date(now).getUTCDay() + 6) % 7) * day;
+            var weeks = Array.from({ length: 12 }, function (_, i) {
+              /* This week's joiners are still few: under twenty reads as a count. */
+              var j = i === 11 ? 9 : sc(20 + i * 5), age = 11 - i, r = function (f, n) { return age > n ? Math.round(j * f) : null; };
+              return { week: new Date(monday - age * 7 * day).toISOString().slice(0, 10), exact: i >= 4, joined: j, tracked: Math.round(j * 0.3), acted: Math.round(j * 0.7), mined: Math.round(j * 0.3),
+                refined: Math.round(j * 0.2), raided: Math.round(j * 0.25), refined_or_raided: Math.round(j * 0.35), activated: Math.round(j * 0.1), playing: Math.round(j * 0.05),
+                ledger_unread: 0, activity_unread: 0, days_to_activate: 2, days_to_mine: 0.4, days_to_refine: 1.5, days_to_raid: 0.02,
+                retained_w1: r(0.4, 1), retained_w2: r(0.15, 2), retained_w3: r(0.12, 3), retained_w4: r(0.08, 4), retained_w5: r(0.07, 5), retained_w6: r(0.06, 6), retained_w7: r(0.05, 7), retained_w8: r(0.04, 8) };
+            });
+            var win = function (days, v) {
+              return { days: days, from: new Date(days === 'all' ? Date.UTC(2026, 8, 24) : now - days * day).toISOString().slice(0, 10), joined: sc(v[0]), acted: sc(v[1]), mined: sc(v[2]), refined: sc(v[3]), raided: sc(v[4]),
+                refined_or_raided: sc(v[5]), activated: sc(v[6]), playing: sc(v[7]), tracked: sc(v[8]), ledger_unread: sc(v[9]), activity_unread: 0, days_to_activate: 2, days_to_mine: 0.5, days_to_refine: 1.2, days_to_raid: 0.03,
+                retained_w1: null, retained_w2: null, retained_w4: null, retained_w8: null };
+            };
+            return { weeks: weeks, windows: [win(1, [2, 1, 1, 0, 0, 0, 0, 1, 1, 0]), win(7, [12, 8, 4, 2, 3, 4, 1, 5, 6, 0]), win(30, [60, 40, 20, 10, 14, 18, 6, 9, 20, 3]), win('all', [300, 200, 90, 60, 70, 100, 30, 20, 20, 3])],
+              played_since: new Date(now - 30 * day).toISOString().slice(0, 10), retained_weeks: [1, 2, 4, 8], playing_days: 7 };
+          })(),
+          left: (function () {
+            var f = { never_acted: Math.round(players * 0.5), acted_only: Math.round(players * 0.2), mined_only: Math.round(players * 0.05), refined_no_raid: Math.round(players * 0.04),
+              raided_no_refine: Math.round(players * 0.06), activated: Math.round(players * 0.03), not_read: 0 };
+            var gone = Object.keys(f).reduce(function (a, k) { return a + f[k]; }, 0);
+            return { days: 7, players: players, active: players - gone, left: gone, furthest: f,
+              who: { never_acted: [{ player_id: '1-9601', name: 'Wren', guild_id: '0-5', joined_ms: now - 9 * day, last_ms: null }, { player_id: '1-9602', name: '', guild_id: '0-1', joined_ms: now - 12 * day, last_ms: null }],
+                activated: [{ player_id: '1-7001', name: 'Corsair', guild_id: '0-5', joined_ms: now - 50 * day, last_ms: now - 10 * day }] } };
+          })(),
+          active_users: { days: 7, total: 3, players: [
+            { player_id: '1-61', name: 'JPEG', guild_id: '0-5', joined_ms: now - 80 * day, last_ms: now - 3600000, played_30: 6, raids: 140, refined_g: 9e6 },
+            { player_id: '1-195', name: '', guild_id: '0-1', joined_ms: now - 70 * day, last_ms: now - 2 * day, played_30: 5, raids: 12, refined_g: 2e6 }] },
+          played: { window: 30, days: [10, 7, 6, 2, 2, 2, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], players: 31, activity_unread: 12 },
+          coverage: { since: '2026-10-24', joined: 46, tracked: 15, rate: 15 / 46,
+            guilds: [{ guild: '0-1', joined: 4, tracked: 1 }, { guild: '0-2', joined: 22, tracked: 0 }, { guild: '0-5', joined: 20, tracked: 14 }] },
           pirate_server: serverless || key === 'replicant' ? null : { windows: [{ days: 1, started: Math.round(4 * scale), signed_up: Math.round(2 * scale) }, { days: 7, started: Math.round(21 * scale), signed_up: Math.round(9 * scale) }, { days: 30, started: null, signed_up: null }],
             all: { started: Math.round(2140 * scale), signed_up: Math.round(1091 * scale) }, since: new Date(now - 9 * day).toISOString().slice(0, 10),
             prior: { day: '2026-11-11', started: Math.round(40 * scale), signed_up: Math.round(12 * scale) } },
@@ -1021,8 +1056,10 @@ cat > "$FIX" <<'EOF'
         ] } },
         history: Array.from({ length: 40 }, function (_, i) {
           var at = now - (39 - i) * day;
-          return { day: new Date(at).toISOString().slice(0, 10), ts_ms: at, humans: 400 + i * 2, replicants: 9000 + i * 50, activated: 150 + i, active_1d: 6 + (i % 3), active_7d: 16 + (i % 5), active_30d: 90 + i, mined: 50 + i, refined: 40, raided: 12,
-            guilds: { '0-5': { humans: 300 + i, active_7d: 10 } }, server: i < 30 ? null : { version: 'tutorial-4', signups_started: 100 + i, signed_up: 80 + i, tutorial_players: 60 + i, tutorial_completed: 30 + i } };
+          /* Rows before the rename store `acted` as `activated`; every row is definition 1. */
+          var acted = i < 30 ? { activated: 150 + i } : { acted: 150 + i };
+          return Object.assign(acted, { day: new Date(at).toISOString().slice(0, 10), ts_ms: at, def: 1, humans: 400 + i * 2, replicants: 9000 + i * 50, active_1d: 6 + (i % 3), active_7d: 16 + (i % 5), active_30d: 90 + i, mined: 50 + i, refined: 40, raided: 12,
+            guilds: { '0-5': { humans: 300 + i, active_7d: 10 } }, server: i < 30 ? null : { version: 'tutorial-4', signups_started: 100 + i, signed_up: 80 + i, tutorial_players: 60 + i, tutorial_completed: 30 + i } });
         }),
         history_series: { days: Array.from({ length: 60 }, function (_, i) { return new Date(now - (59 - i) * day).toISOString().slice(0, 10); }),
           series: { dau: Array.from({ length: 60 }, function (_, i) { return i < 20 ? null : 6 + (i % 3); }), wau: Array.from({ length: 60 }, function (_, i) { return i < 20 ? null : 16 + (i % 5); }),
@@ -1049,7 +1086,7 @@ cat > "$FIX" <<'EOF'
         r.stopped = {};
         r.history = [];
         r.trend_series = null;
-        r.segments = r.segments.map(function (s) { return Object.assign(s, { pirate: null, pirate_series: null }); });
+        r.segments = r.segments.map(function (s) { return Object.assign(s, { pirate: null, pirate_series: null, pirate_cohorts: null, left: null, played: null, coverage: null }); });
         r.crawl = { running: cold === 'reading', finished_ms: cold === 'reading' ? null : now - 1000, guilds: {}, players: { known: 0, ledgers: 0, refreshed_ms: null, round: null } };
       }
       return r;

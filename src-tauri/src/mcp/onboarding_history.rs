@@ -16,6 +16,13 @@ use crate::mcp::onboarding_players::Snapshot;
 const CACHE_NAME: &str = "onboarding_history";
 const KEEP_DAYS: usize = 730;
 const DAY_MS: i64 = 86_400_000;
+/// The definitions a row's figures were counted by. Bump it when one
+/// changes: Trends and the Chart card draw only the newest version's rows as
+/// one line, so a redefinition starts a new line instead of reading as a step.
+pub const DEF_VERSION: u32 = 1;
+fn def_v1() -> u32 {
+    1
+}
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct GuildDay {
@@ -29,7 +36,10 @@ pub struct Day {
     pub ts_ms: i64,
     pub humans: usize,
     pub replicants: usize,
-    pub activated: usize,
+    /// Humans who ever acted on chain (`lastAction` set). Stored as
+    /// `activated` before 2026-11-21, which meant the same thing.
+    #[serde(alias = "activated")]
+    pub acted: usize,
     pub active_1d: usize,
     pub active_7d: usize,
     pub active_30d: usize,
@@ -41,6 +51,9 @@ pub struct Day {
     /// The servers' running totals for the newest design, once a read saw them.
     #[serde(default)]
     pub server: Option<ServerDay>,
+    /// `DEF_VERSION` when the row was written.
+    #[serde(default = "def_v1")]
+    pub def: u32,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -59,7 +72,7 @@ pub struct ServerDay {
 pub const METRICS: &[(&str, &str, &str)] = &[
     ("humans", "count", "humans"),
     ("replicants", "count", "replicants"),
-    ("activated", "count", "humans who ever acted"),
+    ("acted", "count", "humans who ever acted"),
     ("active_1d", "count", "humans active in a day"),
     ("active_7d", "count", "humans active in 7 days"),
     ("active_30d", "count", "humans active in 30 days"),
@@ -93,7 +106,7 @@ fn day_of(ms: i64) -> String {
 
 /// Today's chain figures. Human means neither replicant marker.
 pub fn day_row(s: &Snapshot, now: i64) -> Day {
-    let mut d = Day { day: day_of(now), ts_ms: now, ..Default::default() };
+    let mut d = Day { day: day_of(now), ts_ms: now, def: DEF_VERSION, ..Default::default() };
     let within = |t: Option<i64>, days: i64| t.map_or(false, |t| t >= now - days * DAY_MS);
     for (id, p) in &s.players {
         if s.is_replicant(id) {
@@ -103,7 +116,7 @@ pub fn day_row(s: &Snapshot, now: i64) -> Day {
         d.humans += 1;
         let g = d.guilds.entry(p.guild.clone()).or_default();
         g.humans += 1;
-        d.activated += p.last_active_ms.is_some() as usize;
+        d.acted += p.last_active_ms.is_some() as usize;
         d.active_1d += within(p.last_active_ms, 1) as usize;
         d.active_30d += within(p.last_active_ms, 30) as usize;
         if within(p.last_active_ms, 7) {
@@ -172,7 +185,8 @@ fn value_of(d: &Day, metric: &str) -> Option<f64> {
     Some(match metric {
         "humans" => d.humans as f64,
         "replicants" => d.replicants as f64,
-        "activated" => d.activated as f64,
+        // `activated` is the old name, kept for saved Chart cards.
+        "acted" | "activated" => d.acted as f64,
         "active_1d" => d.active_1d as f64,
         "active_7d" => d.active_7d as f64,
         "active_30d" => d.active_30d as f64,
@@ -193,7 +207,14 @@ pub fn samples(metric: &str) -> Vec<(f64, f64)> {
         return derived(&crate::mcp::onboarding_players::snapshot(), metric, now_ms());
     }
     let rows = HISTORY.lock().unwrap_or_else(|p| p.into_inner());
-    rows.iter().filter_map(|d| value_of(d, metric).map(|v| (d.ts_ms as f64, v))).collect()
+    current(&rows).filter_map(|d| value_of(d, metric).map(|v| (d.ts_ms as f64, v))).collect()
+}
+
+/// The rows counted by the newest row's definitions: one line, no step
+/// where a definition changed.
+pub fn current(rows: &[Day]) -> impl Iterator<Item = &Day> {
+    let v = rows.last().map_or(DEF_VERSION, |r| r.def);
+    rows.iter().filter(move |r| r.def == v)
 }
 
 fn now_ms() -> i64 {
@@ -228,6 +249,15 @@ mod tests {
     }
 
     #[test]
+    fn a_redefinition_starts_a_new_line() {
+        let row = |day: &str, def: u32| Day { day: day.into(), humans: 1, def, ..Default::default() };
+        let rows = vec![row("2026-11-01", 1), row("2026-11-02", 1), row("2026-11-03", 2)];
+        assert_eq!(current(&rows).map(|r| r.day.as_str()).collect::<Vec<_>>(), vec!["2026-11-03"]);
+        let old: Day = serde_json::from_str(r#"{"day":"2026-11-01","ts_ms":1,"humans":3,"replicants":0,"activated":2,"active_1d":0,"active_7d":0,"active_30d":0,"mined":0,"refined":0,"raided":0}"#).unwrap();
+        assert_eq!((old.acted, old.def), (2, 1), "a row stored as `activated` reads as acted, version 1");
+    }
+
+    #[test]
     fn a_day_counts_humans_and_sets_replicants_apart() {
         let mut s = Snapshot::default();
         s.players.insert("1-1".into(), player("0-1", Some(NOW - 1_000)));
@@ -241,7 +271,7 @@ mod tests {
         s.stats.insert("1-1".into(), PlayerStats { mined_g: Some(4.0), raids_initiated: 1.0, ..Default::default() });
         s.stats.insert("1-2".into(), PlayerStats { mined_g: Some(0.0), ..Default::default() });
         let d = day_row(&s, NOW);
-        assert_eq!((d.humans, d.replicants, d.activated), (4, 2, 3));
+        assert_eq!((d.humans, d.replicants, d.acted, d.def), (4, 2, 3, DEF_VERSION));
         assert_eq!((d.active_1d, d.active_7d, d.active_30d), (1, 2, 3));
         assert_eq!((d.mined, d.refined, d.raided), (1, 0, 1));
         assert_eq!(d.guilds["0-5"], GuildDay { humans: 3, active_7d: 1 });
