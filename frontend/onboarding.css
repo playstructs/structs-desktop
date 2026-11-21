@@ -315,3 +315,5 @@
 .ob-pirate-doors .ob-tile-stage { color: var(--text-warning); }
 .ob-scope-line { display: inline-flex; flex-wrap: wrap; align-items: center; gap: var(--spacing-md); }
 .ob-cohort.is-empty > span { color: var(--text-hint); }
+/* Counted before the activity feed reaches back: mines, refines and raids only. */
+.ob-heat.is-partial, .ob-c.is-partial { opacity: .55; }

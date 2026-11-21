@@ -85,6 +85,10 @@ const CRAWL_MAX_ERRORS: usize = 20;
 /// The newest players may not have flushed their last batch yet: an empty
 /// answer for them is asked again next crawl rather than believed.
 const UNSETTLED_NEWEST: usize = 20;
+/// Empty sessions asked of the other guilds per crawl, and how long a
+/// fruitless search stands before it is tried again.
+const ELSEWHERE_BUDGET: usize = 200;
+const ELSEWHERE_AGAIN_MS: i64 = 7 * 24 * 3_600_000;
 
 const DIRECTORY_TTL: Duration = Duration::from_secs(30 * 60);
 const AGGREGATE_TTL: Duration = Duration::from_secs(120);
@@ -137,6 +141,11 @@ pub struct PlayerSession {
     /// Never fetched again: finished, idle past the window, or known empty.
     #[serde(default)]
     pub settled: bool,
+    /// When the other guilds were last asked for an empty session: a player
+    /// who signed up on one guild's server and then moved is listed on the
+    /// new guild's roster, whose server has no rows for them.
+    #[serde(default)]
+    pub searched_ms: i64,
 }
 
 impl PlayerSession {
@@ -861,6 +870,57 @@ async fn crawl_guild(guild: String, api: String, idle_hours: u32) {
     }
 }
 
+/// Who to look for on other guilds' servers, and where: sessions read empty
+/// from the player's current guild, not searched recently, newest player
+/// first; every guild with an API except the one already asked.
+pub fn elsewhere_plan(sessions: &HashMap<String, PlayerSession>, apis: &[(String, String)], now: i64) -> Vec<(String, Vec<(String, String)>)> {
+    let mut todo: Vec<(u64, &String, &PlayerSession)> = sessions
+        .iter()
+        .filter(|(_, s)| s.events.is_empty() && s.fetched_ms > 0 && now - s.searched_ms >= ELSEWHERE_AGAIN_MS)
+        .filter_map(|(pid, s)| player_index(pid).map(|i| (i, pid, s)))
+        .collect();
+    todo.sort_by(|a, b| b.0.cmp(&a.0));
+    todo.into_iter()
+        .take(ELSEWHERE_BUDGET)
+        .map(|(_, pid, s)| (pid.clone(), apis.iter().filter(|(g, _)| *g != s.guild).cloned().collect::<Vec<_>>()))
+        .filter(|(_, others)| !others.is_empty())
+        .collect()
+}
+
+/// Ask the other guilds for the sessions their own guild had no rows for
+/// (bug B8: a player who moved guild was read only from the new one).
+async fn search_elsewhere(apis: Vec<(String, String)>) {
+    use futures_util::StreamExt;
+    let now = now_ms();
+    let plan = elsewhere_plan(&PLAYERS.lock().unwrap_or_else(|p| p.into_inner()), &apis, now);
+    let mut results = futures_util::stream::iter(plan.into_iter().map(|(pid, others)| async move {
+        for (guild, api) in others {
+            if let Ok(rows) = client_for(&api).onboarding_player(&pid).await {
+                let s = session_from_rows(&guild, &rows);
+                if !s.events.is_empty() {
+                    return (pid, Some(s));
+                }
+            }
+        }
+        (pid, None)
+    }))
+    .buffer_unordered(CRAWL_CONCURRENCY);
+    while let Some((pid, found)) = results.next().await {
+        let mut all = PLAYERS.lock().unwrap_or_else(|p| p.into_inner());
+        let Some(old) = all.get_mut(&pid) else { continue };
+        match found {
+            Some(mut s) => {
+                s.name = std::mem::take(&mut old.name);
+                s.fetched_ms = now;
+                s.searched_ms = now;
+                s.settled = is_settled(&s, false, now, SETTLE_IDLE_HOURS);
+                *old = s;
+            }
+            None => old.searched_ms = now,
+        }
+    }
+}
+
 /// Everyone with any recorded onboarding step or tutorial run: someone was
 /// at the keyboard, whatever their name.
 fn telemetry_players() -> HashSet<String> {
@@ -887,8 +947,12 @@ fn spawn_crawl(entries: Vec<GuildApiEntry>, idle_hours: u32) {
             .into_iter()
             .filter_map(|e| e.guild_api.map(|api| crawl_guild(e.id, api, idle_hours)));
         // Each guild's sessions, and the chain-wide player tables from ours.
+        let apis: Vec<(String, String)> = entries_kept.iter().filter_map(|e| e.guild_api.clone().map(|a| (e.id.clone(), a))).collect();
         tokio::join!(
-            futures_util::future::join_all(jobs),
+            async {
+                futures_util::future::join_all(jobs).await;
+                search_elsewhere(apis).await;
+            },
             crate::mcp::onboarding_players::crawl(replicants_error, guild_ids, telemetry_players())
         );
         let snapshot = PLAYERS.lock().unwrap_or_else(|p| p.into_inner()).clone();
@@ -2018,6 +2082,29 @@ mod tests {
         assert_eq!(w["tutorial.x"]["players"][0]["player_id"], json!("1-2"));
         assert_eq!(w["tutorial.x"]["players"][0]["name"], json!("n1-2"));
         assert_eq!(w["tutorial.y"]["players"][0]["player_id"], json!("1-4"), "a signup session that quit");
+    }
+
+    #[test]
+    fn an_empty_session_is_looked_for_on_the_other_guilds_once_a_week() {
+        let sess = |guild: &str, events: bool, searched_ms: i64| PlayerSession {
+            guild: guild.into(),
+            events: if events { vec![Ev { k: "signup.connecting".into(), t: 1, s: false }] } else { vec![] },
+            fetched_ms: 10,
+            searched_ms,
+            ..Default::default()
+        };
+        let now = 100 * 24 * 3_600_000;
+        let all: HashMap<String, PlayerSession> = [
+            ("1-6001".to_string(), sess("0-5", false, 0)),
+            ("1-6002".to_string(), sess("0-5", true, 0)),
+            ("1-6003".to_string(), sess("0-1", false, now - 3_600_000)),
+            ("1-6004".to_string(), sess("0-1", false, now - 8 * 24 * 3_600_000)),
+        ]
+        .into();
+        let apis = vec![("0-1".to_string(), "a".to_string()), ("0-5".to_string(), "b".to_string())];
+        let plan = elsewhere_plan(&all, &apis, now);
+        assert_eq!(plan.iter().map(|(p, _)| p.as_str()).collect::<Vec<_>>(), vec!["1-6004", "1-6001"], "empty, not searched this week, newest first");
+        assert_eq!(plan[1].1, vec![("0-1".to_string(), "a".to_string())], "never the guild already asked");
     }
 
     #[test]

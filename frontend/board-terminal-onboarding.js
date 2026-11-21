@@ -1193,7 +1193,10 @@
       addRow(t, [name].concat(WEEK_COLS.map(function (c) {
         var v = wk[c[0]];
         if (v == null) return cell('not yet', 'ob-sub ob-notyet', DEFS['Not yet']);
-        return c[0] === 'joined' ? cell(int(v), 'ob-v') : stack(int(v), wk.joined >= SMALL_N ? pct(v / wk.joined) : null);
+        if (c[0] === 'joined') return cell(int(v), 'ob-v');
+        var n = /^retained_w(\d)$/.exec(c[0]), part = n && beforeFeed(seg, wk.week, Number(n[1]));
+        var x = stack(int(v), wk.joined >= SMALL_N ? pct(v / wk.joined) : null, part ? 'is-partial' : '', part ? feedNote(seg) : null);
+        return x;
       })), { data: { week: wk.week }, cls: wk.joined ? '' : 'is-empty' });
     });
     return t;
@@ -1320,7 +1323,8 @@
   // ── ONBOARDING: Combat Training ──
   function onboardingKpi(ctx) {
     var d = ctx.d;
-    function wk(key) { return deltaOf(increments(histSeries(d, key) || ((d.history || []).map(function (r) { return r.server ? r.server[key] : null; }))), 7, 'daily'); }
+    /* The record keeps every guild's totals: a filtered or split page has no change to show (B6). */
+    function wk(key) { return isPlain(d) && ctx.segs.length === 1 ? deltaOf(increments(histSeries(d, key) || ((d.history || []).map(function (r) { return r.server ? r.server[key] : null; }))), 7, 'daily') : null; }
     return [
       { key: 'players', label: 'Tutorial players', get: function (s) { var t = tutorialOf(s); return { value: int(t.offered), sub: t.unique ? 'unique players' : 'new signups sampled', delta: wk('tutorial_players') }; } },
       { key: 'takeup', label: 'Take-up', get: function (s) { var h = headline(s); return { value: h.takeUpBase >= SMALL_N ? pct(h.takeUp) : share(h.takeUpN, h.takeUpBase), sub: h.takeUpBase ? int(h.takeUpN) + ' of ' + int(h.takeUpBase) + ' new players started' : null }; } },
@@ -1595,6 +1599,17 @@
 
   // ── STAY: who comes back, and how often ──
   var TRI_WEEKS = 8;
+  /* Week N after joining began before the activity feed reaches back (it keeps
+   * 30 days a read): for it, played counts only mines, refines and raids. */
+  function beforeFeed(seg, week, n) {
+    var since = ((seg && seg.pirate_cohorts) || {}).played_since;
+    if (!since) return true;
+    return Date.parse(week + 'T00:00:00Z') + 7 * (n - 1) * 86400000 < Date.parse(since + 'T00:00:00Z');
+  }
+  function feedNote(seg) {
+    var since = ((seg && seg.pirate_cohorts) || {}).played_since;
+    return since ? 'Before ' + shortDay(since) + ' only mines, refines and raids count as played: the activity feed reaches no further back.' : 'The activity feed is not read yet: only mines, refines and raids count as played.';
+  }
   /* Played in week N after joining, of every joiner that week; a week not lived yet is blank. */
   function triangle(seg) {
     var t = H.el('div', 'ob-cohorts ob-triangle');
@@ -1610,8 +1625,9 @@
       row.appendChild(H.el('span', 'ob-v ob-n', int(wk.joined)));
       row.appendChild(wk.joined ? heatCell(wk.acted, wk.joined) : H.el('span', 'ob-heat ob-heat-none'));
       for (var i = 1; i <= TRI_WEEKS; i++) {
-        var v = wk['retained_w' + i];
-        row.appendChild(wk.joined && v != null ? heatCell(v, wk.joined) : H.el('span', 'ob-heat ob-heat-none'));
+        var v = wk['retained_w' + i], hc = wk.joined && v != null ? heatCell(v, wk.joined) : H.el('span', 'ob-heat ob-heat-none');
+        if (v != null && beforeFeed(seg, wk.week, i)) { hc.classList.add('is-partial'); hc.title = (hc.title ? hc.title + ' · ' : '') + feedNote(seg); }
+        row.appendChild(hc);
       }
       t.appendChild(row);
     });
