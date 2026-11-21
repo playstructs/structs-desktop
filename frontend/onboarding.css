@@ -312,6 +312,6 @@
 .ob-bar.ok .ob-bar-fill { background: var(--text-player-primary); }
 .ob-bar.bad .ob-bar-fill { background: var(--text-enemy-primary); }
 .ob-block-sub { display: flex; gap: var(--spacing-sm); padding-top: var(--spacing-md); }
-.ob-doors .ob-tile-stage { color: var(--text-warning); }
+.ob-pirate-doors .ob-tile-stage { color: var(--text-warning); }
 .ob-scope-line { display: inline-flex; flex-wrap: wrap; align-items: center; gap: var(--spacing-md); }
 .ob-cohort.is-empty > span { color: var(--text-hint); }
