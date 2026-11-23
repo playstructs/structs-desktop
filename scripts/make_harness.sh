@@ -1040,6 +1040,10 @@ cat > "$FIX" <<'EOF'
           { id: '0-2', name: 'Imperial One', tag: 'ONE', status: 'no_api', error: 'no guild API published', started: null, signed_up: null, outcome: null, runs: null, runs_error: null, no_player: null, tutorial_players: null, sampled: 0, untracked: 0, players: 72, active: 3 },
           { id: '0-5', name: 'SN Corp', tag: 'SN.C', status: 'ok', error: null, started: 2136, signed_up: 1101, outcome: { offered: 1101, completed: 402, declined: 182, left_during_tutorial: 471, in_progress: 46 }, runs: 37, runs_error: null, no_player: 2, tutorial_players: { players: 1100, completed: 401 }, sampled: 812, untracked: 2410, players: 8100, active: 3400 },
         ],
+        servers: [
+          { host: '0-1', api: 'crew.oh.example', guilds: ['0-1'], error: null, no_telemetry: false, started: 4, signed_up: 1, outcome: { offered: 1, completed: 0, declined: 0, left_during_tutorial: 1, in_progress: 0 }, tutorial_players: { players: 2, completed: 1 }, runs: 3, no_player: 0 },
+          { host: '0-5', api: 'beta.example', guilds: ['0-5'], error: null, no_telemetry: false, started: 2136, signed_up: 1101, outcome: { offered: 1101, completed: 402, declined: 182, left_during_tutorial: 471, in_progress: 46 }, tutorial_players: { players: 1100, completed: 401 }, runs: 37, no_player: 2 },
+        ],
         recent: [
           { player_id: '1-9584', name: 'Kestrel', guild_id: '0-5', started_ms: now - 1500000, last_ms: now - 600000, last_step: 'tutorial.first_attack.combat', outcome: 'playing', signup_s: 190, tutorial_s: null },
           { player_id: '1-9580', name: '', guild_id: '0-5', started_ms: now - 4000000, last_ms: now - 2000000, last_step: 'tutorial.end.ftl_jump', outcome: 'completed', signup_s: 240, tutorial_s: 801 },
@@ -1080,6 +1084,13 @@ cat > "$FIX" <<'EOF'
       r.trend_series = segs[0].pirate_series;
       /* A first read before the crawls have found anything: 'reading' while
        * they run, 'done' once they finished empty-handed. */
+      /* 0-5's server published by two more guilds. */
+      if (window.__HARNESS_OB_SHARED__) {
+        r.servers[1].guilds = ['0-5', '0-7', '0-10'];
+        r.guilds.push({ id: '0-7', name: 'VitalityDAO', tag: 'VTLY', status: 'ok', error: null, runs: 4, sampled: 2, untracked: 0, players: 3, active: 1 }, { id: '0-10', name: 'Rock Co', tag: 'RC', status: 'ok', error: null, runs: 0, sampled: 0, untracked: 0, players: 2, active: 1 });
+        r.guilds.forEach(function (g) { if (r.servers[1].guilds.indexOf(g.id) >= 0) Object.assign(g, { host: '0-5', shared_by: 3, started: null, signed_up: null, outcome: null, tutorial_players: null, no_player: null }); });
+        if (f.guild === '0-5') r.segments.forEach(function (x) { Object.assign(x, { shared_server: { host: '0-5', guilds: 3 }, signup: null, tutorial_players: null, take_up: null, player_steps: [], pirate_server: null }); });
+      }
       var cold = window.__HARNESS_OB_COLD__;
       if (cold) {
         r.segments = r.segments.map(function (s) { return Object.assign({}, s, { sessions: 0, tutorial: { offered: 0, steps: [] }, tutorial_players: null, take_up: null, player_steps: [], run_comparison: [], daily: [], dwell: {}, durations: {} }); });

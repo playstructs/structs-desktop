@@ -43,6 +43,19 @@
 //! leaves out the test accounts the app knows by name
 //! (`onboarding_players::is_test_name`): their sessions, runs and chain facts.
 //!
+//! ## Shared servers
+//!
+//! Several guilds may publish one API (on 2026-11-23 twelve published
+//! beta.playstructs.com). Its database is one database: `guild_id` on these
+//! routes cannot split it, because the server stamps every session with the
+//! one guild its deployment belongs to (`/api/guild/this`). So each server is
+//! read ONCE, under that host guild (`Server`), and:
+//! - totals over every guild add each server once;
+//! - one guild of several on a server has no signup funnel or unique-player
+//!   count of its own (`null`, never the shared figure);
+//! - runs and sampled sessions belong to their player's guild on chain. A run
+//!   with no player on a shared server belongs to no guild.
+//!
 //! `recorded_at` is the SERVER's insert time and the client batches steps
 //! that land within 2 s of each other, so a dwell is accurate to a couple of
 //! seconds and a batch of quick steps reads as 0 s each.
@@ -269,9 +282,95 @@ static PLAYERS: LazyLock<Mutex<HashMap<String, PlayerSession>>> =
 
 // ── Guilds ──────────────────────────────────────────────────────────────────
 
+/// One guild server, and every guild that publishes it.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct Server {
+    /// The guild the server says it belongs to, else the lowest-numbered one
+    /// publishing it: what its figures are keyed by.
+    pub host: String,
+    pub api: String,
+    pub guilds: Vec<String>,
+}
+
+impl Server {
+    pub fn shared(&self) -> bool {
+        self.guilds.len() > 1
+    }
+}
+
+/// The same server however it is spelled: scheme, case and slashes aside.
+fn api_key(api: &str) -> String {
+    let a = api.trim().trim_end_matches('/');
+    let rest = a.split_once("://").map_or(a, |(_, r)| r);
+    let (host, path) = rest.split_once('/').unwrap_or((rest, ""));
+    let host = host.to_ascii_lowercase();
+    let host = host.strip_suffix(":443").or_else(|| host.strip_suffix(":80")).unwrap_or(&host);
+    format!("{host}/{path}")
+}
+
+fn guild_index(id: &str) -> u64 {
+    id.rsplit('-').next().and_then(|n| n.parse().ok()).unwrap_or(u64::MAX)
+}
+
+/// Each published server once. `host_of`: `api_key` → the guild it answered
+/// `/api/guild/this` with, believed only when that guild is on chain.
+pub fn group_servers(entries: &[GuildApiEntry], host_of: &HashMap<String, String>) -> Vec<Server> {
+    let mut by: BTreeMap<String, Server> = BTreeMap::new();
+    for e in entries {
+        let Some(api) = e.guild_api.as_deref() else { continue };
+        let sv = by.entry(api_key(api)).or_insert_with(|| Server { host: String::new(), api: api.to_string(), guilds: Vec::new() });
+        sv.guilds.push(e.id.clone());
+        if api.starts_with("https://") && !sv.api.starts_with("https://") {
+            sv.api = api.to_string();
+        }
+    }
+    let mut out: Vec<Server> = by
+        .into_iter()
+        .map(|(k, mut sv)| {
+            sv.guilds.sort_by_key(|g| guild_index(g));
+            sv.host = host_of.get(&k).filter(|h| entries.iter().any(|e| e.id == **h)).cloned().unwrap_or_else(|| sv.guilds[0].clone());
+            sv
+        })
+        .collect();
+    out.sort_by_key(|sv| guild_index(&sv.host));
+    // Two servers must not share a key: the later one takes its own guild's.
+    let mut used: HashSet<String> = HashSet::new();
+    for sv in &mut out {
+        if !used.insert(sv.host.clone()) {
+            sv.host = sv.guilds[0].clone();
+            used.insert(sv.host.clone());
+        }
+    }
+    out
+}
+
+async fn read_hosts(entries: &[GuildApiEntry]) -> HashMap<String, String> {
+    let apis: BTreeMap<String, String> = entries.iter().filter_map(|e| e.guild_api.clone().map(|a| (api_key(&a), a))).collect();
+    futures_util::future::join_all(apis.into_iter().map(|(k, api)| async move {
+        let v = client_for(&api).get_public("/api/guild/this").await.ok()?;
+        let id = text(v.get("id"));
+        (!id.is_empty()).then_some((k, id))
+    }))
+    .await
+    .into_iter()
+    .flatten()
+    .collect()
+}
+
+/// Whose run or session it is: its player's guild on chain, else the guild
+/// whose server recorded it — unless several guilds share that server.
+fn owner_guild(chain: Option<&str>, recorded: &str, shared: bool) -> String {
+    match chain.filter(|g| !g.is_empty()) {
+        Some(g) => g.to_string(),
+        None if shared => String::new(),
+        None => recorded.to_string(),
+    }
+}
+
 struct Directory {
     at: Instant,
     entries: Vec<GuildApiEntry>,
+    servers: Vec<Server>,
     versions: Vec<String>,
     /// Each version's step catalog, from the first guild that has it.
     catalogs: HashMap<String, Vec<Value>>,
@@ -293,10 +392,10 @@ pub fn sort_versions(mut v: Vec<String>) -> Vec<String> {
     v
 }
 
-async fn probe_versions(entries: &[GuildApiEntry]) -> HashMap<String, Vec<Value>> {
+async fn probe_versions(servers: &[Server]) -> HashMap<String, Vec<Value>> {
     let mut asks = Vec::new();
-    for e in entries {
-        let Some(api) = e.guild_api.clone() else { continue };
+    for sv in servers {
+        let api = sv.api.clone();
         for n in 1..=VERSION_PROBE_MAX {
             let api = api.clone();
             asks.push(async move {
@@ -315,18 +414,22 @@ async fn probe_versions(entries: &[GuildApiEntry]) -> HashMap<String, Vec<Value>
     found
 }
 
-async fn directory(fresh: bool) -> Result<(Vec<GuildApiEntry>, Vec<String>, HashMap<String, Vec<Value>>), String> {
+async fn directory(fresh: bool) -> Result<(Vec<GuildApiEntry>, Vec<Server>, Vec<String>, HashMap<String, Vec<Value>>), String> {
     let mut g = DIRECTORY.lock().await;
     if let Some(d) = g.as_ref() {
         if !fresh && d.at.elapsed() < DIRECTORY_TTL {
-            return Ok((d.entries.clone(), d.versions.clone(), d.catalogs.clone()));
+            return Ok((d.entries.clone(), d.servers.clone(), d.versions.clone(), d.catalogs.clone()));
         }
     }
     let entries = crate::guild_directory::guild_api_directory().await?;
-    let catalogs = probe_versions(&entries).await;
+    let hosts = read_hosts(&entries).await;
+    let servers = group_servers(&entries, &hosts);
+    // Days written while a shared server was read once per guild.
+    crate::mcp::onboarding_history::drop_shared(&servers);
+    let catalogs = probe_versions(&servers).await;
     let versions = sort_versions(catalogs.keys().cloned().collect());
-    *g = Some(Directory { at: Instant::now(), entries: entries.clone(), versions: versions.clone(), catalogs: catalogs.clone() });
-    Ok((entries, versions, catalogs))
+    *g = Some(Directory { at: Instant::now(), entries: entries.clone(), servers: servers.clone(), versions: versions.clone(), catalogs: catalogs.clone() });
+    Ok((entries, servers, versions, catalogs))
 }
 
 // ── Aggregates (every session, every guild) ─────────────────────────────────
@@ -873,8 +976,8 @@ async fn crawl_guild(guild: String, api: String, idle_hours: u32) {
 
 /// Who to look for on other guilds' servers, and where: sessions read empty
 /// from the player's current guild, not searched recently, newest player
-/// first; every guild with an API except the one already asked.
-pub fn elsewhere_plan(sessions: &HashMap<String, PlayerSession>, apis: &[(String, String)], now: i64) -> Vec<(String, Vec<(String, String)>)> {
+/// first; every server except the one already asked.
+pub fn elsewhere_plan(sessions: &HashMap<String, PlayerSession>, servers: &[Server], now: i64) -> Vec<(String, Vec<(String, String)>)> {
     let mut todo: Vec<(u64, &String, &PlayerSession)> = sessions
         .iter()
         .filter(|(_, s)| s.events.is_empty() && s.fetched_ms > 0 && now - s.searched_ms >= ELSEWHERE_AGAIN_MS)
@@ -883,17 +986,17 @@ pub fn elsewhere_plan(sessions: &HashMap<String, PlayerSession>, apis: &[(String
     todo.sort_by(|a, b| b.0.cmp(&a.0));
     todo.into_iter()
         .take(ELSEWHERE_BUDGET)
-        .map(|(_, pid, s)| (pid.clone(), apis.iter().filter(|(g, _)| *g != s.guild).cloned().collect::<Vec<_>>()))
+        .map(|(_, pid, s)| (pid.clone(), servers.iter().filter(|sv| sv.host != s.guild && !sv.guilds.contains(&s.guild)).map(|sv| (sv.host.clone(), sv.api.clone())).collect::<Vec<_>>()))
         .filter(|(_, others)| !others.is_empty())
         .collect()
 }
 
 /// Ask the other guilds for the sessions their own guild had no rows for
 /// (bug B8: a player who moved guild was read only from the new one).
-async fn search_elsewhere(apis: Vec<(String, String)>) {
+async fn search_elsewhere(servers: Vec<Server>) {
     use futures_util::StreamExt;
     let now = now_ms();
-    let plan = elsewhere_plan(&PLAYERS.lock().unwrap_or_else(|p| p.into_inner()), &apis, now);
+    let plan = elsewhere_plan(&PLAYERS.lock().unwrap_or_else(|p| p.into_inner()), &servers, now);
     let mut results = futures_util::stream::iter(plan.into_iter().map(|(pid, others)| async move {
         for (guild, api) in others {
             if let Ok(rows) = client_for(&api).onboarding_player(&pid).await {
@@ -930,12 +1033,11 @@ fn telemetry_players() -> HashSet<String> {
     sampled.into_iter().chain(runs.values().flat_map(|(_, g)| g.runs.iter().filter_map(|r| r.player.clone()))).collect()
 }
 
-fn spawn_crawl(entries: Vec<GuildApiEntry>, idle_hours: u32) {
+fn spawn_crawl(entries: Vec<GuildApiEntry>, servers: Vec<Server>, idle_hours: u32) {
     if CRAWLING.swap(true, Ordering::SeqCst) {
         return;
     }
     CRAWL.lock().unwrap_or_else(|p| p.into_inner()).started = Some(Instant::now());
-    let entries_kept = entries.clone();
     tauri::async_runtime::spawn(async move {
         // Replicants first: both crawls below skip or defer them.
         let replicants_error = crate::mcp::onboarding_players::refresh_replicants().await.err();
@@ -948,11 +1050,10 @@ fn spawn_crawl(entries: Vec<GuildApiEntry>, idle_hours: u32) {
             .into_iter()
             .filter_map(|e| e.guild_api.map(|api| crawl_guild(e.id, api, idle_hours)));
         // Each guild's sessions, and the chain-wide player tables from ours.
-        let apis: Vec<(String, String)> = entries_kept.iter().filter_map(|e| e.guild_api.clone().map(|a| (e.id.clone(), a))).collect();
         tokio::join!(
             async {
                 futures_util::future::join_all(jobs).await;
-                search_elsewhere(apis).await;
+                search_elsewhere(servers.clone()).await;
             },
             crate::mcp::onboarding_players::crawl(replicants_error, guild_ids, telemetry_players())
         );
@@ -960,7 +1061,7 @@ fn spawn_crawl(entries: Vec<GuildApiEntry>, idle_hours: u32) {
         crate::mcp::cache_store::save_in_background(CACHE_NAME, snapshot);
         crate::mcp::onboarding_players::finish_round(&telemetry_players());
         crate::mcp::onboarding_history::record_chain(&crate::mcp::onboarding_players::snapshot_for(false), now_ms());
-        record_server_totals(&entries_kept).await;
+        record_server_totals(&servers).await;
         {
             let mut st = CRAWL.lock().unwrap_or_else(|p| p.into_inner());
             st.finished = Some(Instant::now());
@@ -981,8 +1082,8 @@ pub fn start_history_ticker() {
         tokio::time::sleep(HISTORY_FIRST_TICK).await;
         loop {
             if now_ms() - crate::mcp::onboarding_history::last_ms() > HISTORY_MAX_AGE_MS && crawl_due(false) {
-                if let Ok((entries, _, _)) = directory(false).await {
-                    spawn_crawl(entries, DEFAULT_IDLE_HOURS);
+                if let Ok((entries, servers, _, _)) = directory(false).await {
+                    spawn_crawl(entries, servers, DEFAULT_IDLE_HOURS);
                 }
             }
             tokio::time::sleep(HISTORY_TICK).await;
@@ -1126,6 +1227,13 @@ fn funnel_started(raw: &[Value]) -> Option<f64> {
         .reduce(f64::max)
 }
 
+/// Sessions that opened signup and that finished it, from one server's funnel.
+fn signup_counts(a: &GuildAggregate) -> (Option<f64>, Option<f64>) {
+    let raw = a.funnels.get(PHASES[0]);
+    let signed = raw.and_then(|r| r.iter().find(|s| text(s.get("step_key")) == PLAYER_STEP)).and_then(|s| num(s.get("reached")));
+    (raw.and_then(|r| funnel_started(r)), signed)
+}
+
 /// `[signup sessions opened, signups finished]` from one guild's read, when it answered.
 fn signup_totals(a: &GuildAggregate) -> Option<[f64; 2]> {
     if a.error.is_some() {
@@ -1152,21 +1260,21 @@ fn server_day(version: &str, read: &[(String, &GuildAggregate)]) -> Option<crate
         version: version.to_string(),
         signups_started: guilds.values().map(|t| t[0]).sum(),
         signed_up: guilds.values().map(|t| t[1]).sum(),
-        tutorial_players: unique("players"),
-        tutorial_completed: unique("completed"),
+        tutorial_players: Some(unique("players")),
+        tutorial_completed: Some(unique("completed")),
         guilds,
         partial,
+        per_server: true,
     })
 }
 
 /// Write today's server totals without the card open: the crawl that keeps
 /// the daily record going calls this when it ends.
-async fn record_server_totals(entries: &[GuildApiEntry]) {
-    let Ok((_, versions, _)) = directory(false).await else { return };
+async fn record_server_totals(servers: &[Server]) {
+    let Ok((_, _, versions, _)) = directory(false).await else { return };
     let Some(version) = versions.first().cloned() else { return };
-    let with_api: Vec<(&String, &str)> = entries.iter().filter_map(|e| e.guild_api.as_deref().map(|a| (&e.id, a))).collect();
-    let aggs = futures_util::future::join_all(with_api.iter().map(|(g, api)| guild_aggregate(g, api, &version, DEFAULT_IDLE_HOURS, None, false, false))).await;
-    let read: Vec<(String, &GuildAggregate)> = with_api.iter().map(|(g, _)| (*g).clone()).zip(aggs.iter()).collect();
+    let aggs = futures_util::future::join_all(servers.iter().map(|sv| guild_aggregate(&sv.host, &sv.api, &version, DEFAULT_IDLE_HOURS, None, false, false))).await;
+    let read: Vec<(String, &GuildAggregate)> = servers.iter().map(|sv| sv.host.clone()).zip(aggs.iter()).collect();
     if let Some(day) = server_day(&version, &read) {
         crate::mcp::onboarding_history::record_server(day, now_ms());
     }
@@ -1397,7 +1505,9 @@ pub async fn terminal_onboarding(
     let active_days = active_days.filter(|d| (1..=365).contains(d)).unwrap_or(DEFAULT_ACTIVE_DAYS);
     let filters = filters.unwrap_or_default();
     let all = filters.include_excluded == Some(true);
-    let (entries, mut versions, catalogs) = directory(fresh).await?;
+    let (entries, servers, mut versions, catalogs) = directory(fresh).await?;
+    let server_of: HashMap<&str, &Server> = servers.iter().flat_map(|sv| sv.guilds.iter().map(move |g| (g.as_str(), sv))).collect();
+    let shared_hosts: HashSet<&str> = servers.iter().filter(|sv| sv.shared()).map(|sv| sv.host.as_str()).collect();
     let now = now_ms();
     let cutoff = now - active_days as i64 * 86_400_000;
 
@@ -1406,6 +1516,9 @@ pub async fn terminal_onboarding(
     let is_test = |pid: &str| !all && universe.tests.contains_key(pid);
     let mut sessions_all = PLAYERS.lock().unwrap_or_else(|p| p.into_inner()).clone();
     sessions_all.retain(|pid, _| !is_test(pid));
+    for (pid, s) in sessions_all.iter_mut() {
+        s.guild = owner_guild(universe.players.get(pid).map(|p| p.guild.as_str()), &s.guild, false);
+    }
     versions = sort_versions(versions.into_iter().chain(sessions_all.values().map(|s| s.version.clone()).filter(|v| !v.is_empty())).collect());
     let version = version
         .filter(|v| !v.trim().is_empty())
@@ -1413,7 +1526,7 @@ pub async fn terminal_onboarding(
         .unwrap_or_else(|| format!("{VERSION_PREFIX}1"));
 
     if crawl_due(fresh) {
-        spawn_crawl(entries.clone(), idle_hours);
+        spawn_crawl(entries.clone(), servers.clone(), idle_hours);
     }
     start_history_ticker();
 
@@ -1424,14 +1537,18 @@ pub async fn terminal_onboarding(
     } else {
         vec![version.clone()]
     };
-    let guild_reads = futures_util::future::join_all(entries.iter().filter_map(|e| e.guild_api.as_deref().map(|api| (e, api))).flat_map(|(e, api)| {
-        compared_versions.iter().map(move |v| async move { ((e.id.clone(), v.clone()), guild_runs(&e.id, api, v, idle_hours, all, fresh).await) })
+    let guild_reads = futures_util::future::join_all(servers.iter().flat_map(|sv| {
+        compared_versions.iter().map(move |v| async move { ((sv.host.clone(), v.clone()), guild_runs(&sv.host, &sv.api, v, idle_hours, all, fresh).await) })
     }))
     .await;
     let runs_of: HashMap<(String, String), GuildRuns> = guild_reads
         .into_iter()
         .map(|(k, mut g)| {
             g.runs.retain(|r| r.player.as_deref().map_or(true, |p| !is_test(p)));
+            for r in &mut g.runs {
+                let chain = r.player.as_deref().and_then(|p| universe.players.get(p)).map(|p| p.guild.as_str());
+                r.guild = owner_guild(chain, &r.guild, shared_hosts.contains(r.guild.as_str()));
+            }
             (k, g)
         })
         .collect();
@@ -1479,26 +1596,30 @@ pub async fn terminal_onboarding(
     let base = segments(&Filters { compare: None, ..filters.clone() }, &guild_labels, &interfaces, &versions).remove(0);
     let seg_version = |seg: &Seg| seg.version.clone().unwrap_or_else(|| version.clone());
 
-    // The server's aggregates: every (guild, design, interface) a segment needs,
-    // plus each guild unfiltered for the Guilds page.
-    let with_api: Vec<&GuildApiEntry> = entries.iter().filter(|e| e.guild_api.is_some()).collect();
+    // The servers' aggregates: every (host, design, interface) a segment needs,
+    // plus each server unfiltered for the Guilds page.
     // Replicants sign up from code and record no telemetry, so the servers'
     // funnel is the humans' and a replicants-only segment has none.
     let signup_guilds = |seg: &Seg| -> Option<Vec<String>> {
         if seg.active.is_some() || seg.interface.as_deref() == Some(NO_INTERFACE) || seg.replicant == Some(true) || seg.tutorial.is_some() {
             return None;
         }
-        Some(with_api.iter().filter(|e| seg.guild.as_ref().map_or(true, |g| *g == e.id)).map(|e| e.id.clone()).collect())
+        let Some(g) = seg.guild.as_deref() else { return Some(servers.iter().map(|sv| sv.host.clone()).collect()) };
+        match server_of.get(g) {
+            // Its sessions cannot be told from the other guilds'.
+            Some(sv) if sv.shared() => None,
+            sv => Some(sv.iter().map(|sv| sv.host.clone()).collect()),
+        }
     };
     type Combo = (String, String, Option<String>);
-    let mut combos: HashSet<Combo> = with_api.iter().map(|e| (e.id.clone(), version.clone(), None)).collect();
+    let mut combos: HashSet<Combo> = servers.iter().map(|sv| (sv.host.clone(), version.clone(), None)).collect();
     for seg in &segs {
         for g in signup_guilds(seg).unwrap_or_default() {
             combos.insert((g, seg_version(seg), seg.interface.clone()));
         }
     }
     let combos: Vec<Combo> = combos.into_iter().collect();
-    let api_of: HashMap<&str, &str> = with_api.iter().map(|e| (e.id.as_str(), e.guild_api.as_deref().unwrap_or_default())).collect();
+    let api_of: HashMap<&str, &str> = servers.iter().map(|sv| (sv.host.as_str(), sv.api.as_str())).collect();
     let aggs = futures_util::future::join_all(combos.iter().map(|(g, v, i)| {
         guild_aggregate(g, api_of.get(g.as_str()).copied().unwrap_or_default(), v, idle_hours, i.as_deref(), all, fresh)
     }))
@@ -1609,7 +1730,9 @@ pub async fn terminal_onboarding(
                     let failed = read.len() < gs.len() || read.iter().any(|(_, a)| a.error.is_some() && !a.missing);
                     let cur: BTreeMap<String, [f64; 2]> = read.iter().filter_map(|(g, a)| signup_totals(a).map(|t| ((*g).clone(), t))).collect();
                     let cur = (!failed && !cur.is_empty()).then_some(cur);
-                    crate::mcp::pirate::server_windows(&history_all, cur.as_ref(), &seg_v, seg.guild.as_deref(), now)
+                    // The record is keyed by each server's host.
+                    let host = seg.guild.as_ref().map(|g| gs.first().unwrap_or(g).as_str());
+                    crate::mcp::pirate::server_windows(&history_all, cur.as_ref(), &seg_v, host, now)
                 })
                 .unwrap_or(Value::Null);
 
@@ -1626,6 +1749,9 @@ pub async fn terminal_onboarding(
 
             json!({
                 "key": seg.key, "label": seg.label,
+                // Set when this is one guild of several on a server: what the
+                // server counts cannot be told apart by guild.
+                "shared_server": seg.guild.as_deref().and_then(|g| server_of.get(g)).filter(|sv| sv.shared()).map(|sv| json!({ "host": sv.host, "guilds": sv.guilds.len() })),
                 "tracked": tracked,
                 "players": members.len(), "active": active, "inactive": members.len() - active,
                 "active_rate": ratio(active, members.len()),
@@ -1743,19 +1869,40 @@ pub async fn terminal_onboarding(
             },
         })
     };
+    let human_run = |r: &Run| base.replicant.map_or(true, |x| x == r.player.as_deref().map_or(false, |p| is_rep(p)));
+    // Each server once, whoever publishes it.
+    let server_rows: Vec<Value> = servers
+        .iter()
+        .map(|sv| {
+            let a = agg.get(&(sv.host.clone(), version.clone(), None));
+            let (started, signed) = a.map_or((None, None), signup_counts);
+            let read = runs_of.get(&(sv.host.clone(), version.clone())).filter(|g| g.read);
+            json!({
+                "host": sv.host, "api": api_key(&sv.api).trim_end_matches("/api"), "guilds": sv.guilds,
+                "error": a.and_then(|a| a.error.clone()), "no_telemetry": a.map_or(false, |a| a.missing),
+                "started": started, "signed_up": signed,
+                "outcome": a.map(|a| a.outcome.clone()).unwrap_or(Value::Null),
+                "tutorial_players": a.map(|a| a.players.clone()).unwrap_or(Value::Null),
+                "runs": read.map(|g| g.runs.iter().filter(|r| human_run(r)).count()),
+                "no_player": read.map(|g| g.runs.iter().filter(|r| r.player.is_none()).count()),
+            })
+        })
+        .collect();
     let guilds: Vec<Value> = entries
         .iter()
         .map(|e| {
-            let a = agg.get(&(e.id.clone(), version.clone(), None));
-            let signup = a.and_then(|a| a.funnels.get(PHASES[0]));
-            let first = signup.and_then(|r| funnel_started(r));
-            let signed = signup.and_then(|r| r.iter().find(|s| text(s.get("step_key")) == PLAYER_STEP)).and_then(|s| num(s.get("reached")));
+            let sv = server_of.get(e.id.as_str()).copied();
+            let shared = sv.map_or(false, |sv| sv.shared());
+            let a = sv.and_then(|sv| agg.get(&(sv.host.clone(), version.clone(), None)));
+            // Only a guild alone on its server has that server's figures.
+            let own = a.filter(|_| !shared);
+            let (first, signed) = own.map_or((None, None), signup_counts);
             let mine: Vec<&PlayerSession> = sessions_all.iter().filter(|(pid, s)| s.guild == e.id && !is_rep(pid)).map(|(_, s)| s).collect();
             let all: Vec<(&String, &crate::mcp::onboarding_players::PlayerFacts)> = players.iter().filter(|(_, p)| p.guild == e.id).collect();
             let members: Vec<_> = all.iter().filter(|(pid, _)| base.replicant.map_or(true, |r| r == is_rep(pid))).map(|(_, p)| *p).collect();
-            let guild_runs = runs_of.get(&(e.id.clone(), version.clone()));
+            let guild_runs = sv.and_then(|sv| runs_of.get(&(sv.host.clone(), version.clone())));
             let read = guild_runs.filter(|g| g.read);
-            let human_runs = read.map(|g| g.runs.iter().filter(|r| base.replicant.map_or(true, |x| x == r.player.as_deref().map_or(false, |p| is_rep(p)))).count());
+            let human_runs = read.map(|_| runs_all().filter(|r| r.guild == e.id && r.version == version && human_run(r)).count());
             json!({
                 "id": e.id, "name": e.name, "tag": e.tag,
                 "status": if e.guild_api.is_none() { "no_api" } else if a.and_then(|a| a.error.as_ref()).is_some() { "error" } else { "ok" },
@@ -1763,11 +1910,13 @@ pub async fn terminal_onboarding(
                 // Serves no onboarding routes: records no telemetry (not a failure).
                 "no_telemetry": a.map_or(false, |a| a.missing),
                 "started": first, "signed_up": signed,
-                "outcome": a.map(|a| a.outcome.clone()).unwrap_or(Value::Null),
+                "host": sv.map(|sv| sv.host.clone()),
+                "shared_by": sv.filter(|sv| sv.shared()).map(|sv| sv.guilds.len()),
+                "outcome": own.map(|a| a.outcome.clone()).unwrap_or(Value::Null),
                 "runs": human_runs,
                 "runs_error": guild_runs.and_then(|g| g.error.clone()),
-                "no_player": read.map(|g| g.runs.iter().filter(|r| r.player.is_none()).count()),
-                "tutorial_players": a.map(|a| a.players.clone()).unwrap_or(Value::Null),
+                "no_player": read.filter(|_| !shared).map(|g| g.runs.iter().filter(|r| r.player.is_none()).count()),
+                "tutorial_players": own.map(|a| a.players.clone()).unwrap_or(Value::Null),
                 "sampled": mine.iter().filter(|s| !s.events.is_empty()).count(),
                 "untracked": mine.iter().filter(|s| s.events.is_empty()).count(),
                 "players": members.len(),
@@ -1782,7 +1931,7 @@ pub async fn terminal_onboarding(
     // Only the default population is written down: a day read with excluded
     // players included would read as a jump and back.
     if versions.first() == Some(&version) && !all {
-        let read: Vec<(String, &GuildAggregate)> = with_api.iter().filter_map(|e| agg.get(&(e.id.clone(), version.clone(), None)).map(|a| (e.id.clone(), a))).collect();
+        let read: Vec<(String, &GuildAggregate)> = servers.iter().filter_map(|sv| agg.get(&(sv.host.clone(), version.clone(), None)).map(|a| (sv.host.clone(), a))).collect();
         if let Some(day) = server_day(&version, &read) {
             crate::mcp::onboarding_history::record_server(day, now);
         }
@@ -1800,6 +1949,7 @@ pub async fn terminal_onboarding(
         "options": { "interfaces": interfaces, "guilds": guild_labels.iter().map(|(id, l)| json!({ "id": id, "label": l })).collect::<Vec<_>>() },
         "segments": out_segs,
         "guilds": guilds,
+        "servers": server_rows,
         "recent": recent,
         "runs": runs,
         "stopped": stopped,
@@ -2121,10 +2271,51 @@ mod tests {
             ("1-6004".to_string(), sess("0-1", false, now - 8 * 24 * 3_600_000)),
         ]
         .into();
-        let apis = vec![("0-1".to_string(), "a".to_string()), ("0-5".to_string(), "b".to_string())];
-        let plan = elsewhere_plan(&all, &apis, now);
+        let servers = vec![server("0-1", "a", &["0-1"]), server("0-5", "b", &["0-5", "0-7", "0-8"])];
+        let plan = elsewhere_plan(&all, &servers, now);
         assert_eq!(plan.iter().map(|(p, _)| p.as_str()).collect::<Vec<_>>(), vec!["1-6004", "1-6001"], "empty, not searched this week, newest first");
-        assert_eq!(plan[1].1, vec![("0-1".to_string(), "a".to_string())], "never the guild already asked");
+        assert_eq!(plan[1].1, vec![("0-1".to_string(), "a".to_string())], "never the server already asked");
+        // A sharer's player was already asked for on the shared server.
+        let from_sharer: HashMap<String, PlayerSession> = [("1-6005".to_string(), sess("0-8", false, 0))].into();
+        assert_eq!(elsewhere_plan(&from_sharer, &servers, now)[0].1, vec![("0-1".to_string(), "a".to_string())]);
+        assert!(elsewhere_plan(&from_sharer, &servers[1..], now).is_empty());
+    }
+
+    fn server(host: &str, api: &str, guilds: &[&str]) -> Server {
+        Server { host: host.into(), api: api.into(), guilds: guilds.iter().map(|g| g.to_string()).collect() }
+    }
+
+    #[test]
+    fn guilds_that_publish_one_api_are_one_server() {
+        let e = |id: &str, api: Option<&str>| GuildApiEntry { id: id.into(), name: String::new(), tag: String::new(), guild_api: api.map(String::from), error: None };
+        let entries = vec![
+            e("0-1", Some("https://crew.example/api")),
+            e("0-10", Some("http://Beta.example/api")),
+            e("0-2", None),
+            e("0-5", Some("https://beta.example/api")),
+            e("0-8", Some("https://beta.example:443/api/")),
+            e("0-4", Some("https://beta.example/other")),
+        ];
+        let hosts: HashMap<String, String> = [(api_key("https://beta.example/api"), "0-8".to_string()), (api_key("https://crew.example/api"), "0-99".to_string())].into();
+        let got = group_servers(&entries, &hosts);
+        assert_eq!(
+            got.iter().map(|s| (s.host.as_str(), s.guilds.join(" "))).collect::<Vec<_>>(),
+            vec![("0-1", "0-1".to_string()), ("0-4", "0-4".to_string()), ("0-8", "0-5 0-8 0-10".to_string())],
+            "one row per server; the host is who it says it is, unless that guild is not on chain"
+        );
+        assert!(got[2].shared() && !got[0].shared());
+        assert_eq!(got[2].api, "https://beta.example/api", "https is preferred");
+        assert_eq!(group_servers(&entries, &HashMap::new())[2].host, "0-5", "no answer: the lowest-numbered guild, not the lowest string");
+        assert_eq!(got.iter().map(|s| s.guilds.len()).sum::<usize>(), 5, "every guild with an API is on exactly one");
+    }
+
+    #[test]
+    fn a_run_belongs_to_its_players_guild() {
+        assert_eq!(owner_guild(Some("0-8"), "0-5", true), "0-8");
+        assert_eq!(owner_guild(Some("0-8"), "0-1", false), "0-8", "a player who moved counts where they are");
+        assert_eq!(owner_guild(None, "0-1", false), "0-1");
+        assert_eq!(owner_guild(None, "0-5", true), "", "no player on a shared server: no guild's");
+        assert_eq!(owner_guild(Some(""), "0-5", true), "");
     }
 
     #[test]
@@ -2224,6 +2415,24 @@ mod tests {
         let d = crate::guild_directory::guild_api_directory().await.expect("directory");
         eprintln!("{}", serde_json::to_string_pretty(&d).unwrap());
         assert!(d.iter().any(|e| e.guild_api.is_some()), "no guild publishes an API");
+    }
+
+    /// Live: the guilds grouped by server (no login; writes nothing).
+    /// `cargo test --bin structs-app -- --ignored --nocapture live_servers`
+    #[tokio::test]
+    #[ignore]
+    async fn live_servers() {
+        let entries = crate::guild_directory::guild_api_directory().await.expect("directory");
+        let hosts = read_hosts(&entries).await;
+        let servers = group_servers(&entries, &hosts);
+        for sv in &servers {
+            eprintln!("{} {} {:?}", sv.host, sv.api, sv.guilds);
+        }
+        let with_api = entries.iter().filter(|e| e.guild_api.is_some()).count();
+        assert_eq!(servers.iter().map(|s| s.guilds.len()).sum::<usize>(), with_api);
+        for d in crate::mcp::onboarding_history::folded(&servers) {
+            eprintln!("{} {:?}", d.day, d.server.map(|s| (s.signups_started, s.signed_up, s.tutorial_players, s.guilds)));
+        }
     }
 
     /// Live: each guild's login accepts a signature for OUR guild id and gets

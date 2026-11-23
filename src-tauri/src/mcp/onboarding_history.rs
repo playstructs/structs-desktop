@@ -63,15 +63,22 @@ pub struct ServerDay {
     pub version: String,
     pub signups_started: f64,
     pub signed_up: f64,
-    pub tutorial_players: f64,
-    pub tutorial_completed: f64,
-    /// Each guild's own `[signups started, signups finished]`.
+    /// `None`: not recoverable (`drop_shared`).
+    #[serde(default)]
+    pub tutorial_players: Option<f64>,
+    #[serde(default)]
+    pub tutorial_completed: Option<f64>,
+    /// Each server's own `[signups started, signups finished]`, by its host guild.
     #[serde(default)]
     pub guilds: BTreeMap<String, [f64; 2]>,
     /// A guild that records telemetry failed to answer: `guilds` holds the
     /// rest, and the summed totals are not a reading (they would dip).
     #[serde(default)]
     pub partial: bool,
+    /// Written with each server counted once. Older rows may hold one shared
+    /// server under every guild that publishes it.
+    #[serde(default)]
+    pub per_server: bool,
 }
 
 /// (metric, unit, label), for the Chart card.
@@ -178,6 +185,54 @@ pub fn record_server(server: ServerDay, now: i64) {
     }
 }
 
+/// Fold one row's repeats of a shared server into its host. The signup
+/// totals are re-summed from the guilds kept; the tutorial totals were only
+/// kept as sums, so a row with repeats has none.
+fn fold_shared(day: &mut ServerDay, servers: &[crate::mcp::onboarding::Server]) -> bool {
+    if day.per_server {
+        return false;
+    }
+    let mut dropped = 0;
+    for sv in servers.iter().filter(|sv| sv.shared()) {
+        let held: Vec<String> = sv.guilds.iter().filter(|g| **g != sv.host && day.guilds.contains_key(*g)).cloned().collect();
+        let mut copies = held.iter().filter_map(|g| day.guilds.remove(g)).collect::<Vec<_>>();
+        if !copies.is_empty() && !day.guilds.contains_key(&sv.host) {
+            day.guilds.insert(sv.host.clone(), copies.remove(0));
+        }
+        dropped += copies.len();
+    }
+    if dropped == 0 {
+        return false;
+    }
+    day.signups_started = day.guilds.values().map(|t| t[0]).sum();
+    day.signed_up = day.guilds.values().map(|t| t[1]).sum();
+    (day.tutorial_players, day.tutorial_completed) = (None, None);
+    true
+}
+
+/// The repaired rows, for a read-only look.
+#[cfg(test)]
+pub fn folded(servers: &[crate::mcp::onboarding::Server]) -> Vec<Day> {
+    let mut rows: Vec<Day> = crate::mcp::cache_store::load(CACHE_NAME).unwrap_or_default();
+    rows.iter_mut().filter_map(|r| r.server.as_mut()).for_each(|d| {
+        fold_shared(d, servers);
+    });
+    rows.into_iter().filter(|r| r.server.is_some()).collect()
+}
+
+/// Repair days recorded while a shared server was read once per guild
+/// (2026-11-21 to the fix). Safe to run again: a repaired row has no repeats.
+pub fn drop_shared(servers: &[crate::mcp::onboarding::Server]) {
+    let mut rows = HISTORY.lock().unwrap_or_else(|p| p.into_inner());
+    let mut changed = false;
+    for d in rows.iter_mut().filter_map(|r| r.server.as_mut()) {
+        changed |= fold_shared(d, servers);
+    }
+    if changed {
+        save(&rows);
+    }
+}
+
 pub fn recent(n: usize) -> Vec<Day> {
     let rows = HISTORY.lock().unwrap_or_else(|p| p.into_inner());
     rows[rows.len().saturating_sub(n)..].to_vec()
@@ -203,8 +258,8 @@ fn value_of(d: &Day, metric: &str) -> Option<f64> {
         "raided" => d.raided as f64,
         "signups_started" => s?.signups_started,
         "signed_up" => s?.signed_up,
-        "tutorial_players" => s?.tutorial_players,
-        "tutorial_completed" => s?.tutorial_completed,
+        "tutorial_players" => s?.tutorial_players?,
+        "tutorial_completed" => s?.tutorial_completed?,
         _ => return None,
     })
 }
@@ -212,7 +267,7 @@ fn value_of(d: &Day, metric: &str) -> Option<f64> {
 /// `(ts_ms, value)` for one metric, for the Chart card.
 pub fn samples(metric: &str) -> Vec<(f64, f64)> {
     if DERIVED.contains(&metric) {
-        return derived(&crate::mcp::onboarding_players::snapshot(), metric, now_ms());
+        return derived(&crate::mcp::onboarding_players::snapshot_for(false), metric, now_ms());
     }
     let rows = HISTORY.lock().unwrap_or_else(|p| p.into_inner());
     current(&rows).filter_map(|d| value_of(d, metric).map(|v| (d.ts_ms as f64, v))).collect()
@@ -297,12 +352,34 @@ mod tests {
     }
 
     #[test]
+    fn days_that_counted_a_shared_server_once_per_guild_are_folded() {
+        use crate::mcp::onboarding::Server;
+        let sv = |host: &str, gs: &[&str]| Server { host: host.into(), api: String::new(), guilds: gs.iter().map(|g| g.to_string()).collect() };
+        let servers = vec![sv("0-1", &["0-1"]), sv("0-5", &["0-5", "0-7", "0-8", "0-9"])];
+        // 2026-11-21 as it was written.
+        let mut d: ServerDay = serde_json::from_str(r#"{"version":"tutorial-4","signups_started":162,"signed_up":69,"tutorial_players":95,"tutorial_completed":43,"partial":false,
+            "guilds":{"0-1":[2,1],"0-5":[40,17],"0-7":[40,17],"0-8":[40,17],"0-9":[40,17]}}"#).unwrap();
+        assert!(fold_shared(&mut d, &servers));
+        assert_eq!((d.signups_started, d.signed_up), (42.0, 18.0));
+        assert_eq!(d.guilds.keys().cloned().collect::<Vec<_>>(), vec!["0-1", "0-5"]);
+        assert_eq!((d.tutorial_players, d.tutorial_completed), (None, None), "sums that cannot be taken apart are a gap");
+        assert!(!fold_shared(&mut d, &servers), "once");
+        // One guild on the server that day: nothing repeated, nothing lost.
+        let mut one: ServerDay = serde_json::from_str(r#"{"version":"tutorial-4","signups_started":28,"signed_up":14,"tutorial_players":22,"tutorial_completed":12,"guilds":{"0-1":[1,1],"0-5":[27,13]}}"#).unwrap();
+        assert!(!fold_shared(&mut one, &servers));
+        assert_eq!((one.signups_started, one.tutorial_players), (28.0, Some(22.0)));
+        // A row written since is never touched: a guild may have moved onto the server.
+        let mut new = ServerDay { per_server: true, guilds: [("0-5".to_string(), [4.0, 2.0]), ("0-7".to_string(), [3.0, 1.0])].into(), ..Default::default() };
+        assert!(!fold_shared(&mut new, &servers) && new.guilds.len() == 2);
+    }
+
+    #[test]
     fn a_metric_without_a_server_figure_is_a_gap_not_a_zero() {
         let d = Day::default();
         assert_eq!(value_of(&d, "signed_up"), None);
         assert_eq!(value_of(&d, "humans"), Some(0.0));
         assert!(
-            METRICS.iter().filter(|(m, _, _)| !DERIVED.contains(m)).all(|(m, _, _)| value_of(&Day { server: Some(ServerDay::default()), ..Default::default() }, m).is_some()),
+            METRICS.iter().filter(|(m, _, _)| !DERIVED.contains(m)).all(|(m, _, _)| value_of(&Day { server: Some(ServerDay { tutorial_players: Some(0.0), tutorial_completed: Some(0.0), ..Default::default() }), ..Default::default() }, m).is_some()),
             "every recorded metric has a value"
         );
     }

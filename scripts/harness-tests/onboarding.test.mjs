@@ -226,7 +226,9 @@ if (host) {
   const tri = [...host.querySelectorAll('.ob-triangle .ob-cohort[data-week]')];
   check('…the triangle: a row per join week, oldest first, a cell per week since joining, blank where not lived yet', tri.length === 12 && tri[0].querySelectorAll('.ob-heat-none').length === 0 && tri[11].querySelectorAll('.ob-heat-none').length === 8 && /^≈ /.test(text(tri[0].children[0])), tri.map((r) => r.querySelectorAll('.ob-heat-none').length).join());
   check('…players in every cell, shaded by share of the week\'s joiners, a small week a quiet count', /^\d+$/.test(text(tri[0].children[3])) && /^8 of 20 · 40%/.test(tri[0].children[3].title) && tri[0].children[3].classList.contains('ob-heat-2') && tri[11].children[2].classList.contains('ob-heat-count') && text(tri[11].children[2]) === '6', tri[0].children[3].title + ' | ' + [...tri[0].children].map((c) => c.className).join(','));
-  check('…a week after joining that began before the activity feed reaches is drawn faint, and says why', tri[0].querySelectorAll('.ob-heat.is-partial').length === 8 && tri[10].querySelectorAll('.ob-heat.is-partial').length === 0 && /only mines, refines and raids count/.test(tri[0].querySelector('.ob-heat.is-partial').title), [0, 10].map((i) => tri[i].querySelectorAll('.ob-heat.is-partial').length).join());
+  /* The fixture's weeks move with today's weekday. */
+  const fed = Date.parse(new Date(Date.now() - 30 * 864e5).toISOString().slice(0, 10)), faint = Array.from({ length: 8 }, (_, i) => Date.parse(tri[0].dataset.week) + 7 * i * 864e5).filter((t) => t < fed).length;
+  check('…a week after joining that began before the activity feed reaches is drawn faint, and says why', tri[0].querySelectorAll('.ob-heat.is-partial').length === faint && tri[10].querySelectorAll('.ob-heat.is-partial').length === 0 && /only mines, refines and raids count/.test(tri[0].querySelector('.ob-heat.is-partial').title), [0, 10].map((i) => tri[i].querySelectorAll('.ob-heat.is-partial').length).join());
   check('…days played in the last 30', /^Days played/.test(text(host.querySelector('.ob-block[data-block="captivated"] .ob-title'))));
   const au = [...host.querySelectorAll('.ob-active-users .ob-row[data-player]')];
   check('…and the active users by name, most days played first, saying how many are listed', au.map((r) => r.dataset.player).join() === '1-61,1-195' && /^Active users · 3$/.test(text(host.querySelector('.ob-block[data-block="active_users"] .ob-title'))) && /2 listed of 3/.test(text(host.querySelector('.ob-block[data-block="active_users"]'))));
@@ -411,6 +413,28 @@ T.refresh(coldId, true);
 const settled = await until(() => /No tutorial sessions yet/.test(text(coldHost.querySelector('.ob-main'))) ? coldHost : null);
 check('once the crawl finished empty-handed, the page says there is nothing', !!settled, coldHost && text(coldHost.querySelector('.ob-main')));
 delete w.__HARNESS_OB_COLD__;
+
+// ── Several guilds on one server: its figures are counted once, and never as one guild's ──
+w.__HARNESS_OB_SHARED__ = true;
+T.setParams(coldId, { page: 'data', view: 'guilds', guild: '' });
+T.refresh(coldId, true);
+const sh = await until(() => coldHost.querySelector('.ob-servers .ob-row[data-server="0-5"]') && /3 guilds/.test(text(coldHost.querySelector('.ob-servers .ob-row[data-server="0-5"]'))) ? coldHost : null);
+check('SHARED SERVER: one row per server, with its own figures and its guilds', sh && sh.querySelectorAll('.ob-servers .ob-row[data-server]').length === 2 && /beta\.example ?3 guilds/.test(text(sh.querySelector('.ob-servers .ob-row[data-server="0-5"]'))) && /SN\.C · VTLY · RC/.test(text(sh.querySelector('.ob-servers'))) && /1,101 of 2,136/.test(text(sh.querySelector('.ob-servers'))), sh && text(sh.querySelector('.ob-servers')));
+check('…a guild on it shows no share of them', sh && ['0-5', '0-7', '0-10'].every((id) => text(sh.querySelector('.ob-guilds .ob-row[data-guild="' + id + '"]').children[5]) === 'shared' && text(sh.querySelector('.ob-guilds .ob-row[data-guild="' + id + '"]').children[6]) === 'shared') && /25%/.test(text(sh.querySelector('.ob-guilds .ob-row[data-guild="0-1"]').children[5])));
+await cgo('Data', 'Health');
+T.setParams(coldId, { page: 'data', view: 'health', guild: '' });
+await until(() => coldHost.querySelector('.ob-sources'));
+check('…sources count servers, and add each once', /2 of 2 servers/.test(text(coldHost.querySelector('.ob-sources .ob-row[data-source="Server funnels"]'))) && /1,102 players/.test(text(coldHost.querySelector('.ob-sources .ob-row[data-source="Unique players"]'))), text(coldHost.querySelector('.ob-sources')));
+check('…lost runs name the server and count once', /beta\.example \(3 guilds\)/.test(text(coldHost.querySelector('.ob-issue[data-issue="Runs with no player"]'))) && /2 of 40 runs/.test(text(coldHost.querySelector('.ob-issue[data-issue="Runs with no player"]'))), text(coldHost.querySelector('.ob-issues')));
+T.setParams(coldId, { page: 'overview', view: '', guild: '0-5' });
+const shp = await until(() => coldHost.querySelector('.ob[data-page="overview"] .ob-fg-row[data-funnel="started"].is-missing') ? coldHost : null);
+check('PIRATE for one of them: signups are not counted per guild, joiners still are', shp && /shared by 3 guilds/.test(text(shp.querySelector('.ob-fg-group[data-group="sessions"]'))) && /not counted per guild/.test(text(shp.querySelector('.ob-fg-row[data-funnel="signed"]'))) && !shp.querySelector('.ob-fg-row[data-funnel="joined"]').classList.contains('is-missing') && /not recorded/.test(text(shp.querySelector('.ob-fg-row[data-funnel="visited"]'))), shp && text(shp.querySelector('.ob-pf')));
+T.setParams(coldId, { page: 'acquisition', view: '', guild: '0-5' });
+const shj = await until(() => /Signups are not counted per guild on a server shared by 3 guilds/.test(text(coldHost.querySelector('.ob-main'))) ? coldHost : null);
+check('JOIN for one of them says so instead of drawing the whole server', !!shj && !shj.querySelector('.ob-funnel'), text(coldHost.querySelector('.ob-main')));
+T.setParams(coldId, { page: 'acquisition', view: '', guild: '0-1' });
+check('…a guild alone on its server still has its funnel', !!(await until(() => coldHost.querySelector('.ob-funnel .ob-row[data-step]'))));
+delete w.__HARNESS_OB_SHARED__;
 
 // ── A popped-out card: every chart door opens its own window ──
 const solo = await JSDOM.fromFile(harness, {

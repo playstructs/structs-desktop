@@ -129,6 +129,7 @@
     'Finished signups': 'Signup sessions that reached the end of signup (the employee record).',
     'Players': 'Human players on chain in scope: replicants and excluded players left out unless asked for.',
     'Test accounts': 'Accounts named like testers and test scripts make (T and a timestamp, ending in test or tester, QA, starting with Tutorial). Left out of every figure with the guilds\' excluded players.',
+    'Shared server': 'One server several guilds publish. Its signups and unique players are counted once, for all of them together: the server does not record which guild a signup was for.',
     'Excluded players': 'The guilds\' own exclusion lists plus test accounts by name.',
     'Activated': 'Refined alpha AND initiated a raid, with no deadline: the window decides how long they had. Dated at the later of the two firsts.',
     'Active': 'Did anything within the window: the latest of lastAction, a mine, a refine, a raid or a played day.',
@@ -464,11 +465,30 @@
   function when(ms) { return ms ? H.ago(ms) : '—'; }
   function sum(rows, f) { return rows.reduce(function (a, r) { return a + (Number(f(r)) || 0); }, 0); }
   function plural(n, one, many) { return int(n) + ' ' + (n === 1 ? one : many); }
+  /* Every guild server once. Several guilds may publish one server, whose
+   * figures cannot be told apart by guild. */
+  function serversOf(d) {
+    return d.servers || (d.guilds || []).filter(function (g) { return g.status !== 'no_api'; }).map(function (g) {
+      return Object.assign({ host: g.id, api: null, guilds: [g.id] }, { error: g.error, no_telemetry: g.no_telemetry, started: g.started, signed_up: g.signed_up, outcome: g.outcome, tutorial_players: g.tutorial_players, runs: g.runs, no_player: g.no_player });
+    });
+  }
+  function serverName(d, sv) { return sv.api || guildTags(d)[sv.host] || sv.host; }
+  /* Guilds whose joiners no server recorded. One on a shared server that
+   * answers does send telemetry: none of its few joiners signed up there. */
+  function silentGuilds(d, cov) {
+    var by = {};
+    (d.guilds || []).forEach(function (g) { by[g.id] = g; });
+    return ((cov && cov.guilds) || []).filter(function (x) {
+      var on = by[x.guild] || {};
+      return x.joined > 0 && !x.tracked && !(on.shared_by && on.status === 'ok' && !on.no_telemetry);
+    });
+  }
+  /* "shared by 12 guilds", on anything one guild of several cannot own. */
+  function sharedWords(n) { return 'shared by ' + plural(n, 'guild', 'guilds'); }
   /* [name, holds, read, follows, error, read?]. A source not read yet is not healthy. */
   function sourceRows(d) {
     var c = d.crawl || {}, p = c.players || {}, r = c.replicants || {}, round = p.round || {};
-    var guilds = d.guilds || [], apis = guilds.filter(function (g) { return g.status !== 'no_api'; });
-    var ok = guilds.filter(function (g) { return g.status === 'ok'; }).length;
+    var servers = serversOf(d), ok = servers.filter(function (x) { return !x.error; }).length;
     var runs = (d.segments || []).reduce(function (a, s) { return a + ((s.runs || {}).runs || 0); }, 0);
     var sessions = (d.segments || []).reduce(function (a, s) { return a + (s.sessions || 0); }, 0);
     var hist = d.history || [];
@@ -480,8 +500,8 @@
       ['Replicants', int(r.known) + ' confirmed · ' + int(r.likely) + ' suspected', when(r.read_ms) + (r.source ? ' · from the ' + r.source : ''), all, round.replicants_error, !!r.read_ms],
       ['Ledgers', int(p.human_ledgers) + ' of ' + int(p.humans) + ' humans', when(p.refreshed_ms), all, round.ledger_errors ? round.ledger_last_error : null, !!p.refreshed_ms],
       ['Signup sample', int(sessions) + ' sessions', when(c.finished_ms), all, c.finished_ms && !c.running && !sessions ? 'No sessions read' : null, sessions > 0],
-      ['Server funnels', ok + ' of ' + apis.length + ' guilds', when(d.generated_ms), server, null, ok > 0],
-      ['Unique players', int(sum(guilds, function (g) { return (g.tutorial_players || {}).players; })) + ' players', when(d.generated_ms), server, null, ok > 0],
+      ['Server funnels', ok + ' of ' + plural(servers.length, 'server', 'servers'), when(d.generated_ms), server, null, ok > 0],
+      ['Unique players', int(sum(servers, function (x) { return (x.tutorial_players || {}).players; })) + ' players', when(d.generated_ms), server, null, ok > 0],
       ['Runs', int(runs) + ' runs', when(d.generated_ms), all, null, ok > 0],
       ['Daily record', plural(hist.length, 'day', 'days'), hist.length ? 'through ' + shortDay(hist[hist.length - 1].day) : '—', 'Guild', null, hist.length > 0],
     ].map(function (r) {
@@ -499,11 +519,12 @@
     var failing = g.filter(function (x) { return x.status === 'error'; });
     if (failing.length) out.push({ level: 'issue', title: 'Guilds failing', where: names(failing), count: plural(sum(failing, function (x) { return x.players; }), 'player', 'players'), page: 'data', view: 'guilds', fix: 'Their API answers with an error: open the guild row for the message.' });
     /* Players are joining where nothing records their signup: the biggest gap in every funnel. */
-    var cov = ((d.segments || [])[0] || {}).coverage, silent = ((cov && cov.guilds) || []).filter(function (x) { return x.joined > 0 && !x.tracked; });
+    var cov = ((d.segments || [])[0] || {}).coverage, silent = silentGuilds(d, cov);
     if (silent.length) out.push({ level: 'issue', title: 'Guilds send no telemetry', where: names(silent.map(function (x) { return g.filter(function (y) { return y.id === x.guild; })[0] || { id: x.guild }; })),
       count: int(sum(silent, function (x) { return x.joined; })) + ' of ' + int(cov.joined) + ' joined since ' + shortDay(cov.since), page: 'data', view: 'guilds', fix: 'Their players\' signups and tutorial runs are not recorded: the guild must publish its API with onboarding telemetry.' });
-    var lost = g.filter(function (x) { return x.no_player > 0; }), noPlayer = sum(g, function (x) { return x.no_player; });
-    if (noPlayer) out.push({ level: 'notice', title: 'Runs with no player', where: names(lost), count: int(noPlayer) + ' of ' + int(sum(g, function (x) { return x.runs; })) + ' runs', page: 'onboarding', view: 'runs', fix: 'The run never recorded who played: the launch message was lost. Older app versions do this.' });
+    var svs = serversOf(d), lost = svs.filter(function (x) { return x.no_player > 0; }), noPlayer = sum(svs, function (x) { return x.no_player; });
+    var lostNames = lost.map(function (x) { return x.guilds.length > 1 ? serverName(d, x) + ' (' + plural(x.guilds.length, 'guild', 'guilds') + ')' : names([g.filter(function (y) { return y.id === x.guilds[0]; })[0] || { id: x.host }]); }).join(' · ');
+    if (noPlayer) out.push({ level: 'notice', title: 'Runs with no player', where: lostNames, count: int(noPlayer) + ' of ' + int(sum(svs, function (x) { return x.runs; })) + ' runs', page: 'onboarding', view: 'runs', fix: 'The run never recorded who played: the launch message was lost. Older app versions do this.' });
     var dark = g.filter(function (x) { return x.status === 'no_api'; });
     dark = dark.filter(function (x) { return !silent.some(function (y) { return y.guild === x.id; }); });
     if (dark.length) out.push({ level: 'notice', title: 'Guilds with no API', where: names(dark), count: plural(sum(dark, function (x) { return x.players; }), 'player', 'players') + ' unseen', page: 'data', view: 'guilds', fix: 'These guilds publish no API, so their signups and tutorial are not counted.' });
@@ -1080,7 +1101,9 @@
       { group: 'every', key: 'referred', stage: 'Referral', label: 'Brought a player', value: null, of: 'joined', unrecorded: true },
     ];
     var by = {};
-    rows.forEach(function (r) { by[r.key] = r; r.missing = r.value == null; r.ofValue = r.of && by[r.of] ? by[r.of].value : null; r.ofLabel = r.of && by[r.of] ? by[r.of].label : null; });
+    rows.forEach(function (r) { by[r.key] = r; r.missing = r.value == null; r.ofValue = r.of && by[r.of] ? by[r.of].value : null; r.ofLabel = r.of && by[r.of] ? by[r.of].label : null;
+      /* One guild of several on a server: counted, but not for it alone. */
+      if (seg && seg.shared_server && r.group === 'sessions' && r.missing && !r.unrecorded) r.shared = seg.shared_server.guilds; });
     return rows;
   }
   /* "refined 6 · raided 9 · both 2": the two roads and where they overlap. */
@@ -1098,6 +1121,7 @@
   function groupScope(seg, win, group) {
     if (group === 'sessions') {
       var x = srvWin(seg, win), since = telemetryBegan(seg) || (seg.pirate_server || {}).since;
+      if (seg && seg.shared_server) return 'Signup sessions · server ' + sharedWords(seg.shared_server.guilds);
       return 'Signup sessions · ' + (win === 'all' ? (since ? 'since ' + shortDay(since) : 'all recorded') : x && x.partial ? 'since ' + shortDay(x.partial) + ', the oldest reading' : x && x.since ? 'since ' + shortDay(x.since) + ', when telemetry began' : 'last ' + WIN_WORD[win]);
     }
     var c = cohortWin(seg, win);
@@ -1124,7 +1148,7 @@
         var name = H.el('div', 'ob-fg-name');
         name.appendChild(H.el('span', 'ob-fg-stage', r.stage));
         name.appendChild(H.el('span', 'ob-fg-label', r.label));
-        var what = r.unrecorded ? 'not recorded' : r.missing ? 'not recorded for this group' : r.parts ? partsWords(r)
+        var what = r.unrecorded ? 'not recorded' : r.shared ? sharedWords(r.shared) : r.missing ? 'not recorded for this group' : r.parts ? partsWords(r)
           : [r.what, ofWords(r.value, r.ofValue, (r.ofLabel || '').toLowerCase()) || (r.unit || 'players')].filter(Boolean).join(' · ');
         name.appendChild(H.el('span', 'ob-sub ob-fg-what', what));
         row.appendChild(name);
@@ -1143,7 +1167,7 @@
         } else {
           var bar = H.el('div', 'ob-fg-bar ' + stageCls);
           bar.style.width = r.missing ? '100%' : r.value > 0 ? Math.max(1, (ratio(r.value, top) || 0) * 100) + '%' : '0';
-          if (r.missing) bar.appendChild(H.el('span', 'ob-fg-note', 'not recorded'));
+          if (r.missing) bar.appendChild(H.el('span', 'ob-fg-note', r.shared ? 'not counted per guild' : 'not recorded'));
           track.appendChild(bar);
         }
         row.appendChild(track);
@@ -1190,7 +1214,7 @@
       if (segs.length > 1) line.appendChild(segLabel(s, i));
       line.appendChild(H.el('span', 'ob-v', 'Telemetry saw ' + int(c.tracked) + ' of ' + int(c.joined)));
       line.appendChild(sub('joined since ' + shortDay(c.since)));
-      (c.guilds || []).filter(function (g) { return g.joined > 0 && !g.tracked; }).sort(function (a, b) { return b.joined - a.joined; }).forEach(function (g) {
+      silentGuilds(ctx.d, c).sort(function (a, b) { return b.joined - a.joined; }).forEach(function (g) {
         line.appendChild(sub('· ' + (tags[g.guild] || g.guild) + ' sent none (' + int(g.joined) + ')'));
       });
       box.appendChild(line);
@@ -1328,7 +1352,9 @@
     var segs = ctx.segs.filter(function (s) { return s.signup; });
     if (!segs.length) {
       var f = d.filters || {};
-      if (f.compare === 'tutorial') box.appendChild(H.stateBlock('empty', 'The tutorial comes after signup'));
+      var sh = (ctx.segs[0] || {}).shared_server;
+      if (sh) box.appendChild(H.stateBlock('empty', 'Signups are not counted per guild on a server ' + sharedWords(sh.guilds)));
+      else if (f.compare === 'tutorial') box.appendChild(H.stateBlock('empty', 'The tutorial comes after signup'));
       else box.appendChild(emptyOr(d, 'No signups recorded'));
       if ((d.recent || []).length) box.appendChild(playerList(ctx, 'signups'));
       return box;
@@ -2016,8 +2042,9 @@
   // ── GUILDS ──
   function guildFacts(g, c) {
     var live = g.status === 'ok', o = g.outcome || {};
-    var rows = live ? [['Tutorial offered', int(o.offered)], ['Runs', int(g.runs)], ['Signups timed', int(g.sampled) + ' of ' + int(g.signed_up)], ['No telemetry', int(g.untracked)], ['No player', int(g.no_player)], ['Sessions read', c ? int(c.fetched) + ' / ' + int(c.todo) : '—']]
+    var rows = live ? [['Tutorial offered', int(o.offered)], ['Runs', int(g.runs)], ['Signups timed', int(g.sampled) + (g.signed_up == null ? '' : ' of ' + int(g.signed_up))], ['No telemetry', int(g.untracked)], ['No player', int(g.no_player)], ['Sessions read', c ? int(c.fetched) + ' / ' + int(c.todo) : '—']]
       : [['State', g.status === 'no_api' ? 'No API published' : 'Failing']];
+    if (g.shared_by) rows.push(['Server', sharedWords(g.shared_by)]);
     if (g.error) rows.push(['Error', g.error]);
     if (g.runs_error) rows.push(['Runs', g.runs_error]);
     if (c && c.last_error) rows.push(['Read', c.last_error]);
@@ -2038,10 +2065,10 @@
     ctx.st.guildSort = ctx.st.guildSort || { key: 'players', dir: -1 };
     var acc = { name: function (g) { return (g.name || g.id).toLowerCase(); }, players: function (g) { return g.players || 0; }, active: function (g) { return g.active || 0; },
       rate: function (g) { return ratio(g.active, g.players) || 0; }, signups: function (g) { return ratio(g.signed_up, g.started) || 0; }, finished: function (g) { var o = g.outcome || {}; return ratio(o.completed, o.offered) || 0; } };
-    var t = grid('ob-guilds', [{ label: 'Guild', k: 't', w: 'minmax(18ch, 1.2fr)', sort: 'name' }, { label: 'Active of players', k: 'b', w: 'minmax(10ch, 1.6fr)', opt: true },
+    var t = grid('ob-guilds', [{ label: 'Guild', k: 't', w: 'minmax(13ch, 1.2fr)', sort: 'name' }, { label: 'Active of players', k: 'b', w: 'minmax(7ch, 1fr)', opt: true },
       { label: 'Players', k: 'n', w: 'minmax(9ch, .55fr)', sort: 'players' }, { label: 'Active', k: 'n', w: 'minmax(8ch, .55fr)', sort: 'active' }, { label: 'Active %', k: 'n', w: 'minmax(9ch, .5fr)', opt: true, sort: 'rate' },
-      { label: 'Signups', k: 'n', w: 'minmax(14ch, .8fr)', opt: true, sort: 'signups', def: 'Finished signups as a share of signup starts, from the guild\'s own server.' },
-      { label: 'Tutorial', k: 'n', w: 'minmax(14ch, .8fr)', opt: true, sort: 'finished', def: 'Tutorial players who finished, from the guild\'s own server.' }, { label: '', k: 't', w: 'minmax(17ch, .9fr)' }],
+      { label: 'Signups', k: 'n', w: 'minmax(11ch, .7fr)', opt: true, sort: 'signups', def: 'Finished signups as a share of signup starts, from the guild\'s own server.' },
+      { label: 'Tutorial', k: 'n', w: 'minmax(11ch, .7fr)', opt: true, sort: 'finished', def: 'Tutorial players who finished, from the guild\'s own server.' }, { label: '', k: 't', w: 'minmax(17ch, .9fr)' }],
       ctx.st.guildSort, ctx.redraw);
     var top = gs.reduce(function (m, g) { return Math.max(m, g.players || 0); }, 0);
     H.sortBy(gs, ctx.st.guildSort, acc).forEach(function (g) {
@@ -2068,8 +2095,8 @@
         doors.appendChild(stuck);
       }
       var focusCell = doors;
-      var row = addRow(t, [name, strip, cell(int(g.players), 'ob-v'), int(g.active), share(g.active, g.players), live ? stack(pct(ratio(g.signed_up, g.started)), int(g.signed_up) + ' of ' + int(g.started)) : '—',
-        live ? stack(pct(ratio(o.completed, o.offered)), int(o.completed) + ' of ' + int(o.offered)) : '—', focusCell],
+      var row = addRow(t, [name, strip, cell(int(g.players), 'ob-v'), int(g.active), share(g.active, g.players), g.shared_by ? cell('shared', 'ob-sub', DEFS['Shared server']) : live ? stack(pct(ratio(g.signed_up, g.started)), int(g.signed_up) + ' of ' + int(g.started)) : '—',
+        g.shared_by ? cell('shared', 'ob-sub', DEFS['Shared server']) : live ? stack(pct(ratio(o.completed, o.offered)), int(o.completed) + ' of ' + int(o.offered)) : '—', focusCell],
         { cls: (live ? '' : 'is-quiet') + (mine === g.id ? ' is-mine' : ''), data: { guild: g.id } });
       drill(t, row, 'guild:' + g.id, function () { return guildFacts(g, crawl[g.id]); });
     });
@@ -2077,7 +2104,25 @@
     var b = block('Guilds · ' + int(gs.length), { key: 'guilds', scope: 'Every guild · now', noTag: true });
     b.appendChild(t);
     box.appendChild(b);
+    box.appendChild(serversBlock(d));
     return box;
+  }
+  /* The servers' own figures, each once, with the guilds that publish it. */
+  function serversBlock(d) {
+    var svs = serversOf(d), tags = guildTags(d), b = block('Servers · ' + int(svs.length), { key: 'servers', scope: 'All time', noTag: true, def: DEFS['Shared server'] });
+    if (!svs.length) { b.appendChild(H.stateBlock('empty', 'No guild publishes an API')); return b; }
+    var t = grid('ob-servers', [{ label: 'Server', k: 't', w: 'minmax(18ch, 1.2fr)' }, { label: 'Guilds', k: 't', w: 'minmax(12ch, 1.4fr)', opt: true }, { label: 'Signups', k: 'n', w: 'minmax(12ch, .8fr)' },
+      { label: 'Tutorial', k: 'n', w: 'minmax(12ch, .8fr)' }, { label: 'Runs', k: 'n', w: 'minmax(7ch, .4fr)', opt: true }]);
+    svs.slice().sort(function (a, c) { return (c.started || 0) - (a.started || 0); }).forEach(function (x) {
+      var o = x.outcome || {}, names = x.guilds.map(function (g) { return tags[g] || g; }), dead = x.error || x.no_telemetry;
+      var name = H.el('span', 'ob-c ob-step');
+      name.appendChild(H.el('span', null, serverName(d, x)));
+      name.appendChild(sub(x.guilds.length > 1 ? plural(x.guilds.length, 'guild', 'guilds') : names[0]));
+      addRow(t, [name, cell(names.join(' · '), 'ob-sub ob-wrap', names.join(' · ')), dead ? '—' : stack(pct(ratio(x.signed_up, x.started)), int(x.signed_up) + ' of ' + int(x.started)),
+        dead ? '—' : stack(pct(ratio(o.completed, o.offered)), int(o.completed) + ' of ' + int(o.offered)), int(x.runs)], { cls: dead ? 'is-quiet' : '', data: { server: x.host } });
+    });
+    b.appendChild(t);
+    return b;
   }
 
   // ── TRENDS ──
