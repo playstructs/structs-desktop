@@ -1,6 +1,7 @@
 // Prevents additional console window on Windows in release
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod fd_limit;
 mod game_state;
 mod guild_config;
 mod guild_directory;
@@ -19,6 +20,8 @@ mod deeplink;
 mod updater;
 
 fn main() {
+    fd_limit::raise_at_startup();
+
     // Windows WebView2 (Chromium) can crash the renderer with an "Out of Memory"
     // error page at launch when its GPU process / driver over-allocates. Disabling
     // the WebView's GPU compositor forces UI painting onto the CPU (cheap at the

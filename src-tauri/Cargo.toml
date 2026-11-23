@@ -39,6 +39,7 @@ sha2 = "0.10"
 rayon = "1.10"
 num_cpus = "1.16"
 # Replication gate: the 1-minute load average (getloadavg) against num_cpus.
+# fd_limit.rs: the open-file limit (setrlimit).
 libc = "0.2"
 dashmap = "6"
 hex = "0.4"

@@ -1,7 +1,8 @@
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 /// SN Corp — the default/onboarding guild for fresh installs.
 pub const DEFAULT_GUILD_ID: &str = "0-5";
@@ -348,47 +349,157 @@ fn migrate_stale_urls(configs: &mut [GuildConfig]) -> bool {
     changed
 }
 
-pub fn load_configs() -> Vec<GuildConfig> {
-    let path = config_path();
-    if !path.exists() {
-        let configs = default_configs();
-        save_configs(&configs).ok();
-        return configs;
-    }
-
-    let raw = fs::read_to_string(&path).ok();
-
-    // v2 envelope first, then legacy bare array.
-    if let Some(file) = raw
-        .as_deref()
-        .and_then(|s| serde_json::from_str::<ConfigFile>(s).ok())
-    {
-        let mut configs = file.guilds;
-        if migrate_stale_urls(&mut configs) {
-            save_configs(&configs).ok();
-        }
-        return configs;
-    }
-
-    let mut configs = raw
-        .as_deref()
-        .and_then(|s| serde_json::from_str::<Vec<GuildConfig>>(s).ok())
-        .unwrap_or_else(default_configs);
-    migrate_v1_to_v2(&mut configs, player_has_logged_in());
-    migrate_stale_urls(&mut configs);
-    save_configs(&configs).ok();
-    configs
+/// What the file said, kept apart because only some of these may be answered
+/// by writing defaults over it.
+enum FileRead {
+    /// No file: a fresh install.
+    Missing,
+    /// The OS would not let us read it (too many open files, permissions, …).
+    /// Says nothing about the contents, so nothing may be written.
+    Unreadable(String),
+    /// Read, but not a config: empty or truncated.
+    Corrupt,
+    V2(Vec<GuildConfig>),
+    V1(Vec<GuildConfig>),
 }
 
-pub fn save_configs(configs: &[GuildConfig]) -> Result<()> {
-    let path = config_path();
+fn read_file(path: &Path) -> FileRead {
+    let raw = match fs::read_to_string(path) {
+        Ok(raw) => raw,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return FileRead::Missing,
+        Err(e) if e.kind() == std::io::ErrorKind::InvalidData => return FileRead::Corrupt,
+        Err(e) => return FileRead::Unreadable(e.to_string()),
+    };
+    // v2 envelope first, then legacy bare array.
+    if let Ok(file) = serde_json::from_str::<ConfigFile>(&raw) {
+        return FileRead::V2(file.guilds);
+    }
+    match serde_json::from_str::<Vec<GuildConfig>>(&raw) {
+        Ok(v1) => FileRead::V1(v1),
+        Err(_) => FileRead::Corrupt,
+    }
+}
+
+/// Write beside the file, then rename over it: a reader sees the old contents
+/// or the new, never the truncated middle.
+fn write_file(path: &Path, configs: &[GuildConfig]) -> Result<()> {
     let file = ConfigFile {
         version: CONFIG_VERSION,
         guilds: configs.to_vec(),
     };
     let json = serde_json::to_string_pretty(&file)?;
-    fs::write(path, json)?;
+    let tmp = path.with_extension(format!("json.{}.tmp", std::process::id()));
+    fs::write(&tmp, json)?;
+    if let Err(e) = fs::rename(&tmp, path) {
+        let _ = fs::remove_file(&tmp);
+        return Err(e.into());
+    }
     Ok(())
+}
+
+fn warn(msg: String) {
+    eprintln!("[Guild Config] {msg}");
+    crate::mcp::telemetry::tlog("guild_config", crate::mcp::telemetry::Sev::Warn, msg);
+}
+
+/// The persisted guilds, and the last set known to be good.
+///
+/// Until 2026-11-23 any failed read (an I/O error, or a read landing inside
+/// another thread's write) was taken for a missing file: the defaults were
+/// written over it, which silently made SN Corp the active guild. The next
+/// launch then signed in to a guild the player is not in, was refused, and
+/// showed the New Player screen to an established account.
+struct Store {
+    last_good: Option<Vec<GuildConfig>>,
+}
+
+impl Store {
+    const fn new() -> Self {
+        Store { last_good: None }
+    }
+
+    fn load(&mut self, path: &Path) -> Vec<GuildConfig> {
+        let mut read = read_file(path);
+        // Another process on an older build still writes in place; give a
+        // half-written file a moment to finish before believing it.
+        for _ in 0..3 {
+            if !matches!(read, FileRead::Corrupt) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(40));
+            read = read_file(path);
+        }
+
+        let (configs, write) = match read {
+            FileRead::V2(mut configs) => {
+                let changed = migrate_stale_urls(&mut configs);
+                (configs, changed)
+            }
+            FileRead::V1(mut configs) => {
+                migrate_v1_to_v2(&mut configs, player_has_logged_in());
+                migrate_stale_urls(&mut configs);
+                (configs, true)
+            }
+            FileRead::Unreadable(e) => {
+                // Not evidence about the contents: answer from memory, leave
+                // the file alone, and do not remember defaults as good.
+                warn(format!("could not read {}: {e}", path.display()));
+                return self.last_good.clone().unwrap_or_else(default_configs);
+            }
+            FileRead::Missing => (self.last_good.clone().unwrap_or_else(default_configs), true),
+            FileRead::Corrupt => {
+                let aside = path.with_extension("json.corrupt");
+                let kept = fs::copy(path, &aside).is_ok();
+                warn(format!(
+                    "{} is not a config; rebuilding from {}{}",
+                    path.display(),
+                    if self.last_good.is_some() { "memory" } else { "defaults" },
+                    if kept { format!(" (kept as {})", aside.display()) } else { String::new() },
+                ));
+                (self.last_good.clone().unwrap_or_else(default_configs), true)
+            }
+        };
+        if write {
+            if let Err(e) = write_file(path, &configs) {
+                warn(format!("could not write {}: {e}", path.display()));
+            }
+        }
+        self.last_good = Some(configs.clone());
+        configs
+    }
+
+    /// Read, change and write as one step. `f` answers whether it changed
+    /// anything; nothing is written when it did not.
+    fn update(&mut self, path: &Path, f: impl FnOnce(&mut Vec<GuildConfig>) -> bool) -> Result<bool> {
+        let mut configs = self.load(path);
+        if !f(&mut configs) {
+            return Ok(false);
+        }
+        // A file we could not read must not be replaced by what we guessed.
+        if let FileRead::Unreadable(e) = read_file(path) {
+            anyhow::bail!("guild configs are unreadable: {e}");
+        }
+        write_file(path, &configs)?;
+        self.last_good = Some(configs);
+        Ok(true)
+    }
+}
+
+/// One lock for every read and write, so two read-change-write passes (the
+/// directory refresh and a guild switch, say) cannot undo each other.
+static STORE: Mutex<Store> = Mutex::new(Store::new());
+
+fn store() -> std::sync::MutexGuard<'static, Store> {
+    STORE.lock().unwrap_or_else(|p| p.into_inner())
+}
+
+pub fn load_configs() -> Vec<GuildConfig> {
+    store().load(&config_path())
+}
+
+/// Change the persisted guilds. Returns whether anything was written.
+pub fn update_configs(f: impl FnOnce(&mut Vec<GuildConfig>) -> bool) -> Result<bool> {
+    store().update(&config_path(), f)
 }
 
 /// Match an entry by guild_id, falling back to name for legacy callers /
@@ -421,39 +532,50 @@ pub fn get_guild_configs() -> Vec<GuildConfig> {
 pub fn set_guild_config(mut config: GuildConfig) -> Result<(), String> {
     // Manual edits are user-managed: discovery must not overwrite them.
     config.source = ConfigSource::User;
-    let mut configs = load_configs();
     let key = if config.guild_id.is_empty() {
         config.name.clone()
     } else {
         config.guild_id.clone()
     };
-    if let Some(existing) = find_mut(&mut configs, &key) {
-        *existing = config;
-    } else {
-        configs.push(config);
-    }
-    save_configs(&configs).map_err(|e| e.to_string())
+    update_configs(|configs| {
+        if let Some(existing) = find_mut(configs, &key) {
+            *existing = config;
+        } else {
+            configs.push(config);
+        }
+        true
+    })
+    .map(|_| ())
+    .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 pub fn set_active_guild(key: String) -> Result<(), String> {
-    let mut configs = load_configs();
-    if find_mut(&mut configs, &key).is_none() {
+    let found = update_configs(|configs| {
+        if find_mut(configs, &key).is_none() {
+            return false;
+        }
+        for c in configs.iter_mut() {
+            c.is_active = (!c.guild_id.is_empty() && c.guild_id == key) || c.name == key;
+        }
+        true
+    })
+    .map_err(|e| e.to_string())?;
+    if !found {
         return Err(format!("no guild config matching '{}'", key));
     }
-    for c in configs.iter_mut() {
-        c.is_active = (!c.guild_id.is_empty() && c.guild_id == key) || c.name == key;
-    }
-    save_configs(&configs).map_err(|e| e.to_string())?;
     crate::mcp::cosmos_client::reload_all();
     Ok(())
 }
 
 #[tauri::command]
 pub fn delete_guild_config(key: String) -> Result<(), String> {
-    let mut configs = load_configs();
-    configs.retain(|c| !((!c.guild_id.is_empty() && c.guild_id == key) || c.name == key));
-    save_configs(&configs).map_err(|e| e.to_string())
+    update_configs(|configs| {
+        configs.retain(|c| !((!c.guild_id.is_empty() && c.guild_id == key) || c.name == key));
+        true
+    })
+    .map(|_| ())
+    .map_err(|e| e.to_string())
 }
 
 #[cfg(test)]
@@ -549,5 +671,105 @@ mod tests {
         assert_eq!(back.version, CONFIG_VERSION);
         assert_eq!(back.guilds.len(), 2);
         assert_eq!(back.guilds[0].guild_id, DEFAULT_GUILD_ID);
+    }
+
+    fn scratch(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("structs-guildcfg-{}-{name}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir.join("guild_configs.json")
+    }
+
+    fn oh_active() -> Vec<GuildConfig> {
+        let mut c = default_configs();
+        for g in c.iter_mut() {
+            g.is_active = g.guild_id == "0-1";
+        }
+        c
+    }
+
+    fn active(configs: &[GuildConfig]) -> String {
+        configs.iter().find(|c| c.is_active).map(|c| c.guild_id.clone()).unwrap_or_default()
+    }
+
+    #[test]
+    fn a_truncated_file_never_moves_the_player_to_the_default_guild() {
+        let path = scratch("torn");
+        let mut store = Store::new();
+        write_file(&path, &oh_active()).unwrap();
+        assert_eq!(active(&store.load(&path)), "0-1");
+        // What a reader saw inside another thread's in-place write.
+        fs::write(&path, "").unwrap();
+        assert_eq!(active(&store.load(&path)), "0-1");
+        // ...and the file is put back, not left for the next launch to find.
+        assert_eq!(active(&Store::new().load(&path)), "0-1");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn an_unreadable_file_is_left_exactly_as_it_was() {
+        use std::os::unix::fs::PermissionsExt;
+        let path = scratch("unreadable");
+        write_file(&path, &oh_active()).unwrap();
+        let before = fs::read_to_string(&path).unwrap();
+        let mut warm = Store::new();
+        warm.load(&path);
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o000)).unwrap();
+        if fs::read_to_string(&path).is_ok() {
+            return; // running as root: the mode bits do not apply
+        }
+        assert_eq!(active(&warm.load(&path)), "0-1", "answered from memory");
+        Store::new().load(&path); // cold: guesses defaults, must not save them
+        assert!(Store::new().update(&path, |_| true).is_err(), "refuses to write a guess");
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), before);
+    }
+
+    #[test]
+    fn a_corrupt_file_with_nothing_in_memory_is_kept_aside() {
+        let path = scratch("corrupt");
+        fs::write(&path, "{\"version\":2,\"gui").unwrap();
+        assert_eq!(active(&Store::new().load(&path)), DEFAULT_GUILD_ID);
+        assert!(path.with_extension("json.corrupt").exists());
+    }
+
+    #[test]
+    fn concurrent_writers_and_readers_keep_the_active_guild() {
+        let path = scratch("race");
+        write_file(&path, &oh_active()).unwrap();
+        let store = std::sync::Arc::new(Mutex::new(Store::new()));
+        let mut threads = Vec::new();
+        for i in 0..4u64 {
+            let (path, store) = (path.clone(), store.clone());
+            threads.push(std::thread::spawn(move || {
+                for n in 0..40 {
+                    store.lock().unwrap().update(&path, |c| {
+                        c[0].last_refreshed = Some(i * 1000 + n);
+                        true
+                    }).unwrap();
+                }
+            }));
+        }
+        // A second process: no shared lock, only the file.
+        let other = path.clone();
+        threads.push(std::thread::spawn(move || {
+            for _ in 0..200 {
+                assert_eq!(active(&Store::new().load(&other)), "0-1");
+            }
+        }));
+        for t in threads {
+            t.join().unwrap();
+        }
+        assert_eq!(active(&Store::new().load(&path)), "0-1");
+    }
+
+    #[test]
+    fn update_writes_only_when_something_changed() {
+        let path = scratch("noop");
+        write_file(&path, &oh_active()).unwrap();
+        let mut store = Store::new();
+        assert!(!store.update(&path, |_| false).unwrap());
+        assert!(store.update(&path, |c| { c[0].is_active = true; c[1].is_active = false; true }).unwrap());
+        assert_eq!(active(&Store::new().load(&path)), DEFAULT_GUILD_ID, "a real switch still sticks");
     }
 }

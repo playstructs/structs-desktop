@@ -954,6 +954,24 @@ verify_contract "$BUILD_DIR/js/controllers/AccountController.js" "startTutorial(
 verify_contract "$BUILD_DIR/js/view_models/account/AccountStartTutorialViewModel.js" "TutorialMode.launch(true)" \
   "Account replay confirmation launches the tutorial as a replay"
 
+# ── Saved-account contract ──
+# frontend/saved-account.js keeps New Player from being offered over an account
+# that is already saved. It hooks the router through these names; losing one
+# would silently bring the New Player screen back, so the build fails instead.
+echo "    Verifying saved-account contract..."
+verify_saved_account() {
+  grep -qF -- "$2" "$1" \
+    || { echo "ERROR: '$2' not found in $1; update frontend/saved-account.js"; exit 1; }
+}
+verify_saved_account "$BUILD_DIR/js/index.js" "global.menuPage = MenuPage;"
+verify_saved_account "$BUILD_DIR/js/index.js" "MenuPage.router.goto('Auth', 'index')"
+verify_saved_account "$BUILD_DIR/js/view_models/IndexViewModel.js" "goto('Auth', 'signupConnectingToCorporate1')"
+verify_saved_account "$BUILD_DIR/js/controllers/AuthController.js" "loginActivateDevice()"
+verify_saved_account "$BUILD_DIR/js/framework/MenuPageRouter.js" 'localStorage.getItem("currentMenuPage")'
+verify_saved_account "$BUILD_DIR/js/framework/MenuPageRouter.js" "this.navigationController = new AbortController();"
+verify_saved_account "$BUILD_DIR/js/models/GameState.js" "thisPlayerId: this.keyPlayers[PLAYER_TYPES.PLAYER].id"
+verify_saved_account "$BUILD_DIR/js/models/GameState.js" "this.persistenceEnabled = true;"
+
 # Clean up .bak files
 find "$BUILD_DIR" -name "*.bak" -delete
 

@@ -492,11 +492,8 @@ pub fn check_doc(guild_id: &str, body: &[u8]) -> Result<GuildConfig, String> {
 }
 
 fn remember(cfg: GuildConfig) {
-    let mut all = guild_config::load_configs();
-    if upsert_discovered(&mut all, vec![cfg]) {
-        if let Err(e) = guild_config::save_configs(&all) {
-            eprintln!("[Guild Directory] could not persist a fetched manifest: {e}");
-        }
+    if let Err(e) = guild_config::update_configs(|all| upsert_discovered(all, vec![cfg])) {
+        eprintln!("[Guild Directory] could not persist a fetched manifest: {e}");
     }
 }
 
@@ -527,9 +524,7 @@ pub async fn refresh_directory() -> Result<RefreshReport, String> {
     }
     report.discovered = found.len();
 
-    let mut configs = guild_config::load_configs();
-    if upsert_discovered(&mut configs, found) {
-        guild_config::save_configs(&configs).map_err(|e| e.to_string())?;
+    if guild_config::update_configs(|configs| upsert_discovered(configs, found)).map_err(|e| e.to_string())? {
         crate::mcp::cosmos_client::reload_all();
     }
 
@@ -558,10 +553,8 @@ pub async fn apply_guild_switch(app: tauri::AppHandle, guild_id: String) -> Resu
     match fetch_chain_guild(&guild_id).await {
         Ok(chain) => match fetch_and_validate_guild(&chain).await {
             Ok(cfg) => {
-                let mut configs = guild_config::load_configs();
-                if upsert_discovered(&mut configs, vec![cfg]) {
-                    guild_config::save_configs(&configs).map_err(|e| e.to_string())?;
-                }
+                guild_config::update_configs(|configs| upsert_discovered(configs, vec![cfg]))
+                    .map_err(|e| e.to_string())?;
             }
             Err(e) => eprintln!(
                 "[Guild Directory] switch: refresh of {} failed ({}), using stored config",

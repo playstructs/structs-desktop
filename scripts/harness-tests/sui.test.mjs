@@ -129,6 +129,7 @@ const BUDGET = {
   'events.js':          [0, 0],
   'comms-state.js':     [0, 0],
   'identity-backup.js': [0, 0],
+  'saved-account.js': [0, 0],
   'bridge.js':          [0, 0],
   // The one place an embedded page gives up its frame: only the 4px inset
   // and the panel's own widths, all zeroed rather than invented.
