@@ -3115,6 +3115,9 @@ pub fn start_sync(app: tauri::AppHandle, guild_id: String) {
             let Some(session) = store::get(&guild_id) else {
                 break; // signed out
             };
+            if store::player_of(&guild_id).is_none() && !super::own_guild(&guild_id) {
+                break; // the player left this guild
+            }
             let since = STATE
                 .read()
                 .unwrap()

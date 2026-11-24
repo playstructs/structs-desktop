@@ -13,6 +13,9 @@
         <link rel="stylesheet" href="css/structicons.css">
         <link rel="stylesheet" href="css/sui/sui.css">
         <link rel="stylesheet" href="css/main.css">
+        <link rel="stylesheet" href="playercard.css">
+        <link rel="stylesheet" href="guildcard.css">
+        <link rel="stylesheet" href="guild-picker.css">
     </head>
     <body>
 
@@ -153,6 +156,10 @@
     <script src="structs-config.js"></script>
     <!-- Before the bundle: wraps its router the moment it is published. -->
     <script src="saved-account.js"></script>
+    <!-- After saved-account.js: its router wrap is the outer one. -->
+    <script src="playercard.js"></script>
+    <script src="guildcard.js"></script>
+    <script src="guild-picker.js"></script>
     <script src="identity-backup.js"></script>
     <script src="js/plugins.js"></script>
     <script src="js/vendor/liga.js"></script>

@@ -64,6 +64,8 @@ struct ChainGuild {
     id: String,
     #[serde(default)]
     endpoint: String,
+    #[serde(default)]
+    name: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -79,6 +81,12 @@ struct GuildDocBody {
     name: String,
     #[serde(default)]
     tag: String,
+    #[serde(default)]
+    description: String,
+    #[serde(default)]
+    logo: String,
+    #[serde(default)]
+    recruiting: Option<GuildRecruiting>,
     /// Cosmetic denom names keyed by exponent, e.g. `{"0":"ack","6":"snack"}`.
     /// Fetched with the rest of the document and, until the Inventory work,
     /// thrown away — which is why guild tokens could only ever be shown by
@@ -86,6 +94,12 @@ struct GuildDocBody {
     #[serde(default)]
     denom: std::collections::BTreeMap<String, String>,
     services: GuildServices,
+}
+
+#[derive(Debug, Deserialize)]
+struct GuildRecruiting {
+    #[serde(default)]
+    status: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -471,7 +485,7 @@ pub async fn manifest_for(guild_id: &str) -> Result<GuildConfig, String> {
 /// from `chat/room/ensure` sends us down. Validated exactly like one the
 /// chain pointed at: the document must claim the id we were told.
 pub async fn manifest_at(guild_id: &str, endpoint: &str) -> Result<GuildConfig, String> {
-    let chain = ChainGuild { id: guild_id.to_string(), endpoint: endpoint.to_string() };
+    let chain = ChainGuild { id: guild_id.to_string(), endpoint: endpoint.to_string(), name: String::new() };
     let cfg = fetch_and_validate_guild(&chain).await?;
     remember(cfg.clone());
     Ok(cfg)
@@ -481,14 +495,14 @@ pub async fn manifest_at(guild_id: &str, endpoint: &str) -> Result<GuildConfig, 
 /// claims `guild_id` and names a Guild API and a GRASS stream — WITHOUT
 /// adopting it. The founding card's "Check" for a self-hosted guild.json.
 pub async fn probe_endpoint(guild_id: &str, endpoint: &str) -> Result<GuildConfig, String> {
-    let chain = ChainGuild { id: guild_id.to_string(), endpoint: endpoint.to_string() };
+    let chain = ChainGuild { id: guild_id.to_string(), endpoint: endpoint.to_string(), name: String::new() };
     fetch_and_validate_guild(&chain).await
 }
 
 /// The same validation over a document already in hand (a rendered
 /// guild.json, before it is ever published).
 pub fn check_doc(guild_id: &str, body: &[u8]) -> Result<GuildConfig, String> {
-    validate_guild_doc(&ChainGuild { id: guild_id.to_string(), endpoint: String::new() }, body)
+    validate_guild_doc(&ChainGuild { id: guild_id.to_string(), endpoint: String::new(), name: String::new() }, body)
 }
 
 fn remember(cfg: GuildConfig) {
@@ -542,43 +556,92 @@ pub async fn refresh_guild_directory() -> Result<RefreshReport, String> {
     refresh_directory().await
 }
 
+// ── One guild's connection, whatever it takes ───────────────────────────────
+
+fn stored(guild_id: &str) -> Option<GuildConfig> {
+    guild_config::get_guild_configs()
+        .into_iter()
+        .find(|c| c.guild_id == guild_id)
+}
+
+/// The connection for a guild that publishes no server of its own: the host's,
+/// under this guild's id. Every guild server indexes the whole chain and signs
+/// an address in under whichever guild the chain says it belongs to, so the
+/// player keeps playing; the next refresh replaces it if the guild ever
+/// publishes one. No `endpoint` and no homeserver: this is not a guild anybody
+/// can be offered, only one its own members can be in.
+fn hosted_by(chain: &ChainGuild, host: &GuildConfig) -> GuildConfig {
+    let name = sanitize_label(&chain.name, 64);
+    GuildConfig {
+        guild_id: chain.id.clone(),
+        name: if name.is_empty() { format!("Guild {}", chain.id) } else { name },
+        guild_tag: String::new(),
+        is_active: false,
+        endpoint: None,
+        source: ConfigSource::Chain,
+        last_refreshed: Some(now_secs()),
+        denoms: Default::default(),
+        matrix_url: None,
+        ..host.clone()
+    }
+}
+
+/// The persisted connection for `guild_id`, freshly read from the guild when
+/// it answers.
+async fn ensure_config(guild_id: &str) -> Result<GuildConfig, String> {
+    let chain = fetch_chain_guild(guild_id).await;
+    let trouble = match &chain {
+        Ok(c) => fetch_and_validate_guild(c).await.map(remember).err(),
+        Err(e) => Some(e.clone()),
+    };
+    if let Some(e) = &trouble {
+        eprintln!("[Guild Directory] {guild_id}: no fresh guild.json ({e})");
+    }
+    if let Some(cfg) = stored(guild_id) {
+        return Ok(cfg);
+    }
+    let chain = chain?;
+    let host = guild_config::get_active().ok_or("no active guild to stand in for it")?;
+    crate::mcp::telemetry::tlog(
+        "guild_directory",
+        crate::mcp::telemetry::Sev::Warn,
+        format!("{guild_id} publishes no usable server ({}); using {}'s", trouble.unwrap_or_default(), host.name),
+    );
+    let cfg = hosted_by(&chain, &host);
+    guild_config::update_configs(|all| {
+        all.push(cfg.clone());
+        true
+    })
+    .map_err(|e| e.to_string())?;
+    Ok(cfg)
+}
+
+fn is_guild_id(s: &str) -> bool {
+    s.strip_prefix("0-").is_some_and(|n| !n.is_empty() && n.len() <= 12 && n.bytes().all(|b| b.is_ascii_digit()))
+}
+
 // ── Guild switch (persist + live handoff to the webview) ───────────────────
 
-/// Switch the active guild and push the new config into the running webview.
-/// The init-script config is frozen at app start, so the handoff goes through
-/// sessionStorage (read synchronously at document-start on reload).
-#[tauri::command]
-pub async fn apply_guild_switch(app: tauri::AppHandle, guild_id: String) -> Result<(), String> {
-    // Best-effort refresh of the target guild so a switch uses fresh URLs.
-    match fetch_chain_guild(&guild_id).await {
-        Ok(chain) => match fetch_and_validate_guild(&chain).await {
-            Ok(cfg) => {
-                guild_config::update_configs(|configs| upsert_discovered(configs, vec![cfg]))
-                    .map_err(|e| e.to_string())?;
-            }
-            Err(e) => eprintln!(
-                "[Guild Directory] switch: refresh of {} failed ({}), using stored config",
-                guild_id, e
-            ),
-        },
-        Err(e) => eprintln!(
-            "[Guild Directory] switch: chain record for {} unavailable ({}), using stored config",
-            guild_id, e
-        ),
-    }
-
-    // Persist active + reload Rust clients (set_active_guild calls reload_all).
-    guild_config::set_active_guild(guild_id.clone())?;
-    set_cached_active_guild(&guild_id);
+/// Point the app at `guild_id`: the persisted config, the Rust clients, the
+/// Guild API session (the next call signs in as this guild's member; GRASS
+/// reconnects itself when its address changed), and the game window. The
+/// window's init-script config is frozen at app start, so the handoff goes
+/// through sessionStorage (read synchronously at document-start on reload).
+async fn switch_to(app: &tauri::AppHandle, guild_id: &str) -> Result<(), String> {
+    ensure_config(guild_id).await?;
+    guild_config::set_active_guild(guild_id.to_string())?;
+    set_cached_active_guild(guild_id);
+    crate::mcp::guild_auth::forget();
 
     let active = guild_config::get_active()
         .ok_or_else(|| format!("guild '{}' not found after activation", guild_id))?;
     let fc = guild_config::FrontendConfig::from(&active);
     let json = serde_json::to_string(&fc).map_err(|e| e.to_string())?;
 
-    eprintln!(
-        "[Guild Directory] switching active guild -> {} ({}), reloading webview",
-        active.name, active.guild_id
+    crate::mcp::telemetry::tlog(
+        "guild_directory",
+        crate::mcp::telemetry::Sev::Info,
+        format!("active guild is now {} ({}) on {}", active.name, active.guild_id, active.guild_api),
     );
 
     if let Some(window) = app.get_webview_window("main") {
@@ -589,6 +652,171 @@ pub async fn apply_guild_switch(app: tauri::AppHandle, guild_id: String) -> Resu
         window.eval(&script).map_err(|e| e.to_string())?;
     }
     Ok(())
+}
+
+/// The guild directory's pick, before anyone is signed in.
+#[tauri::command]
+pub async fn apply_guild_switch(window: tauri::WebviewWindow, guild_id: String) -> Result<(), String> {
+    game_window(&window)?;
+    if !is_guild_id(&guild_id) {
+        return Err(format!("'{guild_id}' is not a guild id"));
+    }
+    switch_to(window.app_handle(), &guild_id).await
+}
+
+/// The game window, or one the app built for the player. Never a window that
+/// renders what strangers wrote.
+fn game_window(window: &tauri::WebviewWindow) -> Result<(), String> {
+    if window.label() == "main" {
+        return Ok(());
+    }
+    crate::mcp::tools::board_pages::require_trusted(window)
+}
+
+// ── The directory a player picks from ───────────────────────────────────────
+
+/// One guild a player can join or sign in to: it publishes a server this app
+/// can play on.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct GuildListing {
+    pub id: String,
+    pub name: String,
+    pub tag: String,
+    pub logo: Option<String>,
+    pub description: String,
+    /// `None` when no server could say.
+    pub members: Option<u64>,
+    pub recruiting: bool,
+    pub active: bool,
+}
+
+const LISTINGS_TTL_SECS: u64 = 300;
+static LISTINGS: Mutex<(u64, Vec<GuildListing>)> = Mutex::new((0, Vec::new()));
+
+fn listing_of(cfg: &GuildConfig, body: &[u8]) -> GuildListing {
+    let doc = serde_json::from_slice::<GuildDoc>(body).ok().map(|d| d.guild);
+    GuildListing {
+        id: cfg.guild_id.clone(),
+        name: cfg.name.clone(),
+        tag: cfg.guild_tag.clone(),
+        logo: doc
+            .as_ref()
+            .map(|d| d.logo.trim().to_string())
+            .filter(|l| validate_service_url(l, &["https"], "logo").is_ok()),
+        description: doc.as_ref().map(|d| sanitize_label(&d.description, 160)).unwrap_or_default(),
+        members: None,
+        recruiting: doc
+            .as_ref()
+            .and_then(|d| d.recruiting.as_ref())
+            .is_some_and(|r| r.status.trim().eq_ignore_ascii_case("open")),
+        active: false,
+    }
+}
+
+/// Member counts by guild id, from a guild server's public directory. Every
+/// server indexes every guild, so any one answers for all of them.
+fn parse_members(v: &Value) -> std::collections::HashMap<String, u64> {
+    let mut out = std::collections::HashMap::new();
+    for row in v.get("data").and_then(|d| d.as_array()).into_iter().flatten() {
+        let n = row.get("members").and_then(|m| m.as_u64().or_else(|| m.as_str()?.parse().ok()));
+        if let (Some(id), Some(n)) = (row.get("guild_id").and_then(|g| g.as_str()), n) {
+            out.insert(id.to_string(), n);
+        }
+    }
+    out
+}
+
+async fn member_counts() -> std::collections::HashMap<String, u64> {
+    let mut apis: Vec<String> = guild_config::get_active().map(|c| c.guild_api).into_iter().collect();
+    for c in guild_config::get_guild_configs() {
+        if !apis.contains(&c.guild_api) {
+            apis.push(c.guild_api);
+        }
+    }
+    for api in apis.iter().take(3) {
+        let url = format!("{}/guild/directory", api.trim_end_matches('/'));
+        if let Ok(body) = fetch_capped(&url, "guild directory").await {
+            if let Ok(v) = serde_json::from_slice::<Value>(&body) {
+                let m = parse_members(&v);
+                if !m.is_empty() {
+                    return m;
+                }
+            }
+        }
+    }
+    Default::default()
+}
+
+/// Largest first; a guild nobody counted sits after those somebody did.
+fn sort_listings(all: &mut [GuildListing]) {
+    let index = |id: &str| id.rsplit('-').next().and_then(|n| n.parse::<u64>().ok()).unwrap_or(u64::MAX);
+    all.sort_by(|a, b| b.members.cmp(&a.members).then_with(|| index(&a.id).cmp(&index(&b.id))));
+}
+
+async fn read_listings() -> Result<Vec<GuildListing>, String> {
+    let chain = fetch_guild_list().await?;
+    let reads = chain.iter().take(MAX_ENDPOINTS_PER_REFRESH).map(|c| async move {
+        if c.endpoint.trim().is_empty() || validate_service_url(&c.endpoint, &["http", "https"], "endpoint").is_err() {
+            return None;
+        }
+        let body = fetch_capped(&c.endpoint, "endpoint doc").await.ok()?;
+        let cfg = validate_guild_doc(c, &body).ok()?;
+        let listing = listing_of(&cfg, &body);
+        Some((cfg, listing))
+    });
+    let (found, members) = futures_util::future::join(futures_util::future::join_all(reads), member_counts()).await;
+    let (configs, mut listings): (Vec<_>, Vec<_>) = found.into_iter().flatten().unzip();
+    if listings.is_empty() {
+        return Err("no guild answered".into());
+    }
+    for l in listings.iter_mut() {
+        l.members = members.get(&l.id).copied();
+    }
+    if let Err(e) = guild_config::update_configs(|all| upsert_discovered(all, configs)) {
+        eprintln!("[Guild Directory] could not persist the directory: {e}");
+    }
+    sort_listings(&mut listings);
+    Ok(listings)
+}
+
+/// Every guild a player can be pointed at, read off the chain and each guild's
+/// own guild.json, kept for five minutes. With the chain unreachable it is the
+/// guilds this install already knows.
+#[tauri::command]
+pub async fn guild_listings() -> Result<Vec<GuildListing>, String> {
+    static ONE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    let _one = ONE.lock().await;
+    let fresh = |g: &(u64, Vec<GuildListing>)| !g.1.is_empty() && now_secs().saturating_sub(g.0) < LISTINGS_TTL_SECS;
+    let held = LISTINGS.lock().unwrap_or_else(|p| p.into_inner()).clone();
+    let mut all = if fresh(&held) {
+        held.1
+    } else {
+        match read_listings().await {
+            Ok(all) => {
+                *LISTINGS.lock().unwrap_or_else(|p| p.into_inner()) = (now_secs(), all.clone());
+                all
+            }
+            Err(e) if !held.1.is_empty() => {
+                eprintln!("[Guild Directory] listings: {e}; showing the last good list");
+                held.1
+            }
+            Err(e) => {
+                eprintln!("[Guild Directory] listings: {e}; showing stored guilds");
+                let mut known: Vec<GuildListing> = guild_config::get_guild_configs()
+                    .iter()
+                    .filter(|c| c.endpoint.is_some() && is_guild_id(&c.guild_id))
+                    .map(|c| listing_of(c, b""))
+                    .collect();
+                sort_listings(&mut known);
+                known
+            }
+        }
+    };
+    let active = guild_config::get_active().map(|c| c.guild_id).unwrap_or_default();
+    for l in all.iter_mut() {
+        l.active = l.id == active;
+    }
+    Ok(all)
 }
 
 // ── Player-follows-guild reconciler ─────────────────────────────────────────
@@ -652,14 +880,8 @@ pub fn note_player_guild(
     });
 }
 
-/// Authoritative check: the chain LCD player record. Only switch when the
-/// chain confirms the player's guild differs from the active infra.
-async fn verify_and_switch(
-    app: tauri::AppHandle,
-    player_id: &str,
-    active_guild: &str,
-) -> Result<(), String> {
-    let mut lcd_guild: Option<String> = None;
+/// The guild the chain has this player in; empty for a guildless player.
+async fn chain_guild_of(player_id: &str) -> Result<String, String> {
     let mut last_err = String::new();
     for base in lcd_bases() {
         let url = format!("{}/structs/player/{}", base, player_id);
@@ -667,32 +889,214 @@ async fn verify_and_switch(
             Ok(body) => {
                 let v: Value = serde_json::from_slice(&body)
                     .map_err(|e| format!("player record: invalid JSON ({})", e))?;
-                let g = v
-                    .get("Player")
-                    .or_else(|| v.get("player"))
-                    .and_then(|p| p.get("guildId").or_else(|| p.get("guild_id")))
-                    .and_then(|g| g.as_str())
-                    .unwrap_or_default()
-                    .to_string();
-                lcd_guild = Some(g);
-                break;
+                let p = v.get("Player").or_else(|| v.get("player"));
+                return match p {
+                    Some(p) => Ok(p
+                        .get("guildId")
+                        .or_else(|| p.get("guild_id"))
+                        .and_then(|g| g.as_str())
+                        .unwrap_or_default()
+                        .to_string()),
+                    None => Err("player record: unexpected shape".into()),
+                };
             }
             Err(e) => last_err = e,
         }
     }
-    let Some(lcd_guild) = lcd_guild else {
-        return Err(format!("LCD player lookup failed: {}", last_err));
-    };
+    Err(format!("LCD player lookup failed: {}", last_err))
+}
+
+/// Authoritative check: the chain LCD player record. Only switch when the
+/// chain confirms the player's guild differs from the active infra.
+async fn verify_and_switch(
+    app: tauri::AppHandle,
+    player_id: &str,
+    active_guild: &str,
+) -> Result<(), String> {
+    let lcd_guild = chain_guild_of(player_id).await?;
     if lcd_guild.is_empty() || lcd_guild == active_guild {
         return Ok(()); // chain agrees with active infra (or player guildless)
     }
+    follow(&app, player_id, &lcd_guild, true).await
+}
 
-    eprintln!(
-        "[Guild Directory] player {} belongs to guild {} but active infra is {} — switching",
-        player_id, lcd_guild, active_guild
-    );
+/// The player is in `guild` now: take everything that talks to a guild there.
+/// `wait` holds the switch until the new guild's server has indexed the move —
+/// until then it refuses the sign-in the reload makes, and the old server no
+/// longer lists the address under the old guild either.
+async fn follow(app: &tauri::AppHandle, player_id: &str, guild: &str, wait: bool) -> Result<(), String> {
+    if !is_guild_id(guild) {
+        return Err(format!("'{guild}' is not a guild id"));
+    }
+    let old = cached_active_guild().lock().unwrap().clone().unwrap_or_default();
+    eprintln!("[Guild Directory] player {player_id} belongs to guild {guild} but active infra is {old} — switching");
+    let cfg = ensure_config(guild).await?;
+    if wait {
+        wait_for_member(&cfg, player_id).await;
+    }
+    // Two paths can have seen the same move while this one waited.
+    if cached_active_guild().lock().unwrap().as_deref() == Some(guild) {
+        return Ok(());
+    }
     LAST_SWITCH_AT.store(now_secs(), Ordering::Relaxed);
-    apply_guild_switch(app, lcd_guild).await
+    switch_to(app, guild).await?;
+    settle_player_guild(app, &old, guild);
+    Ok(())
+}
+
+/// What follows the player rather than the server: their guild in the synced
+/// state, their Guild API session, and the Comms identity they speak as.
+fn settle_player_guild(app: &tauri::AppHandle, old: &str, guild: &str) {
+    if let Ok(mut gs) = crate::game_state::GAME_STATE.write() {
+        gs.guild_id = Some(guild.to_string());
+    }
+    crate::matrix::guild_changed(app, old, guild);
+    tauri::async_runtime::spawn(async move {
+        let client = crate::mcp::cosmos_client::CosmosClient::new();
+        crate::mcp::guild_auth::recover(&client.guild).await;
+    });
+}
+
+/// Wait for a guild server to list the player's address as its member, as its
+/// sign-in will ask. Gives up after a minute: a server that cannot say so is
+/// no reason to stay on one the player has left.
+async fn wait_for_member(cfg: &GuildConfig, player_id: &str) {
+    let address = crate::game_state::GAME_STATE.read().ok().and_then(|g| g.wallet_address.clone()).unwrap_or_default();
+    if address.is_empty() {
+        return;
+    }
+    let url = format!(
+        "{}/auth/player-address/{}/guild/{}/player-id",
+        cfg.guild_api.trim_end_matches('/'),
+        address,
+        cfg.guild_id
+    );
+    for _ in 0..30 {
+        if let Ok(body) = fetch_capped(&url, "membership").await {
+            if names_member(&body, player_id) {
+                return;
+            }
+        }
+        tokio::time::sleep(Duration::from_secs(2)).await;
+    }
+    eprintln!("[Guild Directory] {} does not list {} yet", cfg.guild_api, player_id);
+}
+
+fn names_member(body: &[u8], player_id: &str) -> bool {
+    serde_json::from_slice::<Value>(body)
+        .ok()
+        .and_then(|v| v.pointer("/data/player_id").and_then(|p| p.as_str()).map(|p| p == player_id))
+        .unwrap_or(false)
+}
+
+static FOLLOWING: AtomicBool = AtomicBool::new(false);
+
+/// The player's guild is changing, or just did: a join was signed, or a frame
+/// said so. Follow it as soon as the chain shows it rather than on the minute
+/// backstop. Asks for up to two minutes; harmless when nothing moved.
+pub fn player_guild_moving(app: &tauri::AppHandle) {
+    let Some(player_id) = crate::game_state::GAME_STATE.read().ok().and_then(|g| g.player_id.clone()).filter(|p| !p.is_empty()) else {
+        return;
+    };
+    if FOLLOWING.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        for _ in 0..40 {
+            let active = cached_active_guild().lock().unwrap().clone().unwrap_or_default();
+            match chain_guild_of(&player_id).await {
+                Ok(g) if !g.is_empty() && g != active => {
+                    if let Err(e) = follow(&app, &player_id, &g, true).await {
+                        eprintln!("[Guild Directory] follow: {e}");
+                    }
+                    break;
+                }
+                Ok(_) => {}
+                Err(e) => eprintln!("[Guild Directory] follow: {e}"),
+            }
+            tokio::time::sleep(Duration::from_secs(3)).await;
+        }
+        FOLLOWING.store(false, Ordering::SeqCst);
+    });
+}
+
+/// A `player_consensus` frame: the whole player row, guild included.
+pub fn on_player_frame(app: &tauri::AppHandle, detail: &Value) {
+    let Some(id) = detail.get("id").and_then(|v| v.as_str()) else { return };
+    let mine = crate::game_state::GAME_STATE.read().ok().and_then(|g| g.player_id.clone());
+    let active = cached_active_guild().lock().unwrap().clone().unwrap_or_default();
+    if mine.as_deref() == Some(id) && frame_moves_guild(detail, &active) {
+        player_guild_moving(app);
+    }
+}
+
+fn frame_moves_guild(detail: &Value, active: &str) -> bool {
+    detail
+        .get("guild_id")
+        .and_then(|g| g.as_str())
+        .is_some_and(|g| is_guild_id(g) && g != active)
+}
+
+/// At load, for the account saved on this machine: the guild the chain has the
+/// player in, and that guild's current server, against what the game window is
+/// about to sign in with. A stale guild or a moved server is corrected before
+/// the sign-in it would break. Answers `current`, `switching` (the window is
+/// reloading) or `guildless`.
+#[tauri::command]
+pub async fn follow_saved_player(
+    window: tauri::WebviewWindow,
+    player_id: String,
+    running: Option<guild_config::FrontendConfig>,
+) -> Result<String, String> {
+    if window.label() != "main" {
+        return Err("only the game window signs the player in".into());
+    }
+    crate::mcp::types::PlayerId::parse(&player_id).map_err(|e| e.to_string())?;
+    let app = window.app_handle().clone();
+    let guild = chain_guild_of(&player_id).await?;
+    if guild.is_empty() {
+        return Ok("guildless".into());
+    }
+    if !is_guild_id(&guild) {
+        return Err(format!("'{guild}' is not a guild id"));
+    }
+    let want = guild_config::FrontendConfig::from(&ensure_config(&guild).await?);
+    let old = guild_config::get_active().map(|c| c.guild_id).unwrap_or_default();
+    if running.as_ref().is_some_and(|r| same_connection(r, &want)) {
+        // The window is right; a saved setting that disagrees is put right
+        // without disturbing it.
+        if old != guild {
+            guild_config::set_active_guild(guild.clone())?;
+            set_cached_active_guild(&guild);
+            crate::mcp::guild_auth::forget();
+            settle_player_guild(&app, &old, &guild);
+        }
+        return Ok("current".into());
+    }
+    // The same correction twice in a row means the window did not take it;
+    // reloading again would not help.
+    static LAST: Mutex<Option<(u64, String)>> = Mutex::new(None);
+    let key = serde_json::to_string(&want).map_err(|e| e.to_string())?;
+    {
+        let mut last = LAST.lock().unwrap_or_else(|p| p.into_inner());
+        if last.as_ref().is_some_and(|(at, k)| *k == key && now_secs().saturating_sub(*at) < SWITCH_COOLDOWN_SECS) {
+            return Err("already corrected once; not reloading again".into());
+        }
+        *last = Some((now_secs(), key));
+    }
+    LAST_SWITCH_AT.store(now_secs(), Ordering::Relaxed);
+    switch_to(&app, &guild).await?;
+    settle_player_guild(&app, &old, &guild);
+    Ok("switching".into())
+}
+
+fn same_connection(a: &guild_config::FrontendConfig, b: &guild_config::FrontendConfig) -> bool {
+    a.guild_id == b.guild_id
+        && a.guild_api == b.guild_api
+        && a.reactor_api == b.reactor_api
+        && a.client_ws == b.client_ws
+        && a.grass_nats_ws == b.grass_nats_ws
 }
 
 #[cfg(test)]
@@ -703,6 +1107,7 @@ mod tests {
         ChainGuild {
             id: id.into(),
             endpoint: "https://example.com/guild.json".into(),
+            name: String::new(),
         }
     }
 
@@ -734,6 +1139,110 @@ mod tests {
         assert_eq!(liar.guild_api, None, "a document claiming another id is not trusted");
         let down = guild_api_entry(&chain("0-6"), Err("endpoint doc: HTTP 502".into()));
         assert_eq!(down.error.as_deref(), Some("endpoint doc: HTTP 502"));
+    }
+
+    /// Rekt Gang's live guild.json (2026-11-24): hosted by SN Corp's server,
+    /// recruiting, with a logo on its own site.
+    #[test]
+    fn a_listing_carries_what_the_directory_shows() {
+        let body = br#"{"guild":{"id":"0-8","name":"Rekt Gang","tag":"REKT","description":"Rekt Gang Structs Guild",
+            "logo":"https://rekt.structs.zone/rekt/img/rekt-gang-logo.png","recruiting":{"status":"open"},
+            "services":{"guild_api":"https://beta.playstructs.com/api/","grass_nats_websocket":"wss://beta.playstructs.com:1443"}}}"#;
+        let cfg = validate_guild_doc(&chain("0-8"), body).unwrap();
+        let l = listing_of(&cfg, body);
+        assert_eq!((l.id.as_str(), l.tag.as_str(), l.recruiting), ("0-8", "REKT", true));
+        assert_eq!(l.logo.as_deref(), Some("https://rekt.structs.zone/rekt/img/rekt-gang-logo.png"));
+        assert_eq!(l.description, "Rekt Gang Structs Guild");
+        for bad in ["javascript:alert(1)", "http://x.example/l.png", "/img/l.png", "https://127.0.0.1/l.png", ""] {
+            let body = format!(r#"{{"guild":{{"id":"0-8","logo":"{bad}","services":{{}}}}}}"#);
+            assert_eq!(listing_of(&cfg, body.as_bytes()).logo, None, "{bad}");
+        }
+    }
+
+    #[test]
+    fn listings_are_largest_first_and_uncounted_last() {
+        let l = |id: &str, members| GuildListing {
+            id: id.into(), name: String::new(), tag: String::new(), logo: None,
+            description: String::new(), members, recruiting: false, active: false,
+        };
+        let mut all = vec![l("0-10", None), l("0-9", Some(6)), l("0-5", Some(9463)), l("0-11", Some(6)), l("0-1", Some(5067))];
+        sort_listings(&mut all);
+        let ids: Vec<&str> = all.iter().map(|g| g.id.as_str()).collect();
+        assert_eq!(ids, ["0-5", "0-1", "0-9", "0-11", "0-10"]);
+        let m = parse_members(&serde_json::json!({"success":true,"data":[{"guild_id":"0-5","members":9463},{"guild_id":"0-1","members":"5067"},{"guild_id":"0-2"}]}));
+        assert_eq!((m.get("0-5"), m.get("0-1"), m.get("0-2")), (Some(&9463), Some(&5067), None));
+    }
+
+    /// A member of a guild with no server keeps playing on the one they are
+    /// on, under the guild they are in, and it is not offered to anyone else.
+    #[test]
+    fn a_guild_without_a_server_is_hosted_under_its_own_id() {
+        let host = validate_guild_doc(&chain("0-5"), &doc_json("0-5", "https://beta.playstructs.com/api/", "wss://beta.playstructs.com:1443")).unwrap();
+        let mut host = host;
+        host.is_active = true;
+        host.matrix_url = Some("https://matrix.beta.playstructs.com".into());
+        let c = hosted_by(&ChainGuild { id: "0-6".into(), endpoint: String::new(), name: "ANODE TEAM".into() }, &host);
+        assert_eq!((c.guild_id.as_str(), c.name.as_str()), ("0-6", "ANODE TEAM"));
+        assert_eq!(c.guild_api, host.guild_api);
+        assert!(!c.is_active && c.endpoint.is_none() && c.matrix_url.is_none());
+    }
+
+    /// Same server, different guild is a different connection: 11 guilds share
+    /// beta.playstructs.com and each signs in under its own id.
+    #[test]
+    fn a_shared_server_does_not_make_two_guilds_one_connection() {
+        let fc = |id: &str| {
+            guild_config::FrontendConfig::from(
+                &validate_guild_doc(&chain(id), &doc_json(id, "https://beta.playstructs.com/api/", "wss://beta.playstructs.com:1443")).unwrap(),
+            )
+        };
+        assert!(same_connection(&fc("0-5"), &fc("0-5")));
+        assert!(!same_connection(&fc("0-5"), &fc("0-8")));
+        let mut moved = fc("0-5");
+        moved.guild_api = "https://new.playstructs.com/api".into();
+        assert!(!same_connection(&moved, &fc("0-5")));
+        // What the window hands back is what it was given.
+        let back: guild_config::FrontendConfig = serde_json::from_str(&serde_json::to_string(&fc("0-8")).unwrap()).unwrap();
+        assert!(same_connection(&back, &fc("0-8")));
+    }
+
+    #[test]
+    fn a_frame_moves_the_player_only_to_another_real_guild() {
+        let f = |g: Value| frame_moves_guild(&serde_json::json!({"id": "1-194", "guild_id": g}), "0-1");
+        assert!(f("0-8".into()));
+        assert!(!f("0-1".into()));
+        assert!(!f("".into()) && !f(Value::Null));
+        // 0-1 is a prefix of 0-11: a different guild all the same.
+        assert!(f("0-11".into()));
+        assert!(is_guild_id("0-17") && !is_guild_id("0-") && !is_guild_id("1-17") && !is_guild_id("0-1/../2"));
+    }
+
+    /// Live: the directory, and a player of a hosted guild, as the load check
+    /// reads them. Writes guild_configs.json under HOME — point that elsewhere.
+    /// `HOME=/tmp/x <test binary> --ignored live_directory`
+    #[tokio::test]
+    #[ignore]
+    async fn live_directory_and_hosted_member() {
+        let all = guild_listings().await.unwrap();
+        for g in &all {
+            eprintln!("{} [{}] {} members={:?} open={} logo={:?}", g.id, g.tag, g.name, g.members, g.recruiting, g.logo);
+        }
+        assert!(all.len() > 5 && all.iter().any(|g| g.id == "0-5" && g.active && g.members.unwrap_or(0) > 1000));
+        assert_eq!(chain_guild_of("1-579").await.unwrap(), "0-10");
+        let cfg = ensure_config("0-10").await.unwrap();
+        let url = format!("{}/auth/player-address/structs1qrr9an8jevuy4d5vs2djtvsvp623ccqxyu0au9/guild/0-10/player-id", cfg.guild_api);
+        assert!(names_member(&fetch_capped(&url, "membership").await.unwrap(), "1-579"));
+        // ANODE TEAM publishes nothing: hosted, not offered.
+        let anode = ensure_config("0-6").await.unwrap();
+        assert_eq!((anode.guild_id.as_str(), anode.endpoint), ("0-6", None));
+        assert!(!guild_listings().await.unwrap().iter().any(|g| g.id == "0-6"));
+    }
+
+    #[test]
+    fn membership_is_the_server_naming_this_player() {
+        assert!(names_member(br#"{"success":true,"errors":[],"data":{"player_id":"1-579"}}"#, "1-579"));
+        assert!(!names_member(br#"{"success":true,"errors":[],"data":{"player_id":"1-57"}}"#, "1-579"));
+        assert!(!names_member(br#"{"success":true,"errors":[],"data":null}"#, "1-579"));
     }
 
     /// Verbatim `services` block from https://beta.playstructs.com/guild.json

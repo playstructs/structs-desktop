@@ -25,6 +25,16 @@ sed -i.bak "s|this.apiUrl = '/api';|this.apiUrl = (window.__STRUCTS_CONFIG__?.gu
   "$BUILD_DIR/js/api/GuildAPI.js"
 verify_patched "$BUILD_DIR/js/api/GuildAPI.js" '__STRUCTS_CONFIG__?.guildApi' "GuildAPI.js apiUrl override"
 
+echo "    Patching GuildAPI.js (which guild this is)..."
+# One server can host many guilds: /guild/this always names the HOST, so a
+# player of any other guild there signed in (and signed up) as the host's. The
+# guild the app is pointed at is the one to ask for; /guild/{id} is the same
+# public record. Signup, login, recovery, device codes and the player GRASS
+# subject all read gameState.thisGuild, which is this call's answer.
+sed -i.bak 's|`${this.apiUrl}/guild/this`|`${this.apiUrl}/guild/${window.__STRUCTS_CONFIG__?.guildId \|\| "this"}`|' \
+  "$BUILD_DIR/js/api/GuildAPI.js"
+verify_patched "$BUILD_DIR/js/api/GuildAPI.js" '/guild/${window.__STRUCTS_CONFIG__?.guildId || "this"}`' "GuildAPI.js configured guild"
+
 echo "    Patching index.js (GrassManager URLs)..."
 sed -i.bak "s|\`ws://\${window.location.hostname}:1443\`|window.__STRUCTS_CONFIG__?.grassNatsWs \|\| \`ws://\${window.location.hostname}:1443\`|g" \
   "$BUILD_DIR/js/index.js"
@@ -971,6 +981,21 @@ verify_saved_account "$BUILD_DIR/js/framework/MenuPageRouter.js" 'localStorage.g
 verify_saved_account "$BUILD_DIR/js/framework/MenuPageRouter.js" "this.navigationController = new AbortController();"
 verify_saved_account "$BUILD_DIR/js/models/GameState.js" "thisPlayerId: this.keyPlayers[PLAYER_TYPES.PLAYER].id"
 verify_saved_account "$BUILD_DIR/js/models/GameState.js" "this.persistenceEnabled = true;"
+
+# ── Guild directory contract ──
+# frontend/guild-picker.js puts the guild chip on these pages and opens the
+# webapp's own offcanvas. A renamed hook would silently lose the chip.
+echo "    Verifying guild-picker contract..."
+verify_guild_picker() {
+  grep -qF -- "$2" "$1" \
+    || { echo "ERROR: '$2' not found in $1; update frontend/guild-picker.js"; exit 1; }
+}
+verify_guild_picker "$BUILD_DIR/js/view_models/IndexViewModel.js" 'id="new-player-btn"'
+verify_guild_picker "$BUILD_DIR/js/view_models/login/ActivateDeviceViewModel.js" 'class="login-activate-device-layout"'
+verify_guild_picker "$BUILD_DIR/js/view_models/login/ActivateDeviceViewModel.js" 'class="login-activation-code-input-wrapper"'
+verify_guild_picker "$BUILD_DIR/js/view_models/login/RecoverAccountStartViewModel.js" 'class="common-layout-col mod-justify-start"'
+verify_guild_picker "$BUILD_DIR/js/controllers/AuthController.js" "loginRecoverAccountStart()"
+verify_guild_picker "$BUILD_DIR/js/sui/SUIOffcanvas.js" 'class="sui-offcanvas-body sui-screen-body"'
 
 # Clean up .bak files
 find "$BUILD_DIR" -name "*.bak" -delete

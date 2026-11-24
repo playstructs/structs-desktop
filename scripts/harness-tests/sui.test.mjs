@@ -130,6 +130,11 @@ const BUDGET = {
   'comms-state.js':     [0, 0],
   'identity-backup.js': [0, 0],
   'saved-account.js': [0, 0],
+  // The guild chip and directory on the sign-in pages: hairlines, the label
+  // face (8/16) over main.css's link face and the card's reading face, the
+  // width of the game's fixed-256 button, and the offcanvas it makes room for.
+  'guild-picker.js': [0, 0],
+  'guild-picker.css': [0, 11],
   'bridge.js':          [0, 0],
   // The one place an embedded page gives up its frame: only the 4px inset
   // and the panel's own widths, all zeroed rather than invented.

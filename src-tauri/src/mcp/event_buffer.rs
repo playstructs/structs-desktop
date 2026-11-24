@@ -126,6 +126,12 @@ pub fn ingest(app: &tauri::AppHandle, event: GameEvent) {
         crate::mcp::guild_membership::on_grass(app, &event);
     }
 
+    // The player's own row, guild included: a join from anywhere (this app,
+    // another device, an approval or a kick) moves their connection with them.
+    if event.category == "player_consensus" {
+        crate::guild_directory::on_player_frame(app, &event.detail);
+    }
+
     // ── Combat events preempt the response cadence. ──
     // auto_response rides the sync tick at a 20 s internal cadence, so the
     // WORST-case gap between a raid arming and the first defensive shot was a

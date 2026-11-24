@@ -168,6 +168,13 @@ fn set_host_state(host: &str, f: impl FnOnce(&mut (u64, u64))) {
     f(g.get_or_insert_with(Default::default).entry(host.to_string()).or_insert((0, 0)));
 }
 
+/// The app points at another guild: what this module knows about a server's
+/// session was about the old one. Two guilds can share a server, so "signed in
+/// here a moment ago" is no answer after a switch.
+pub fn forget() {
+    *HOSTS.lock().unwrap_or_else(|p| p.into_inner()) = None;
+}
+
 pub fn health() -> Value {
     let ok = LAST_OK_MS.load(Ordering::Relaxed);
     json!({

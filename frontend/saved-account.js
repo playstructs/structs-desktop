@@ -192,6 +192,26 @@
     };
   }
 
+  /* Which guild the player is in, and where that guild's server is, are the
+   * chain's to say, and both move: a join signed on another device, a kick, a
+   * server that changed address. Signing in with yesterday's answer is refused
+   * by every retry, so the account that is about to sign in is checked as the
+   * window loads. Rust corrects the settings and reloads this window when they
+   * are stale; otherwise nothing happens. A guild the player has just picked
+   * from the directory is their own choice, and is left alone. */
+  function checkGuild() {
+    var pid = savedPlayerId();
+    var t = window.__TAURI__;
+    if (!pid || !t || !t.core) return;
+    try { if (sessionStorage.getItem('structsGuildPage')) return; } catch (e) { /* ignored */ }
+    Promise.resolve()
+      .then(function () {
+        return t.core.invoke('follow_saved_player', { playerId: pid, running: window.__STRUCTS_CONFIG__ || null });
+      })
+      .catch(function (e) { console.warn('[SavedAccount] guild check:', e); });
+  }
+  checkGuild();
+
   var current = window.menuPage;
   if (current) install(current);
   Object.defineProperty(window, 'menuPage', {

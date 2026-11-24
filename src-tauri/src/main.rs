@@ -111,6 +111,8 @@ fn main() {
             guild_config::delete_guild_config,
             guild_directory::refresh_guild_directory,
             guild_directory::apply_guild_switch,
+            guild_directory::guild_listings,
+            guild_directory::follow_saved_player,
             http_proxy::proxy_fetch,
             notifications::send_notification,
             mcp::log_bundle::export_log_bundle,

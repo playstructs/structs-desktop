@@ -1020,6 +1020,10 @@ pub async fn execute_as(app: &tauri::AppHandle, signer: &Signer, guild_id: Optio
         plan.payload = pv["payload"].clone();
     }
     let res = crate::mcp::tx_retry::sign_once(app, signer.index, plan.type_url, plan.payload, format!("guild:{action}")).await?;
+    // The primary moved guild: the servers this app talks to move too.
+    if signer.is_primary() && matches!(action, "join" | "accept_invite") {
+        crate::guild_directory::player_guild_moving(app);
+    }
     Ok(json!({
         "ok": true,
         "signed_as": signer.describe(),

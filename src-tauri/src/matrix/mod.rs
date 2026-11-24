@@ -144,7 +144,7 @@ const REAUTH_MAX_SECS: u64 = 300;
 /// is open: a thousand-player armada must not be a thousand chat sessions.
 fn wanted(app: &tauri::AppHandle, key: &str) -> bool {
     match store::player_of(key) {
-        None => true,
+        None => own_guild(key),
         Some(p) => app.get_webview_window(&chat_window_label(Some(p))).is_some(),
     }
 }
@@ -199,6 +199,41 @@ pub fn reauth(app: tauri::AppHandle, key: String) {
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .remove(&key);
+    });
+}
+
+/// Whether `key` belongs to the guild the player is in. A guild's server only
+/// signs in its own members, so the identity on a guild they have left is
+/// parked: kept, not synced, not retried.
+pub(crate) fn own_guild(key: &str) -> bool {
+    own_guild_id().is_none_or(|g| g == store::guild_of(key))
+}
+
+/// The player moved guild: speak from the new guild's homeserver. The identity
+/// left behind parks; its sync loop ends at its next pass. The new one signs in
+/// by itself when Comms was in use, and otherwise waits to be opened as ever.
+pub fn guild_changed(app: &tauri::AppHandle, old: &str, new: &str) {
+    if old == new {
+        return;
+    }
+    let (from, to) = (store::key_for(old, None), store::key_for(new, None));
+    let in_use = store::get(&from).is_some();
+    client::stop_sync(&from);
+    session::transition(app, &from, session::Phase::Idle, None);
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let has_server = crate::guild_config::get_guild_configs()
+            .iter()
+            .any(|c| c.guild_id == store::guild_of(&to) && c.matrix_url.is_some());
+        if store::get(&to).is_some() {
+            client::start_sync(app.clone(), to.clone());
+        } else if in_use && has_server {
+            // The game window is reloading, and it is what signs; the first
+            // try may come too soon. `reauth` keeps trying, further apart.
+            session::transition(&app, &to, session::Phase::Expired, None);
+            reauth(app.clone(), to.clone());
+        }
+        let _ = crate::mcp::events::emit_matrix(&app, "matrix::status", status_payload_as(&app, None).await);
     });
 }
 
@@ -2878,7 +2913,7 @@ pub fn boot(app: tauri::AppHandle) {
         // The primary only. A roster player's identity comes up when its
         // own window opens (`ensure_started`) — an armada is not a chat
         // connection per member.
-        if session.player_id.is_some() {
+        if session.player_id.is_some() || !own_guild(&session.guild_id) {
             continue;
         }
         client::start_sync(app.clone(), store::key_for(&session.guild_id, None));
