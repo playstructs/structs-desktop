@@ -58,14 +58,16 @@
       if (!snap) return;
 
       // Shield: the game's ShieldStatusComponent, as its raid-target HUD
-      // draws it (showTextStatus on) — see shield-readout.js. Derived from
+      // draws it — see shield-readout.js. That HUD shows a breach countdown
+      // and nothing at all while secure (webapp 5ba96281), so the Secure text
+      // is off here; the tooltip below still names the state. Derived from
       // the defender's Command Ship being on station, not from
       // `planetaryShield`: a shield-derived "breached" never showed, and a
       // defender with no ship on station read as secure.
       var shield = state().planetaryShield || snap.planetary_shield || 0;
       var status = state().raidStatus || snap.raid_status;
       var height = Number(state().height) || Number(snap.height) || 0;
-      var ro = window.ShieldReadout.readout(snap.owner_defenses_secure, status, shield, snap.block_start_raid, height);
+      var ro = window.ShieldReadout.readout(snap.owner_defenses_secure, status, shield, snap.block_start_raid, height, false);
       var valueEl = document.getElementById('rv-shield');
       if (valueEl) {
         valueEl.textContent = ro.text;

@@ -16,7 +16,8 @@
 // `planetaryShield` — that is the raid proof's decay range and practically
 // never reaches 0.
 //
-//   window.ShieldReadout.readout(secure, raidStatus, shield, blockStartRaid, height)
+//   window.ShieldReadout.readout(secure, raidStatus, shield, blockStartRaid,
+//                                height, showSecureText)
 //     → { state: 'secure'|'vulnerable'|'breached'|null, text, warning }
 (function () {
   'use strict';
@@ -56,12 +57,18 @@
 
   /**
    * @param {boolean|null|undefined} secure  the snapshot's owner_defenses_secure
+   * @param {boolean} [showSecureText=true] spell out Secure while secure. The game's
+   *   HUD stopped doing that in webapp 5ba96281 — StatusBarTopRightComponent now
+   *   passes ShieldStatusComponent showSecureText false, so a secure planet's HUD
+   *   reads blank and only a breach shows a countdown. Its card surfaces still
+   *   spell it out, which is why this defaults to on.
    * @return {{state: string|null, text: string, warning: boolean}}
    *   state null = could not tell; a caller keeps whatever it last showed.
    */
-  function readout(secure, raidStatus, shield, blockStartRaid, height) {
+  function readout(secure, raidStatus, shield, blockStartRaid, height, showSecureText) {
     if (secure == null) return { state: null, text: '—', warning: false };
-    if (secure) return { state: 'secure', text: 'Secure', warning: false };
+    // The STATE stays 'secure' either way: it drives the icon, not the words.
+    if (secure) return { state: 'secure', text: showSecureText === false ? '' : 'Secure', warning: false };
     var breached = !!RAID_ACTIVE[raidStatus];
     // The countdown only once breached, and only with a raid start and a head
     // to measure from; otherwise the projected time from scratch.

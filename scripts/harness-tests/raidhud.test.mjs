@@ -69,7 +69,7 @@ function boot(state, target) {
   assert.ok(/shield_vulnerable_raid_enemy/.test(d.getElementById('rv-shield-icon').innerHTML));
 
   snap.owner_defenses_secure = true; snap.raid_status = 'shieldsVulnerable'; hud.renderHeader();
-  assert.equal(d.getElementById('rv-shield').textContent, 'Secure', 'a ship on station keeps it secure, raid or not');
+  assert.equal(d.getElementById('rv-shield').textContent, '', 'a ship on station: secure, and the HUD says nothing');
   assert.ok(/shield_secure/.test(d.getElementById('rv-shield-icon').innerHTML));
   assert.ok(!d.getElementById('rv-shield').classList.contains('sui-text-warning'));
   assert.ok(/^Planetary shield\nSecure\nShield 40\nRaid: shields vulnerable$/.test(d.getElementById('rv-shield-res').getAttribute('data-sui-tooltip')));
@@ -119,6 +119,20 @@ function boot(state, target) {
   assert.equal(SR.readout(false, null, 238, 0, 1400).text, f.formatDuration(e.getTimeRemainingEstimate(238, 1, 1)));
   assert.equal(SR.readout(false, 'raidSuccessful', 238, 1000, 1400).state, 'vulnerable', 'an ended raid is not a breach');
   assert.equal(SR.readout(false, 'initiated', 238, 0, 1400).state, 'breached', 'breached without a start block: projected time');
+
+  // Whether the HUD spells out Secure is the game's call, not ours, so pin it
+  // to the game's own source rather than to our expectation. Our port kept
+  // saying Secure for a while after webapp 5ba96281 turned it off, because the
+  // only assertion on that word was this suite agreeing with itself.
+  const shieldComp = fs.readFileSync(new URL('view_models/components/ShieldStatusComponent.js', webapp), 'utf8');
+  const hudComp = fs.readFileSync(new URL('view_models/components/hud/StatusBarTopRightComponent.js', webapp), 'utf8');
+  assert.ok(/this\.showSecureText\s*\?\s*'Secure'\s*:\s*''/.test(shieldComp),
+    'the game still gates the Secure word on showSecureText');
+  assert.ok(/new ShieldStatusComponent\([^)]*\bfalse\b[^)]*\)/.test(hudComp),
+    "the game's own HUD still passes showSecureText false");
+  assert.equal(SR.readout(true, null, 40, 0, 0, false).text, '', 'HUD surfaces: blank while secure');
+  assert.equal(SR.readout(true, null, 40, 0, 0).text, 'Secure', 'card surfaces still spell it out');
+  assert.equal(SR.readout(true, null, 40, 0, 0, false).state, 'secure', 'the state is unchanged either way');
 }
 
 // 4. A fleet window says where the fleet is; no snapshot says connecting.
