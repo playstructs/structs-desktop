@@ -58,6 +58,17 @@ const MAX_HASH_RESTARTS: u32 = 10;
 const SYNC_STALL_FACTOR: f64 = 3.0;
 /// Native notification threshold: same remedy failed this many checks in a row.
 const NOTIFY_AFTER_FAILURES: u32 = 2;
+/// A finding that persists is repeated in the feed no more often than this.
+const FEED_REPEAT_MS: f64 = 30.0 * 60_000.0;
+/// …and as a native notification no more often than this.
+const NOTIFY_REPEAT_MS: f64 = 60.0 * 60_000.0;
+/// A finding absent for this long is over; seen again sooner, it is the same
+/// episode flapping and stays quiet.
+const EPISODE_GAP_MS: f64 = 10.0 * 60_000.0;
+/// A loop is FAILING when this many scans in a row erred without acting…
+const FAILING_RUNS: u32 = 10;
+/// …over at least this long (the response loop scans every few seconds).
+const FAILING_MS: f64 = 10.0 * 60_000.0;
 /// Don't reload the webview more often than this. A reload is cheap for Rust
 /// (the GPU proofs and every loop live there) but it restarts the webapp's own
 /// state, so a reload LOOP would be worse than the fault it heals.
@@ -83,6 +94,36 @@ struct LoopStat {
     /// "wedged" every cycle while doing real work the whole time).
     last_progress_ms: f64,
     running: bool,
+    /// Consecutive finished scans that erred and did nothing, and when the
+    /// first of them finished. A loop can run on time, every time, and fail
+    /// every time: auto_response did for a day behind a status of "ok".
+    failing_runs: u32,
+    failing_since_ms: f64,
+}
+
+impl LoopStat {
+    fn note_outcome(&mut self, ts_ms: f64, actions: u32, errors: u32) {
+        if errors > 0 && actions == 0 {
+            if self.failing_runs == 0 {
+                self.failing_since_ms = ts_ms;
+            }
+            self.failing_runs = self.failing_runs.saturating_add(1);
+        } else {
+            self.failing_runs = 0;
+        }
+    }
+
+    fn is_failing(&self, now: f64) -> bool {
+        self.failing_runs >= FAILING_RUNS && now - self.failing_since_ms >= FAILING_MS
+    }
+}
+
+/// loop → its latest warning, so a "failing" finding can say why.
+static LAST_WARNING: LazyLock<Mutex<HashMap<&'static str, String>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+pub fn note_loop_warning(name: &'static str, msg: &str) {
+    lock_recover(&LAST_WARNING).insert(name, msg.chars().take(160).collect());
 }
 
 static LOOPS: LazyLock<Mutex<HashMap<&'static str, LoopStat>>> =
@@ -126,8 +167,57 @@ pub fn note_hash_restarted(id: &str) {
 }
 /// finding key (e.g. "wedged:auto_build", "sync") -> consecutive checks the
 /// condition survived a remediation attempt.
-static REMEDY_FAILS: LazyLock<Mutex<HashMap<String, u32>>> =
+static EPISODES: LazyLock<Mutex<HashMap<String, Episode>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// One finding over time. Detection runs every minute and most conditions last
+/// longer than that; what the user is told must follow the EPISODE, not the
+/// check. On 2026-11-24 a read-saturation finding repeated itself in the feed
+/// 956 times and raised a notification every two minutes.
+#[derive(Debug, Clone, Copy, Default)]
+struct Episode {
+    first_seen_ms: f64,
+    last_seen_ms: f64,
+    /// Consecutive checks it has been seen, this episode.
+    checks: u32,
+    /// Remedies applied since the last remedy-failed notification.
+    remedies: u32,
+    last_fed_ms: f64,
+    last_notified_ms: f64,
+}
+
+impl Episode {
+    /// Note a sighting; true when the feed should carry it.
+    fn sighted(&mut self, now: f64) -> bool {
+        if self.checks == 0 || now - self.last_seen_ms > EPISODE_GAP_MS {
+            *self = Episode { first_seen_ms: now, ..Episode::default() };
+        }
+        self.last_seen_ms = now;
+        self.checks += 1;
+        let feed = self.last_fed_ms == 0.0 || now - self.last_fed_ms >= FEED_REPEAT_MS;
+        if feed {
+            self.last_fed_ms = now;
+        }
+        feed
+    }
+
+    /// What to append to a native notification now, or `None` for silence.
+    fn notification(&mut self, now: f64) -> Option<String> {
+        if self.last_notified_ms > 0.0 && now - self.last_notified_ms < NOTIFY_REPEAT_MS {
+            return None;
+        }
+        let why = if self.remedies >= NOTIFY_AFTER_FAILURES {
+            format!("remediation failed {} times", self.remedies)
+        } else if self.remedies == 0 && self.checks > NOTIFY_AFTER_FAILURES {
+            format!("for {} min", ((now - self.first_seen_ms) / 60_000.0).round().max(1.0))
+        } else {
+            return None;
+        };
+        self.remedies = 0;
+        self.last_notified_ms = now;
+        Some(why)
+    }
+}
 /// When the last webview reload was requested (0 = never).
 /// Soft (event-based) reload attempts since the bridge was last healthy. The
 /// first attempt of an outage is soft; once one full cooldown passes with the
@@ -155,11 +245,12 @@ pub fn note_loop_started(name: &'static str, ts_ms: f64) {
     s.running = true;
 }
 
-pub fn note_loop_finished(name: &'static str, ts_ms: f64) {
+pub fn note_loop_finished(name: &'static str, ts_ms: f64, actions: u32, errors: u32) {
     let mut m = lock_recover(&LOOPS);
     let s = m.entry(name).or_default();
     s.last_finished_ms = ts_ms;
     s.running = false;
+    s.note_outcome(ts_ms, actions, errors);
 }
 
 /// Record a sign of life from a running scan. Called from the telemetry
@@ -171,9 +262,9 @@ pub fn note_loop_progress(name: &'static str) {
     s.last_progress_ms = now_millis();
 }
 
-/// The seven native loop names — used to map free-form telemetry components /
+/// The native loop names (every one `loop_configs` checks) — used to map free-form telemetry components /
 /// tx contexts back onto a loop's liveness entry.
-pub const LOOP_NAMES: [&str; 7] = [
+pub const LOOP_NAMES: [&str; 9] = [
     "auto_harvest",
     "auto_build",
     "auto_defend",
@@ -181,6 +272,8 @@ pub const LOOP_NAMES: [&str; 7] = [
     "auto_sweep",
     "auto_response",
     "auto_raid",
+    "delegation",
+    "auto_replicate",
 ];
 
 /// Resolve a component name or tx context ("auto_sweep", "auto_sweep:1-821")
@@ -190,6 +283,8 @@ pub fn loop_name_of(component_or_context: &str) -> Option<&'static str> {
         .split(':')
         .next()
         .unwrap_or(component_or_context);
+    // The replication loop logs under its card's name.
+    let head = if head == "replicate" { "auto_replicate" } else { head };
     LOOP_NAMES.iter().find(|n| **n == head).copied()
 }
 
@@ -205,6 +300,9 @@ struct Finding {
     key: String,
     severity: Sev,
     message: String,
+    /// Worth a native notification if it persists. False for a condition the
+    /// app already adapts to by itself.
+    notify: bool,
     /// Remedy to apply when `watchdog_remediate` is on. Returns a short
     /// description of what was done.
     remedy: Option<Box<dyn FnOnce(&tauri::AppHandle) -> String + Send>>,
@@ -268,6 +366,7 @@ fn detect(app: &tauri::AppHandle, now: f64) -> Vec<Finding> {
                 "sync tick stalled: no game-state sync for {age_s}s (interval {}s)",
                 (sync_interval / 1000.0) as u64
             ),
+            notify: true,
             remedy: Some(Box::new(|app: &tauri::AppHandle| {
                 // The JS handler is debounced, so an extra tick is always safe.
                 let _ = crate::mcp::events::emit(app, crate::mcp::events::AppEvent::SyncTick);
@@ -285,14 +384,31 @@ fn detect(app: &tauri::AppHandle, now: f64) -> Vec<Finding> {
             key: format!("capacity:{}", resource.as_str()),
             severity: Sev::Warn,
             message: format!("{} saturated: {why}", resource.as_str()),
+            notify: false,
             remedy: None,
         });
     }
 
-    // Per-loop overdue / wedged.
+    // Per-loop overdue / wedged / failing.
     let stats = lock_recover(&LOOPS).clone();
     for (name, enabled, interval_ms) in loop_configs() {
         let stat = stats.get(name).copied().unwrap_or_default();
+
+        if enabled && stat.is_failing(now) {
+            let why = lock_recover(&LAST_WARNING).get(name).cloned();
+            findings.push(Finding {
+                key: format!("failing:{name}"),
+                severity: Sev::Warn,
+                message: format!(
+                    "{name} failing: {} scans in a row did nothing over {} min{}",
+                    stat.failing_runs,
+                    ((now - stat.failing_since_ms) / 60_000.0) as u64,
+                    why.map(|w| format!(" — {w}")).unwrap_or_default()
+                ),
+                notify: true,
+                remedy: None, // what it keeps being refused is the thing to fix
+            });
+        }
 
         // Wedged = guard held AND no sign of life. Run duration alone is NOT
         // wedged: at fleet scale a healthy scan legitimately outlives
@@ -318,6 +434,7 @@ fn detect(app: &tauri::AppHandle, now: f64) -> Vec<Finding> {
                 key: format!("wedged:{name}"),
                 severity: Sev::Error,
                 message: format!("{name} wedged: guard held with no sign of life for {mins} min"),
+                notify: true,
                 remedy: Some(Box::new(move |_| {
                     reset_loop_guard(&name_owned);
                     format!("reset {name_owned} RUNNING guard")
@@ -341,6 +458,7 @@ fn detect(app: &tauri::AppHandle, now: f64) -> Vec<Finding> {
                         "{name} overdue: enabled but no completed scan for {mins} min (interval {}s)",
                         (interval_ms / 1000.0) as u64
                     ),
+                    notify: true,
                     remedy: None, // next healthy sync tick runs it; nothing to force
                 });
             }
@@ -370,6 +488,7 @@ fn detect(app: &tauri::AppHandle, now: f64) -> Vec<Finding> {
                 "signing bridge unresponsive: {timeouts} consecutive round-trips timed out, \
                  silent for {silent_s}s — no transaction can land until it answers"
             ),
+            notify: true,
             remedy: if since_reload < BRIDGE_RELOAD_COOLDOWN_MS {
                 None // still inside the cooldown of the previous reload
             } else {
@@ -434,6 +553,7 @@ fn detect(app: &tauri::AppHandle, now: f64) -> Vec<Finding> {
             message: "signing client saturated: the webview answers but cannot reach the node — \
                       signs are failing fast while the connection pool drains"
                 .into(),
+            notify: true,
             remedy: if since_reload < BRIDGE_RELOAD_COOLDOWN_MS {
                 None // give fail-fast + the previous reload their chance first
             } else {
@@ -493,6 +613,7 @@ fn detect(app: &tauri::AppHandle, now: f64) -> Vec<Finding> {
                                  at zero iterations (starved behind easier proofs, or a dead worker)"
                             )
                         },
+                        notify: true,
                         remedy: Some(Box::new(move |app: &tauri::AppHandle| {
                             // REMOVE + cancel, not just cancel: a zombie task
                             // whose worker died (e.g. unclean restart) never
@@ -535,6 +656,14 @@ fn detect(app: &tauri::AppHandle, now: f64) -> Vec<Finding> {
                             // reported rather than retried forever.
                             let restarts = note_hash_restart(&id);
                             if restarts > MAX_HASH_RESTARTS {
+                                // The end of the line for this task: said to
+                                // the player, not only to the log.
+                                tlog_feed(
+                                    app,
+                                    "watchdog",
+                                    Sev::Error,
+                                    format!("hash task {id} dropped after {MAX_HASH_RESTARTS} restarts without progress"),
+                                );
                                 return format!(
                                     "removed stalled hash task {id} after {MAX_HASH_RESTARTS} restarts — \
                                      the hash engine is not making progress on it"
@@ -600,45 +729,41 @@ pub fn check(app: &tauri::AppHandle) {
         .map(|e| e.is_enabled("watchdog_remediate"))
         .unwrap_or(false);
 
-    let mut fails = lock_recover(&REMEDY_FAILS);
-    let current_keys: Vec<String> = findings.iter().map(|f| f.key.clone()).collect();
+    let mut episodes = lock_recover(&EPISODES);
 
     for f in findings {
-        tlog_feed(app, "watchdog", f.severity, &f.message);
-
-        // A key that was remediated last check and is still firing = the
-        // remedy failed. Escalate to a native notification at the threshold.
-        let attempts = fails.entry(f.key.clone()).or_insert(0);
-        if *attempts >= NOTIFY_AFTER_FAILURES {
-            crate::notifications::notify_on(
-                "watchdog",
-                "Structs watchdog",
-                &format!("{} — remediation failed {} times", f.message, *attempts),
-            );
-            *attempts = 0; // re-escalate only after another full cycle of failures
+        let ep = episodes.entry(f.key.clone()).or_default();
+        if ep.sighted(now) {
+            tlog_feed(app, "watchdog", f.severity, &f.message);
         }
 
-        match (remediate, f.remedy) {
-            (true, Some(remedy)) => {
-                let did = remedy(app);
-                tlog_kv(
-                    "watchdog",
-                    Sev::Notice,
-                    format!("remediation: {did}"),
-                    json!({ "finding": f.key, "attempt": *fails.get(&f.key).unwrap_or(&0) + 1 }),
-                );
-                *fails.get_mut(&f.key).unwrap() += 1;
+        // A key that was remediated last check and is still firing = the
+        // remedy failed; one with no remedy that persists is the user's to
+        // know about. Either way once per episode, then hourly.
+        if f.notify {
+            if let Some(why) = ep.notification(now) {
+                crate::notifications::notify_on("watchdog", "Structs watchdog", &format!("{} — {why}", f.message));
             }
-            _ => {
-                // Detection-only (no remedy, or remediation disabled): count
-                // persistence anyway so repeated findings still escalate.
-                *fails.get_mut(&f.key).unwrap() += 1;
-            }
+        }
+
+        if let (true, Some(remedy)) = (remediate, f.remedy) {
+            let did = remedy(app);
+            ep.remedies += 1;
+            tlog_kv(
+                "watchdog",
+                Sev::Notice,
+                format!("remediation: {did}"),
+                json!({ "finding": f.key, "attempt": ep.remedies }),
+            );
         }
     }
 
-    // Conditions that cleared: drop their failure counters.
-    fails.retain(|k, _| current_keys.contains(k));
+    // Conditions that have stayed clear: forget them. A remedy only counts as
+    // failed when the condition is there on the very next check.
+    for ep in episodes.values_mut().filter(|e| e.last_seen_ms < now) {
+        ep.remedies = 0;
+    }
+    episodes.retain(|_, e| now - e.last_seen_ms <= EPISODE_GAP_MS);
 }
 
 // ── Health snapshot (for GET /health and structs_system status) ──
@@ -656,8 +781,12 @@ pub fn health_snapshot() -> Value {
     let stats = lock_recover(&LOOPS).clone();
     let mut overdue = Vec::new();
     let mut wedged = Vec::new();
+    let mut failing = Vec::new();
     for (name, enabled, interval_ms) in loop_configs() {
         let stat = stats.get(name).copied().unwrap_or_default();
+        if enabled && stat.is_failing(now) {
+            failing.push(name);
+        }
         // Same progress-aware test as the findings pass: a guard held for a
         // long time is NOT wedged while the scan keeps logging / signing txs.
         // The duration-only version here reported auto_defend's first
@@ -699,7 +828,7 @@ pub fn health_snapshot() -> Value {
     let node_behind = crate::mcp::chain_health::lcd_stalled();
     let status = if bridge_down || sync_stalled || node_behind || !wedged.is_empty() {
         "degraded"
-    } else if !overdue.is_empty() {
+    } else if !overdue.is_empty() || !failing.is_empty() {
         "warn"
     } else {
         "ok"
@@ -714,6 +843,7 @@ pub fn health_snapshot() -> Value {
         "sync_interval_ms": sync_interval as u64,
         "loops_overdue": overdue,
         "loops_wedged": wedged,
+        "loops_failing": failing,
         "uptime_s": ((now - app_start) / 1000.0) as u64,
         "telemetry_dropped": crate::mcp::telemetry::dropped_count(),
         // Our own pressure on the shared Guild API — total since launch plus
@@ -755,6 +885,78 @@ mod tests {
         assert_eq!(loop_name_of("hasher"), None);
         // A context whose prefix merely STARTS with a loop name is not a match.
         assert_eq!(loop_name_of("auto_sweeper:1-1"), None);
+    }
+
+    /// A condition that lasts all day is not news every minute.
+    #[test]
+    fn a_persisting_finding_is_fed_and_notified_sparingly() {
+        let min = 60_000.0;
+        let mut ep = Episode::default();
+        let (mut fed, mut notified) = (0, 0);
+        for m in 1..=(24 * 60) {
+            let now = m as f64 * min;
+            fed += ep.sighted(now) as u32;
+            notified += ep.notification(now).is_some() as u32;
+        }
+        assert_eq!(fed, 48, "every half hour");
+        assert_eq!(notified, 24, "hourly");
+    }
+
+    #[test]
+    fn a_finding_notifies_only_once_it_persists() {
+        let min = 60_000.0;
+        let mut ep = Episode::default();
+        assert!(ep.sighted(min), "the rising edge is fed");
+        assert_eq!(ep.notification(min), None);
+        assert!(!ep.sighted(2.0 * min));
+        assert_eq!(ep.notification(2.0 * min), None);
+        assert!(!ep.sighted(3.0 * min));
+        assert_eq!(ep.notification(3.0 * min).as_deref(), Some("for 2 min"), "no remedy was tried, so none failed");
+
+        // Clears for one check and returns: the same episode, still quiet.
+        assert!(!ep.sighted(5.0 * min));
+        assert_eq!(ep.notification(5.0 * min), None);
+        // Gone for good, then back: news.
+        assert!(ep.sighted(30.0 * min));
+    }
+
+    #[test]
+    fn a_failed_remedy_says_so() {
+        let min = 60_000.0;
+        let mut ep = Episode::default();
+        for m in 1..=2 {
+            ep.sighted(m as f64 * min);
+            assert_eq!(ep.notification(m as f64 * min), None);
+            ep.remedies += 1;
+        }
+        ep.sighted(3.0 * min);
+        assert_eq!(ep.notification(3.0 * min).as_deref(), Some("remediation failed 2 times"));
+    }
+
+    /// The gap this closes: 245 of 245 scans an hour failed and nothing said so.
+    #[test]
+    fn a_loop_that_only_fails_is_failing() {
+        let mut s = LoopStat::default();
+        for i in 0..FAILING_RUNS {
+            s.note_outcome(i as f64 * 1000.0, 0, 1);
+        }
+        assert!(!s.is_failing(20_000.0), "a short burst is not a failing loop");
+        assert!(s.is_failing(FAILING_MS));
+        // Any progress, or a clean idle scan, ends it.
+        let mut acted = s;
+        acted.note_outcome(FAILING_MS, 1, 3);
+        assert!(!acted.is_failing(FAILING_MS * 2.0));
+        s.note_outcome(FAILING_MS, 0, 0);
+        assert!(!s.is_failing(FAILING_MS * 2.0));
+    }
+
+    /// A loop the wedge test judges must be one that can show signs of life.
+    #[test]
+    fn every_watched_loop_can_report_progress() {
+        for (name, _, _) in loop_configs() {
+            assert_eq!(loop_name_of(name), Some(name));
+        }
+        assert_eq!(loop_name_of("replicate"), Some("auto_replicate"));
     }
 
     #[test]

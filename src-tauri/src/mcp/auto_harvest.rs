@@ -76,6 +76,9 @@ impl Default for AutoHarvestConfig {
 }
 
 static CONFIG: LazyLock<RwLock<AutoHarvestConfig>> = LazyLock::new(|| RwLock::new(load()));
+/// Players whose explore the chain refuses.
+static EXPLORE_BACKOFF: LazyLock<crate::mcp::loop_util::Backoff> =
+    LazyLock::new(|| crate::mcp::loop_util::Backoff::new(10.0 * 60_000.0, 2.0 * 3_600_000.0));
 static LAST_SCAN: LazyLock<Mutex<f64>> = LazyLock::new(|| Mutex::new(0.0));
 static HARVESTING: AtomicBool = AtomicBool::new(false);
 
@@ -518,6 +521,9 @@ async fn scan(
                         }
                         anchor
                     };
+                    if !crate::mcp::loop_util::COMPLETION_BACKOFF.ready(sid) {
+                        continue; // the chain refused this one's completion
+                    }
                     let params = TaskParams::for_ore(sid, pick.kind.as_str(), anchor, pick.range);
                     if crate::hasher::start_hash_task_core(params, app.clone(), &registry).is_ok() {
                         if let Some(idx) = idx_opt {
@@ -611,7 +617,7 @@ async fn scan(
                         let drained_only = caps.explore_when_drained_only && plan.has_refinery.contains(pid.as_str());
                         let due = explore_due(planet_ore, live_player.stored_ore, drained_only);
                         crate::mcp::verify::note_explore_ready(due);
-                        if due {
+                        if due && EXPLORE_BACKOFF.ready(pid.as_str()) {
                             let res = crate::mcp::tx_retry::sign_with_retry(
                                 &app,
                                 idx,
@@ -645,6 +651,9 @@ async fn scan(
                                 }
                                 Err(e) => {
                                     run.errors.fetch_add(1, Ordering::Relaxed);
+                                    if !crate::mcp::tx_retry::worth_retrying_soon(&e) {
+                                        EXPLORE_BACKOFF.fail(pid.as_str());
+                                    }
                                     crate::mcp::telemetry::tlog(
                                         "auto_harvest",
                                         crate::mcp::telemetry::Sev::Warn,

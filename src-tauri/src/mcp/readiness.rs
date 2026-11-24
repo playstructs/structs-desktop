@@ -125,8 +125,8 @@ impl Hull {
         operating_ambit: u64,
         t: &crate::game_state::StructTypeInfo,
     ) -> Option<Self> {
-        let prim = WeaponStats::from_type(t, false);
-        let sec = WeaponStats::from_type(t, true);
+        let prim = WeaponStats::from_type(t, false).standing_in(operating_ambit);
+        let sec = WeaponStats::from_type(t, true).standing_in(operating_ambit);
         let reach = prim.ambits | sec.ambits;
         if reach == 0 {
             return None;

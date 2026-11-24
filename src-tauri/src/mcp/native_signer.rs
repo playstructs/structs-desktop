@@ -472,6 +472,13 @@ fn rejection_error(code: i64, codespace: &str, raw_log: &str) -> String {
     format!("Broadcasting transaction failed with code {code} (codespace: {codespace}). Log: {raw_log}")
 }
 
+/// What became of a transaction: its code if a block holds it, `None` if not.
+/// `Err` is "could not look", which is neither.
+pub async fn tx_outcome(hash: &str) -> Result<Option<i64>, String> {
+    let base = super::cosmos_client::reactor_api_base();
+    Ok(lookup_tx(&base, hash).await?.map(|(code, _, _)| code))
+}
+
 /// Included tx: (code, height, raw_log). `Ok(None)` = not in a block yet.
 async fn lookup_tx(base: &str, hash: &str) -> Result<Option<(i64, u64, String)>, String> {
     let resp = super::cosmos_client::client()

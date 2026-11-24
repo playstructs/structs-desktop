@@ -493,7 +493,7 @@ pub async fn tick(app: &tauri::AppHandle, force: bool) {
     announce(app);
 }
 
-async fn round(app: &tauri::AppHandle, cfg: &AutoReplicateConfig, run: &LoopRun) {
+async fn round(app: &tauri::AppHandle, cfg: &AutoReplicateConfig, run: &std::sync::Arc<LoopRun>) {
     let gp = guild_power(true).await;
     let sig = signals(gp.as_ref(), cfg);
     let (room, why) = room_for(cfg, &sig);
@@ -579,9 +579,11 @@ async fn round(app: &tauri::AppHandle, cfg: &AutoReplicateConfig, run: &LoopRun)
     let guild_id = crate::game_state::GAME_STATE.read().ok().and_then(|g| g.guild_id.clone()).filter(|s| !s.is_empty());
     let app_c = app.clone();
     let guild_c = guild_id.clone();
+    let run_c = run.clone();
     crate::mcp::loop_util::for_each_player_concurrent(jobs, LAUNCH_CONCURRENCY, move |(index, snap)| {
         let app = app_c.clone();
         let guild_id = guild_c.clone();
+        let run = run_c.clone();
         async move {
             let name = crate::mcp::callsign::name_for(index);
             let profile = crate::mcp::profile::find(&snap);
@@ -594,6 +596,8 @@ async fn round(app: &tauri::AppHandle, cfg: &AutoReplicateConfig, run: &LoopRun)
             s.incubating.retain(|i| i.index != index);
             match res {
                 Ok(sp) => {
+                    run.actions.fetch_add(1, Ordering::Relaxed);
+                    run.acted();
                     s.pending = s.pending.saturating_sub(1);
                     s.births.push(now_millis());
                     let keep = now_millis() - 25.0 * 3_600_000.0;
@@ -618,6 +622,8 @@ async fn round(app: &tauri::AppHandle, cfg: &AutoReplicateConfig, run: &LoopRun)
                     s.held_reason = Some("bridge".into());
                     persist(&s);
                     drop(s);
+                    run.errors.fetch_add(1, Ordering::Relaxed);
+                    run.blocked(format!("{name}: signup failed: {e}"));
                     tlog("replicate", Sev::Warn, format!("{name}: signup failed: {e}"));
                 }
             }
@@ -625,7 +631,6 @@ async fn round(app: &tauri::AppHandle, cfg: &AutoReplicateConfig, run: &LoopRun)
         }
     })
     .await;
-    run.acted();
     crate::mcp::roster_cache::trigger_sweep(app.clone(), 0.0);
 }
 

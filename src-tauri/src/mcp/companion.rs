@@ -254,8 +254,7 @@ pub fn state(_app: &tauri::AppHandle) -> Value {
     let work = crate::mcp::crew_work::get();
     let owed: f64 = crate::mcp::crew_pay::credits()
         .iter()
-        .filter(|c| c.settled_at.is_none())
-        .map(|c| c.amount_base)
+        .map(|c| c.owed())
         .sum();
 
     let mut v = json!({

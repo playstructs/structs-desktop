@@ -544,14 +544,37 @@ pub async fn authority_of(
     let direct_mask = client.permission_value(owner, me).await?;
 
     // The guild-rank leg is only asked when we're in a guild at all, and a
-    // failure there is not fatal: a direct grant already answers yes, and
-    // asking the chain for a register that may not exist should not turn a
-    // working crew off.
+    // failure there is not fatal WHEN A DIRECT GRANT ALREADY ANSWERS YES.
+    // Otherwise it is the answer, and "could not ask" must not be handed back
+    // — or cached for five minutes — as "denied".
     let (my_rank, rank_records) = if my_guild.is_empty() {
         (0, Vec::new())
     } else {
-        let rank = player_guild_rank(client, me).await.unwrap_or(u64::MAX);
-        (rank, rank_records_for(client, owner, my_guild).await.unwrap_or_default())
+        let rank = player_guild_rank(client, me).await;
+        let records = rank_records_for(client, owner, my_guild).await;
+        match (rank, records) {
+            (Ok(rank), Ok(records)) => (rank, records),
+            (rank, records) => {
+                let direct = decide(
+                    &AuthorityFacts {
+                        owner: owner.to_string(),
+                        me: me.to_string(),
+                        address_mask,
+                        direct_mask,
+                        my_rank: u64::MAX,
+                        rank_records: Vec::new(),
+                    },
+                    task,
+                );
+                if direct.allows() {
+                    return Ok(direct);
+                }
+                return Err(format!(
+                    "guild-rank grants could not be read: {}",
+                    rank.err().or(records.err()).unwrap_or_default()
+                ));
+            }
+        }
     };
 
     AUTH_CACHE.insert(

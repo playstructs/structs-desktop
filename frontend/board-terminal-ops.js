@@ -689,7 +689,8 @@
             var r = byPheral[c.helper_player] || (byPheral[c.helper_player] = { who: c.helper_player, proofs: 0, difficulty: 0, owed: 0, paid: 0, denom: c.denom });
             r.proofs += 1;
             r.difficulty += Number(c.difficulty) || 0;
-            if (c.settled_at) r.paid += Number(c.amount_base) || 0; else r.owed += Number(c.amount_base) || 0;
+            var total = Number(c.amount_base) || 0, part = Number(c.paid_base) || 0;
+            if (c.settled_at) r.paid += total; else { r.paid += part; r.owed += Math.max(0, total - part); }
           });
           var floor = pay.per_helper_cap > 0 ? Math.min(pay.min_payout || 0, pay.per_helper_cap) : (pay.min_payout || 0);
           var ledger = Object.keys(byPheral).map(function (k) { return byPheral[k]; })
@@ -724,7 +725,8 @@
               after: function () { T.refresh(ctx.id, true); },
             }));
           } else {
-            settle.appendChild(H.el('span', 'fstat-l', ledger.length ? 'nothing due' : 'nobody has finished anything for you yet'));
+            var held = (l.unconfirmed || []).length;
+            settle.appendChild(H.el('span', 'fstat-l', held ? plural(held, 'payment') + ' unconfirmed' : ledger.length ? 'nothing due' : 'nobody has finished anything for you yet'));
           }
           host.appendChild(settle);
 

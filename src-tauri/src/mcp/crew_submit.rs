@@ -350,6 +350,7 @@ pub fn drain_held(app: &tauri::AppHandle) {
             match out {
                 Ok(Some(v)) => tlog("crew", Sev::Info, format!("finished {} from a pheral: {v}", h.object)),
                 Ok(None) => {}
+                Err(e) if e.starts_with(UNREAD) => hold(h),
                 Err(e) => tlog("crew", Sev::Debug, format!("{} not accepted: {e}", h.object)),
             }
             tokio::time::sleep(std::time::Duration::from_millis(HELD_SPACING_MS)).await;
@@ -422,10 +423,14 @@ pub fn absorb_result_frames(
         let guild = guild_id.to_string();
         let room = room_id.to_string();
         let app = app.clone();
+        let ts = m.ts;
         tauri::async_runtime::spawn(async move {
             let out = accept(&app, &object, &task, anchor, &nonce, target.as_deref(), helper.as_deref(), &guild, &room).await;
             note_outcome(&out);
             match out {
+                Err(e) if e.starts_with(UNREAD) => {
+                    hold(Held { guild, room, object, task, anchor, nonce, target, helper, ts });
+                }
                 Ok(Some(v)) => tlog(
                     "crew",
                     Sev::Info,
@@ -443,6 +448,10 @@ pub fn absorb_result_frames(
         tlog("crew", Sev::Info, format!("holding {held} result frame(s) until the world is loaded"));
     }
 }
+
+/// Prefix of an error that is ours, not the proof's: a read failed, so nothing
+/// was judged. The frame is held and judged later rather than lost.
+const UNREAD: &str = "could not check: ";
 
 /// Verify one result and submit it. `Ok(None)` means "not ours / not now",
 /// which is ordinary; `Err` means the claim was bad.
@@ -472,7 +481,9 @@ pub async fn accept(
     let client = CosmosClient::new();
 
     // WHOSE is it? From the chain, never from the message.
-    let on_chain = object_view(&client, object, kind).await?;
+    let on_chain = object_view(&client, object, kind).await.map_err(|e| {
+        if crate::mcp::perception::is_not_found(&e) { e } else { format!("{UNREAD}{e}") }
+    })?;
     let owner = on_chain.owner.clone();
     let signer = match signer_for(&owner, &primary) {
         Some(s) => s,
@@ -483,7 +494,8 @@ pub async fn accept(
                 .and_then(|g| g.guild_id.clone()).unwrap_or_default();
             match crate::mcp::crew::authority_of(&client, &owner, &primary, &my_guild, kind).await {
                 Ok(a) if a.allows() => Signer::Delegated,
-                _ => return Ok(None), // nothing we could sign, so nothing to check
+                Ok(_) => return Ok(None), // nothing we could sign, so nothing to check
+                Err(e) => return Err(format!("{UNREAD}{e}")),
             }
         }
     };
@@ -637,6 +649,7 @@ fn credit_helper(helper: &str, room_id: &str, object: &str, kind: TaskType, bar:
         denom: c.pay.denom.clone(),
         settled_at: None,
         settle_tx: None,
+        paid_base: 0.0,
     };
     match crate::mcp::crew_pay::record(credit) {
         Ok(true) => {

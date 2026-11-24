@@ -347,6 +347,9 @@ fn persist_memory() {
 }
 /// How long a player sits out after a deterministic initiate rejection.
 const INITIATE_BACKOFF_MS: f64 = 30.0 * 60_000.0;
+/// `{player}|{type}` the chain refuses to start.
+static TYPE_BACKOFF: LazyLock<crate::mcp::loop_util::Backoff> =
+    LazyLock::new(|| crate::mcp::loop_util::Backoff::new(INITIATE_BACKOFF_MS, 4.0 * 3_600_000.0));
 
 fn load() -> AutoBuildConfig {
     crate::mcp::config_store::load_config(FILENAME)
@@ -766,11 +769,20 @@ async fn scan(
     let conn_cap = {
         let gid = crate::game_state::GAME_STATE.read().ok().and_then(|g| g.guild_id.clone());
         match gid.filter(|s| !s.is_empty()) {
-            Some(g) => crate::mcp::guild_power::resolve_guild_power(&client, &g)
-                .await
-                .map(|gp| gp.sub_connection_capacity)
-                .unwrap_or(0.0),
-            None => 0.0,
+            // Unread is not "no share": zero switches the power gate off, and
+            // the whole fleet then signs builds the chain refuses. The last
+            // good reading stands in; before there is one, nothing starts.
+            Some(g) => {
+                static LAST_GOOD: LazyLock<Mutex<HashMap<String, f64>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+                match crate::mcp::guild_power::resolve_guild_power(&client, &g).await {
+                    Ok(gp) => {
+                        LAST_GOOD.lock().unwrap().insert(g, gp.sub_connection_capacity);
+                        Some(gp.sub_connection_capacity)
+                    }
+                    Err(_) => LAST_GOOD.lock().unwrap().get(&g).copied(),
+                }
+            }
+            None => Some(0.0),
         }
     };
 
@@ -943,6 +955,9 @@ async fn scan(
                         }
                         anchor
                     };
+                    if !crate::mcp::loop_util::COMPLETION_BACKOFF.ready(&sid) {
+                        continue; // the chain refused this one's completion
+                    }
                     let params = TaskParams::for_ore(&sid, "BUILD", anchor, pick.range);
                     if crate::hasher::start_hash_task_core(params, app.clone(), &registry).is_ok() {
                         if let Some(idx) = idx_opt {
@@ -959,6 +974,7 @@ async fn scan(
                 }
 
                 // ── 2. Initiate one build in the next free slot (charge + power gated) ──
+                let Some(conn_cap) = conn_cap else { return }; // power unknown
                 // Thrash guard: sit out the backoff window after a deterministic
                 // chain rejection instead of re-failing every scan.
                 if INITIATE_BACKOFF
@@ -1160,7 +1176,7 @@ async fn scan(
                         // A charge lost to a same-block race (a completion the hasher signed a
                         // moment earlier) is a DEFER like a skip, not a 30-minute back-off:
                         // the charge is back next block and nothing about the plan was wrong.
-                        Err(e) if e.starts_with("skipped:") || e.contains("already discharged") => {
+                        Err(e) if crate::mcp::tx_retry::was_skipped(&e) || e.contains("already discharged") => {
                             // Charge was spent by a sibling loop while this sat in
                             // the gate: nothing hit the chain, nothing to back off.
                             crate::mcp::telemetry::tlog(
@@ -1172,8 +1188,12 @@ async fn scan(
                         }
                         Err(e) => {
                             run.errors.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                            let until = now_millis() + INITIATE_BACKOFF_MS;
-                            INITIATE_BACKOFF.lock().unwrap().insert(pid.to_string(), until);
+                            // Only a verdict is worth half an hour: a signing
+                            // outage used to bench every player it touched.
+                            if !crate::mcp::tx_retry::worth_retrying_soon(&e) {
+                                let until = now_millis() + INITIATE_BACKOFF_MS;
+                                INITIATE_BACKOFF.lock().unwrap().insert(pid.to_string(), until);
+                            }
                             crate::mcp::telemetry::tlog(
                                 "auto_build",
                                 crate::mcp::telemetry::Sev::Warn,
@@ -1223,7 +1243,9 @@ async fn scan(
                 if let Some(c) = CLAIMS.lock().unwrap().get_mut(pid.as_str()) {
                     apply_claims(c, now_millis(), &mut occ, &mut have, &mut present);
                 }
-                let mut ripe = ripe_entries(loadout, &present, &have, &occ, |tn| resolve(tn).is_some());
+                let mut ripe = ripe_entries(loadout, &present, &have, &occ, |tn| {
+                    resolve(tn).is_some() && TYPE_BACKOFF.ready(&format!("{pid}|{tn}"))
+                });
                 let temperament = crate::mcp::variance::for_role(role);
                 while !ripe.is_empty() {
                     let Some(k) = choose_entry(&ripe, &temperament) else { break };
@@ -1293,7 +1315,7 @@ async fn scan(
                             );
                             continue; // try the next loadout item, no backoff/break
                         }
-                        Err(e) if e.starts_with("skipped:") || e.contains("already discharged") => {
+                        Err(e) if crate::mcp::tx_retry::was_skipped(&e) || e.contains("already discharged") => {
                             // Charge was spent by a sibling loop while this sat in
                             // the gate: nothing hit the chain, nothing to back off.
                             crate::mcp::telemetry::tlog(
@@ -1305,15 +1327,19 @@ async fn scan(
                         }
                         Err(e) => {
                             run.errors.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                            let until = now_millis() + INITIATE_BACKOFF_MS;
-                            INITIATE_BACKOFF.lock().unwrap().insert(pid.to_string(), until);
+                            // A verdict on THIS build benches this build; the
+                            // player's other entries still get their turn.
+                            // Offline, or short of power, is a verdict on the player.
+                            if crate::mcp::tx_retry::is_player_offline(&e) || e.contains("cannot handle new load requirements") {
+                                let until = now_millis() + INITIATE_BACKOFF_MS;
+                                INITIATE_BACKOFF.lock().unwrap().insert(pid.to_string(), until);
+                            } else if !crate::mcp::tx_retry::worth_retrying_soon(&e) {
+                                TYPE_BACKOFF.fail(&format!("{pid}|{type_name}"));
+                            }
                             crate::mcp::telemetry::tlog(
                                 "auto_build",
                                 crate::mcp::telemetry::Sev::Warn,
-                                format!(
-                                    "initiate failed for {pid} (backing off {} min): {e}",
-                                    (INITIATE_BACKOFF_MS / 60_000.0) as u64
-                                ),
+                                format!("{type_name} initiate failed for {pid}: {e}"),
                             );
                             break; // real failure — stop this player for this scan
                         }

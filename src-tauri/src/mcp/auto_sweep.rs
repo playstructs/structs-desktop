@@ -34,6 +34,9 @@ const FILENAME: &str = "auto_sweep.json";
 /// (2026-09-06), every one of them the second sweep of a freshly-emptied
 /// player. The entry clears itself as soon as the cache reports any different
 /// balance for that player.
+/// Players whose send the chain refuses for a reason other than the balance.
+static SEND_BACKOFF: LazyLock<crate::mcp::loop_util::Backoff> =
+    LazyLock::new(|| crate::mcp::loop_util::Backoff::new(15.0 * 60_000.0, 4.0 * 3_600_000.0));
 static BROKE_AT_BALANCE: LazyLock<Mutex<std::collections::HashMap<String, f64>>> =
     LazyLock::new(|| Mutex::new(std::collections::HashMap::new()));
 
@@ -223,6 +226,17 @@ async fn scan(app: &tauri::AppHandle, cfg: &AutoSweepConfig, run: &LoopRun) {
         });
     }
 
+    // Everyone who cannot be swept THIS scan leaves before the cap is applied.
+    // Fullest-first plus a cap otherwise hands every slot to the players whose
+    // sends always fail: never swept, so always the fullest.
+    entries.retain(|e| {
+        SEND_BACKOFF.ready(&e.player_id)
+            // Answering a raid: charge is one action per block and the
+            // response needs it. Deferral only.
+            && !crate::mcp::combat_lists::is_held_for_combat(&e.player_id)
+            && registry_address(e.index).is_some()
+    });
+
     if entries.is_empty() {
         run.blocked(format!(
             "no player is holding {} Alpha or more with {}+ charge",
@@ -317,6 +331,7 @@ async fn scan(app: &tauri::AppHandle, cfg: &AutoSweepConfig, run: &LoopRun) {
                 {
                     Ok(_) => {
                         ok.fetch_add(1, Ordering::Relaxed);
+                        SEND_BACKOFF.clear(&e.player_id);
                         let alpha = crate::mcp::types::Ualpha::new(e.amount_ualpha.parse().unwrap_or(0)).to_alpha().get();
                         *swept.lock().unwrap_or_else(|p| p.into_inner()) += alpha;
                         // This cached balance is spent; do not sweep it again
@@ -331,6 +346,8 @@ async fn scan(app: &tauri::AppHandle, cfg: &AutoSweepConfig, run: &LoopRun) {
                         if crate::mcp::send_guard::is_insufficient_funds(&err) {
                             lock_recover(&BROKE_AT_BALANCE)
                                 .insert(e.player_id.clone(), e.alpha_before);
+                        } else if !crate::mcp::tx_retry::worth_retrying_soon(&err) {
+                            SEND_BACKOFF.fail(&e.player_id);
                         }
                         tlog(
                             "auto_sweep",

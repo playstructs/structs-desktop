@@ -348,12 +348,62 @@ pub struct Credit {
     pub settled_at: Option<f64>,
     #[serde(default)]
     pub settle_tx: Option<String>,
+    /// Base units confirmed paid toward this credit. A cap can cut a payment
+    /// through the middle of one; the rest stays owed.
+    #[serde(default)]
+    pub paid_base: f64,
+}
+
+impl Credit {
+    /// Still owed, ignoring payments not yet confirmed.
+    pub fn owed(&self) -> f64 {
+        if self.settled_at.is_some() {
+            0.0
+        } else {
+            (self.amount_base - self.paid_base).max(0.0)
+        }
+    }
+}
+
+/// Where a payment stands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PaymentState {
+    /// Signed or about to be, outcome unknown. Written BEFORE signing, so a
+    /// crash or a timeout leaves a record rather than a debt to pay again.
+    Open,
+    /// On chain and successful.
+    Paid,
+}
+
+/// Money that left, or may have left, for one helper. The payments — not the
+/// credits they discharge — are what the caps count.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Payment {
+    pub id: String,
+    pub ts_ms: f64,
+    pub room_id: String,
+    pub helper_player: String,
+    /// The owner id paid, as signed. What an unanswered payment is found by.
+    #[serde(default)]
+    pub to: String,
+    pub denom: String,
+    pub amount_base: f64,
+    /// How much of it goes to which credit.
+    pub parts: Vec<(String, f64)>,
+    pub state: PaymentState,
+    #[serde(default)]
+    pub tx: Option<String>,
+    #[serde(default)]
+    pub note: String,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Ledger {
     #[serde(default)]
     pub credits: Vec<Credit>,
+    #[serde(default)]
+    pub payments: Vec<Payment>,
 }
 
 static LEDGER: LazyLock<RwLock<Ledger>> =
@@ -363,6 +413,10 @@ static LAST_RUN: LazyLock<Mutex<f64>> = LazyLock::new(|| Mutex::new(0.0));
 
 fn save(l: &Ledger) {
     crate::mcp::config_store::save_config(FILENAME, l);
+}
+
+pub fn payments() -> Vec<Payment> {
+    LEDGER.read().map(|l| l.payments.clone()).unwrap_or_default()
 }
 
 pub fn credits() -> Vec<Credit> {
@@ -376,21 +430,85 @@ pub fn record(credit: Credit) -> Result<bool, String> {
         return Ok(false);
     }
     l.credits.push(credit);
-    let cutoff = now_millis() - KEEP_SETTLED_MS;
-    l.credits.retain(|c| c.settled_at.map(|t| t > cutoff).unwrap_or(true));
+    prune(&mut l, now_millis());
     save(&l);
     Ok(true)
 }
 
-fn mark_settled(ids: &[String], tx: Option<String>) {
+fn prune(l: &mut Ledger, now: f64) {
+    let cutoff = now - KEEP_SETTLED_MS;
+    let open: std::collections::HashSet<String> = l
+        .payments
+        .iter()
+        .filter(|p| p.state == PaymentState::Open)
+        .flat_map(|p| p.parts.iter().map(|(id, _)| id.clone()))
+        .collect();
+    l.credits.retain(|c| {
+        open.contains(&c.id)
+            || match c.settled_at {
+                Some(t) => t > cutoff,
+                // Recorded at a rate of nothing: never owed, so never settled.
+                None => c.amount_base > 0.0 || c.ts_ms > cutoff,
+            }
+    });
+    l.payments.retain(|p| p.state == PaymentState::Open || p.ts_ms > cutoff);
+}
+
+/// Write a payment down before it is signed. `Err` = not written, so it must
+/// not be signed.
+fn open_payment(p: Payment) -> Result<(), String> {
+    let mut l = LEDGER.write().map_err(|_| "ledger unavailable")?;
+    let id = p.id.clone();
+    l.payments.push(p);
+    if let Err(e) = crate::mcp::config_store::try_save_config(FILENAME, &*l) {
+        l.payments.retain(|p| p.id != id);
+        return Err(format!("the ledger could not be saved ({e}); nothing was paid"));
+    }
+    Ok(())
+}
+
+fn note_payment(id: &str, tx: Option<String>, note: &str) {
     if let Ok(mut l) = LEDGER.write() {
-        let now = now_millis();
-        for c in l.credits.iter_mut() {
-            if ids.contains(&c.id) {
+        if let Some(p) = l.payments.iter_mut().find(|p| p.id == id) {
+            if tx.is_some() {
+                p.tx = tx;
+            }
+            p.note = note.chars().take(300).collect();
+        }
+        save(&l);
+    }
+}
+
+/// It landed: apply each part to its credit.
+fn confirm_payment(id: &str, tx: Option<String>) {
+    if let Ok(mut l) = LEDGER.write() {
+        confirm_in(&mut l, id, tx, now_millis());
+        save(&l);
+    }
+}
+
+fn confirm_in(l: &mut Ledger, id: &str, tx: Option<String>, now: f64) {
+    let Some(p) = l.payments.iter_mut().find(|p| p.id == id && p.state == PaymentState::Open) else { return };
+    p.state = PaymentState::Paid;
+    if tx.is_some() {
+        p.tx = tx;
+    }
+    let (parts, tx) = (p.parts.clone(), p.tx.clone());
+    for (cid, amount) in parts {
+        if let Some(c) = l.credits.iter_mut().find(|c| c.id == cid) {
+            c.paid_base += amount;
+            if c.amount_base - c.paid_base < 1e-6 {
                 c.settled_at = Some(now);
                 c.settle_tx = tx.clone();
             }
         }
+    }
+}
+
+/// It definitely did not happen: the debt stands as it was.
+fn drop_payment(id: &str) {
+    if let Ok(mut l) = LEDGER.write() {
+        l.payments.retain(|p| !(p.id == id && p.state == PaymentState::Open));
         save(&l);
     }
 }
@@ -403,8 +521,9 @@ pub struct Settlement {
     pub helper_player: String,
     pub amount_base: f64,
     pub denom: String,
-    /// The credits this settlement discharges, so marking them is exact.
-    pub credit_ids: Vec<String>,
+    /// The credits this settlement pays toward, and how much of each, so
+    /// marking them is exact.
+    pub parts: Vec<(String, f64)>,
     /// Set when a cap cut the payment short — the card says so rather than
     /// quietly paying less than the ledger shows.
     pub capped: bool,
@@ -415,16 +534,16 @@ pub struct Settlement {
 /// Pure, because it is the arithmetic that decides how much money leaves the
 /// wallet and that should be provable without a chain, a wallet or a clock.
 ///
-/// `already_spent` is what the crew has paid inside the current epoch. Both
-/// caps are ceilings, never targets: hitting one stops the payment at the cap
-/// and leaves the rest owed, which is the honest behaviour — the alternative
-/// is a loop that decides a cap means "pay this much".
-pub fn payable(credits: &[Credit], pay: &Pay, room_id: &str, already_spent: f64) -> Vec<Settlement> {
+/// Both caps are ceilings on what is paid per EPOCH, never targets: hitting
+/// one stops the payment at the cap and leaves the rest owed. They count
+/// `payments` — money that left or may have — so a payment whose outcome is
+/// unknown neither frees its budget nor is made again.
+pub fn payable(credits: &[Credit], payments: &[Payment], pay: &Pay, room_id: &str, now: f64) -> Vec<Settlement> {
     if !pay.enabled || pay.rate_per_difficulty <= 0.0 {
         return Vec::new();
     }
     let mut budget = if pay.epoch_cap > 0.0 {
-        (pay.epoch_cap - already_spent).max(0.0)
+        (pay.epoch_cap - spent_this_epoch(credits, payments, room_id, pay.epoch_secs, now)).max(0.0)
     } else {
         f64::INFINITY
     };
@@ -432,31 +551,36 @@ pub fn payable(credits: &[Credit], pay: &Pay, room_id: &str, already_spent: f64)
         return Vec::new();
     }
 
-    // Deterministic order so two runs of the same ledger pay the same people
-    // in the same order when the budget is short.
-    let mut helpers: Vec<String> = credits
+    // What each credit still owes once every open payment has landed.
+    let mut pending: std::collections::HashMap<&str, f64> = std::collections::HashMap::new();
+    for p in payments.iter().filter(|p| p.state == PaymentState::Open) {
+        for (id, amount) in &p.parts {
+            *pending.entry(id.as_str()).or_default() += amount;
+        }
+    }
+    let due = |c: &Credit| -> f64 { (c.owed() - pending.get(c.id.as_str()).copied().unwrap_or(0.0)).max(0.0) };
+    let ours: Vec<&Credit> = credits
         .iter()
-        .filter(|c| c.settled_at.is_none() && c.room_id == room_id && c.denom == pay.denom)
-        .map(|c| c.helper_player.clone())
+        .filter(|c| c.room_id == room_id && c.denom == pay.denom && due(c) > 0.0)
         .collect();
-    helpers.sort();
-    helpers.dedup();
+
+    // Deterministic order so two runs of the same ledger pay the same people
+    // in the same order when the budget is short: whoever has waited longest
+    // first, so a short budget cannot starve the same helper forever.
+    let mut helpers: Vec<(f64, &str)> = Vec::new();
+    for c in &ours {
+        match helpers.iter_mut().find(|(_, h)| *h == c.helper_player) {
+            Some((oldest, _)) => *oldest = oldest.min(c.ts_ms),
+            None => helpers.push((c.ts_ms, &c.helper_player)),
+        }
+    }
+    helpers.sort_by(|a, b| a.0.total_cmp(&b.0).then_with(|| a.1.cmp(b.1)));
 
     let mut out = Vec::new();
-    for helper in helpers {
-        let mine: Vec<&Credit> = credits
-            .iter()
-            .filter(|c| {
-                c.settled_at.is_none()
-                    && c.room_id == room_id
-                    && c.denom == pay.denom
-                    && c.helper_player == helper
-            })
-            .collect();
-        let owed: f64 = mine.iter().map(|c| c.amount_base).sum();
-        if owed <= 0.0 {
-            continue;
-        }
+    for (_, helper) in helpers {
+        let mut mine: Vec<&Credit> = ours.iter().copied().filter(|c| c.helper_player == helper).collect();
+        mine.sort_by(|a, b| a.ts_ms.total_cmp(&b.ts_ms).then_with(|| a.id.cmp(&b.id)));
+        let owed: f64 = mine.iter().map(|c| due(c)).sum();
         // Batching: below the floor, the debt simply waits. The floor can
         // never exceed the per-helper cap, or a capped helper would never
         // reach it and never be paid.
@@ -464,32 +588,30 @@ pub fn payable(credits: &[Credit], pay: &Pay, room_id: &str, already_spent: f64)
         if floor > 0.0 && owed < floor {
             continue;
         }
-        let mut amount = owed;
-        let mut capped = false;
-        if pay.per_helper_cap > 0.0 && amount > pay.per_helper_cap {
-            amount = pay.per_helper_cap;
-            capped = true;
+        let mut room_left = budget;
+        if pay.per_helper_cap > 0.0 {
+            room_left = room_left.min(pay.per_helper_cap - spent_on(credits, payments, room_id, helper, pay.epoch_secs, now));
         }
-        if amount > budget {
-            amount = budget;
-            capped = true;
-        }
+        let capped = owed > room_left;
         // Base units are integers on the wire; paying a fraction of one is a
         // rounding error looking for somewhere to happen.
-        amount = amount.floor();
+        let amount = owed.min(room_left).floor();
         if amount < 1.0 {
             continue;
         }
+        // Oldest first, through the middle of a credit if need be.
+        let mut left = amount;
+        let mut parts = Vec::new();
+        for c in &mine {
+            let take = due(c).min(left);
+            if take <= 0.0 {
+                break;
+            }
+            left -= take;
+            parts.push((c.id.clone(), take));
+        }
         budget -= amount;
-        out.push(Settlement {
-            helper_player: helper,
-            amount_base: amount,
-            denom: pay.denom.clone(),
-            // A capped payment still discharges the credits it covers, oldest
-            // first, and leaves the remainder owed.
-            credit_ids: cover(&mine, amount),
-            capped,
-        });
+        out.push(Settlement { helper_player: helper.to_string(), amount_base: amount, denom: pay.denom.clone(), parts, capped });
         if budget <= 0.0 {
             break;
         }
@@ -497,33 +619,31 @@ pub fn payable(credits: &[Credit], pay: &Pay, room_id: &str, already_spent: f64)
     out
 }
 
-/// The oldest credits an amount fully covers.
-///
-/// Partial credits are deliberately NOT discharged: a half-paid credit that
-/// looks settled is how somebody ends up permanently owed the other half.
-fn cover(credits: &[&Credit], amount: f64) -> Vec<String> {
-    let mut sorted: Vec<&&Credit> = credits.iter().collect();
-    sorted.sort_by(|a, b| a.ts_ms.total_cmp(&b.ts_ms).then_with(|| a.id.cmp(&b.id)));
-    let mut left = amount;
-    let mut ids = Vec::new();
-    for c in sorted {
-        if c.amount_base > left {
-            break;
-        }
-        left -= c.amount_base;
-        ids.push(c.id.clone());
-    }
-    ids
+/// What this crew has paid, or may have, inside the current epoch.
+pub fn spent_this_epoch(credits: &[Credit], payments: &[Payment], room_id: &str, epoch_secs: u64, now: f64) -> f64 {
+    spent(credits, payments, room_id, None, epoch_secs, now)
 }
 
-/// What this crew has already paid inside the current epoch.
-pub fn spent_this_epoch(credits: &[Credit], room_id: &str, epoch_secs: u64, now: f64) -> f64 {
+fn spent_on(credits: &[Credit], payments: &[Payment], room_id: &str, helper: &str, epoch_secs: u64, now: f64) -> f64 {
+    spent(credits, payments, room_id, Some(helper), epoch_secs, now)
+}
+
+fn spent(credits: &[Credit], payments: &[Payment], room_id: &str, helper: Option<&str>, epoch_secs: u64, now: f64) -> f64 {
     let since = now - (epoch_secs as f64) * 1000.0;
-    credits
+    let is = |h: &str| helper.is_none_or(|want| want == h);
+    let paid: f64 = payments
         .iter()
-        .filter(|c| c.room_id == room_id && c.settled_at.map(|t| t >= since).unwrap_or(false))
+        .filter(|p| p.room_id == room_id && is(&p.helper_player) && (p.state == PaymentState::Open || p.ts_ms >= since))
+        .map(|p| p.amount_base)
+        .sum();
+    // Settled before payments were recorded on their own.
+    let legacy: f64 = credits
+        .iter()
+        .filter(|c| c.room_id == room_id && is(&c.helper_player) && c.paid_base == 0.0)
+        .filter(|c| c.settled_at.is_some_and(|t| t >= since))
         .map(|c| c.amount_base)
-        .sum()
+        .sum();
+    paid + legacy
 }
 
 // ── Claiming ────────────────────────────────────────────────────────────────
@@ -554,6 +674,12 @@ pub async fn absorb_claim(
     let tx = client
         .lcd_get(&format!("/cosmos/tx/v1beta1/txs/{tx_hash}"))
         .await?;
+    // Settled credits are forgotten after KEEP_SETTLED_MS, and the memory of
+    // them is what stops a claim being paid twice. Past that age the only
+    // thing that can be said about a proof is that it is too old to bill.
+    if !recent_enough(&tx, now_millis()) {
+        return Err(format!("{tx_hash} is more than 30 days old, or carries no time — nothing credited"));
+    }
     let receipts = parse_receipts(&tx);
     let Some(r) = receipts.into_iter().find(|r| r.object_id == claimed_object) else {
         return Err(format!(
@@ -595,6 +721,7 @@ pub async fn absorb_claim(
         denom: c.pay.denom.clone(),
         settled_at: None,
         settle_tx: None,
+        paid_base: 0.0,
     };
     if record(credit.clone())? {
         tlog(
@@ -613,6 +740,13 @@ pub async fn absorb_claim(
         return Ok(Some(credit));
     }
     Ok(None)
+}
+
+fn recent_enough(tx: &Value, now: f64) -> bool {
+    tx.pointer("/tx_response/timestamp")
+        .and_then(|t| t.as_str())
+        .and_then(crate::mcp::onboarding::parse_ts)
+        .is_some_and(|t| now - t as f64 <= KEEP_SETTLED_MS)
 }
 
 async fn object_owner(client: &CosmosClient, object_id: &str) -> Result<String, String> {
@@ -702,12 +836,31 @@ pub async fn settle(app: &tauri::AppHandle, room_id: &str) -> Result<Value, Stri
     result
 }
 
+/// helper → when to try them again after a payment that could not be made.
+static BENCHED: LazyLock<Mutex<std::collections::HashMap<String, f64>>> =
+    LazyLock::new(|| Mutex::new(std::collections::HashMap::new()));
+const BENCH_MS: f64 = 10.0 * 60_000.0;
+
+fn bench(helper: &str) {
+    BENCHED.lock().unwrap_or_else(|e| e.into_inner()).insert(helper.to_string(), now_millis() + BENCH_MS);
+}
+
 async fn settle_inner(app: &tauri::AppHandle, room_id: &str, pay: &Pay) -> Result<Value, String> {
-    let all = credits();
-    let spent = spent_this_epoch(&all, room_id, pay.epoch_secs, now_millis());
-    let plan = payable(&all, pay, room_id, spent);
+    resolve_open().await;
+    // A helper who cannot be paid right now steps out of the plan, so the
+    // budget they would have taken reaches the next one.
+    let now = now_millis();
+    let benched: Vec<String> = {
+        let mut b = BENCHED.lock().unwrap_or_else(|e| e.into_inner());
+        b.retain(|_, until| *until > now);
+        b.keys().cloned().collect()
+    };
+    let mut all = credits();
+    all.retain(|c| !benched.contains(&c.helper_player));
+    let made = payments();
+    let plan = payable(&all, &made, pay, room_id, now);
     if plan.is_empty() {
-        return Ok(json!({ "paid": [], "spent_this_epoch": spent }));
+        return Ok(json!({ "paid": [], "spent_this_epoch": spent_this_epoch(&all, &made, room_id, pay.epoch_secs, now) }));
     }
 
     let mut paid: Vec<Value> = Vec::new();
@@ -719,9 +872,24 @@ async fn settle_inner(app: &tauri::AppHandle, room_id: &str, pay: &Pay) -> Resul
             Ok(v) => v.get("to").and_then(|t| t.as_str()).unwrap_or_default().to_string(),
             Err(e) => {
                 tlog("crew", Sev::Notice, format!("cannot pay {}: {e}", s.helper_player));
+                bench(&s.helper_player);
                 continue;
             }
         };
+        let id = uuid::Uuid::new_v4().to_string();
+        open_payment(Payment {
+            id: id.clone(),
+            ts_ms: now_millis(),
+            room_id: room_id.to_string(),
+            helper_player: s.helper_player.clone(),
+            to: to.clone(),
+            denom: s.denom.clone(),
+            amount_base: s.amount_base,
+            parts: s.parts.clone(),
+            state: PaymentState::Open,
+            tx: None,
+            note: String::new(),
+        })?;
         match crate::mcp::tools::board_pages::mcp_transfer_execute_impl(
             app.clone(),
             None, // the primary pays: a crew is the player's own, not a worker's
@@ -732,33 +900,141 @@ async fn settle_inner(app: &tauri::AppHandle, room_id: &str, pay: &Pay) -> Resul
         .await
         {
             Ok(v) => {
-                let tx = v
-                    .get("result")
-                    .and_then(|r| r.get("transactionHash").or_else(|| r.get("txhash")))
-                    .and_then(|h| h.as_str())
-                    .map(str::to_string);
-                // Only now. A credit marked settled before the send returns is
-                // a payment nobody will ever make again.
-                mark_settled(&s.credit_ids, tx.clone());
+                // Accepted is not the same as landed: in the async sign modes
+                // this is the mempool. The chain's record settles it.
+                let tx = v.get("tx").and_then(|h| h.as_str()).filter(|h| !h.is_empty()).map(str::to_string);
+                match &tx {
+                    Some(_) => note_payment(&id, tx.clone(), "sent"),
+                    None => confirm_payment(&id, None),
+                }
                 tlog(
                     "crew",
                     Sev::Info,
-                    format!("paid {} {} {} for {} proofs", s.helper_player, s.amount_base, s.denom, s.credit_ids.len()),
+                    format!("paid {} {} {} for {} proofs", s.helper_player, s.amount_base, s.denom, s.parts.len()),
                 );
                 paid.push(json!({
                     "helper": s.helper_player, "amount": s.amount_base,
-                    "denom": s.denom, "credits": s.credit_ids.len(),
+                    "denom": s.denom, "credits": s.parts.len(),
                     "capped": s.capped, "tx": tx,
                 }));
             }
-            Err(e) => tlog(
-                "crew",
-                Sev::Notice,
-                format!("payment to {} refused: {e}", s.helper_player),
-            ),
+            Err(e) if definitely_unsent(&e) => {
+                drop_payment(&id);
+                bench(&s.helper_player);
+                tlog("crew", Sev::Notice, format!("payment to {} refused: {e}", s.helper_player));
+            }
+            // It may have gone. It is held, counted against the caps, and
+            // looked for on the chain; it is never sent again on a guess.
+            Err(e) => {
+                note_payment(&id, tx_hash_in(&e), &e);
+                tlog("crew", Sev::Warn, format!("payment to {} unconfirmed, held: {e}", s.helper_player));
+            }
         }
     }
-    Ok(json!({ "paid": paid, "spent_this_epoch": spent }))
+    resolve_open().await;
+    let (all, made) = (credits(), payments());
+    Ok(json!({ "paid": paid, "spent_this_epoch": spent_this_epoch(&all, &made, room_id, pay.epoch_secs, now_millis()) }))
+}
+
+/// Did this failure happen before anything could reach the chain, or did the
+/// chain itself refuse it? Everything else — a timeout, a bridge that went
+/// quiet, an HTTP error mid-broadcast — leaves the outcome unknown.
+fn definitely_unsent(err: &str) -> bool {
+    err.starts_with("refused:") || crate::mcp::tx_retry::was_skipped(err)
+}
+
+/// The transaction hash an error names, if it names one.
+fn tx_hash_in(err: &str) -> Option<String> {
+    err.split(|c: char| !c.is_ascii_hexdigit())
+        .find(|w| w.len() == 64)
+        .map(|w| w.to_uppercase())
+}
+
+/// A payment nobody can find this long after it was signed was never
+/// included: its account sequence has been used by later transactions.
+const GIVE_UP_MS: f64 = 60.0 * 60_000.0;
+
+/// Ask the chain what became of each open payment.
+async fn resolve_open() {
+    let open: Vec<Payment> = payments().into_iter().filter(|p| p.state == PaymentState::Open).collect();
+    for p in open {
+        let found = match &p.tx {
+            Some(tx) => crate::mcp::native_signer::tx_outcome(tx).await.map(|o| o.map(|code| (code, tx.clone()))),
+            None => find_send(&p).await.map(|o| o.map(|tx| (0, tx))),
+        };
+        match found {
+            Ok(Some((0, tx))) => confirm_payment(&p.id, Some(tx)),
+            Ok(Some((code, tx))) => {
+                drop_payment(&p.id);
+                tlog("crew", Sev::Notice, format!("payment to {} failed on chain (code {code}, {tx}); still owed", p.helper_player));
+            }
+            Ok(None) if now_millis() - p.ts_ms > GIVE_UP_MS => {
+                drop_payment(&p.id);
+                tlog("crew", Sev::Notice, format!("payment to {} never reached the chain; still owed", p.helper_player));
+            }
+            // Not there yet, or could not look: hold.
+            Ok(None) => {}
+            Err(e) => tlog("crew", Sev::Debug, format!("could not check the payment to {}: {e}", p.helper_player)),
+        }
+    }
+}
+
+/// An open payment with no hash (the signing round-trip never answered): look
+/// for the send itself among the device key's recent transactions.
+async fn find_send(p: &Payment) -> Result<Option<String>, String> {
+    let signer = crate::game_state::GAME_STATE
+        .read()
+        .ok()
+        .and_then(|g| g.wallet_address.clone())
+        .filter(|a| !a.is_empty())
+        .ok_or("no wallet address yet")?;
+    let v = CosmosClient::new()
+        .lcd_get(&format!(
+            "/cosmos/tx/v1beta1/txs?query=message.sender%3D%27{signer}%27&order_by=ORDER_BY_DESC&limit=100"
+        ))
+        .await?;
+    let rows = v.get("tx_responses").and_then(|r| r.as_array()).ok_or("no tx_responses in the answer")?;
+    // Hashes already claimed by another payment are not this one's.
+    let known: Vec<String> = payments().into_iter().filter(|q| q.id != p.id).filter_map(|q| q.tx).collect();
+    match match_send(rows, p, &known) {
+        Some(tx) => Ok(Some(tx)),
+        // "Absent" needs the page to reach back past the signing; otherwise
+        // the send may simply be on the next one.
+        None if covers(rows, p.ts_ms) => Ok(None),
+        None => Err("the recent transactions do not reach back far enough".into()),
+    }
+}
+
+fn tx_time(row: &Value) -> Option<f64> {
+    row.get("timestamp").and_then(|t| t.as_str()).and_then(crate::mcp::onboarding::parse_ts).map(|t| t as f64)
+}
+
+fn covers(rows: &[Value], since: f64) -> bool {
+    rows.len() < 100 || rows.iter().filter_map(tx_time).any(|t| t < since)
+}
+
+/// The hash of a successful vault send of exactly this payment, at or after it
+/// was written down (a minute's slack for clocks).
+fn match_send(rows: &[Value], p: &Payment, known: &[String]) -> Option<String> {
+    let want = format!("{}", p.amount_base.round() as i128);
+    rows.iter()
+        .filter(|r| r.get("code").and_then(|c| c.as_i64()) == Some(0))
+        .filter(|r| tx_time(r).is_some_and(|t| t >= p.ts_ms - 60_000.0))
+        .find_map(|r| {
+            let hash = r.get("txhash").and_then(|h| h.as_str())?;
+            if known.iter().any(|k| k.eq_ignore_ascii_case(hash)) {
+                return None;
+            }
+            let msgs = r.pointer("/tx/body/messages").and_then(|m| m.as_array())?;
+            msgs.iter()
+                .any(|m| {
+                    let to = |k: &str, want: &str| m.get(k).and_then(|x| x.as_str()) == Some(want);
+                    (to("recipientOwnerId", &p.helper_player) || to("recipientOwnerId", &p.to) || to("toAddress", &p.to))
+                        && m.pointer("/amount/0/denom").and_then(|x| x.as_str()) == Some(p.denom.as_str())
+                        && m.pointer("/amount/0/amount").and_then(|x| x.as_str()) == Some(want.as_str())
+                })
+                .then(|| hash.to_uppercase())
+        })
 }
 
 /// Settle every crew whose epoch has come round. Rides the sync tick.
@@ -792,13 +1068,14 @@ pub fn crew_ledger(room_id: Option<String>) -> Result<Value, String> {
         Some(r) => all.iter().filter(|c| c.room_id == r).collect(),
         None => all.iter().collect(),
     };
-    let owed: f64 = rows.iter().filter(|c| c.settled_at.is_none()).map(|c| c.amount_base).sum();
+    let owed: f64 = rows.iter().map(|c| c.owed()).sum();
     let plan = room_id
         .as_deref()
         .and_then(crew::get)
         .map(|c| {
-            let spent = spent_this_epoch(&all, &c.room_id, c.pay.epoch_secs, now_millis());
-            (payable(&all, &c.pay, &c.room_id, spent), spent)
+            let (made, now) = (payments(), now_millis());
+            let spent = spent_this_epoch(&all, &made, &c.room_id, c.pay.epoch_secs, now);
+            (payable(&all, &made, &c.pay, &c.room_id, now), spent)
         })
         .unwrap_or((Vec::new(), 0.0));
     Ok(json!({
@@ -806,6 +1083,10 @@ pub fn crew_ledger(room_id: Option<String>) -> Result<Value, String> {
         "owed_base": owed,
         "plan": plan.0,
         "spent_this_epoch": plan.1,
+        "unconfirmed": payments()
+            .into_iter()
+            .filter(|p| p.state == PaymentState::Open && room_id.as_deref().is_none_or(|r| r == p.room_id))
+            .collect::<Vec<_>>(),
     }))
 }
 
@@ -850,6 +1131,7 @@ mod tests {
             denom: "ualpha".into(),
             settled_at: None,
             settle_tx: None,
+            paid_base: 0.0,
         }
     }
 
@@ -866,6 +1148,23 @@ mod tests {
     }
 
     const ROOM: &str = "!crew:example.org";
+    const NOW: f64 = 100_000_000.0;
+
+    fn payment(id: &str, helper: &str, amount: f64, ts: f64, state: PaymentState) -> Payment {
+        Payment {
+            id: id.into(),
+            ts_ms: ts,
+            room_id: ROOM.into(),
+            helper_player: helper.into(),
+            to: helper.into(),
+            denom: "ualpha".into(),
+            amount_base: amount,
+            parts: vec![],
+            state,
+            tx: None,
+            note: String::new(),
+        }
+    }
 
     /// The detail arrives as one JSON-encoded attribute. This is the shape the
     /// current chain serves, and every number in it is a string.
@@ -1000,7 +1299,7 @@ mod tests {
     fn the_rate_multiplies_the_difficulty() {
         let cs = vec![credit("a", "1-61", 90.0, 1.0)];
         let p = pay(10.0, 0.0, 0.0);
-        let plan = payable(&cs, &p, ROOM, 0.0);
+        let plan = payable(&cs, &[], &p, ROOM, NOW);
         assert_eq!(plan.len(), 1);
         assert_eq!(plan[0].amount_base, 90.0);
         assert!(!plan[0].capped);
@@ -1011,9 +1310,9 @@ mod tests {
         let cs = vec![credit("a", "1-61", 90.0, 1.0)];
         let mut p = pay(10.0, 0.0, 0.0);
         p.enabled = false;
-        assert!(payable(&cs, &p, ROOM, 0.0).is_empty());
+        assert!(payable(&cs, &[], &p, ROOM, NOW).is_empty());
         // ...and a rate of zero pays nothing even when enabled.
-        assert!(payable(&cs, &pay(0.0, 0.0, 0.0), ROOM, 0.0).is_empty());
+        assert!(payable(&cs, &[], &pay(0.0, 0.0, 0.0), ROOM, NOW).is_empty());
     }
 
     /// Below the floor a debt waits; at it, it is paid whole. A floor above
@@ -1024,30 +1323,118 @@ mod tests {
         let mut terms = pay(1.0, 0.0, 0.0);
         terms.min_payout = 100.0;
         let small = vec![credit("a", "1-61", 40.0, 1.0), credit("b", "1-61", 30.0, 2.0)];
-        assert!(payable(&small, &terms, ROOM, 0.0).is_empty(), "70 owed, floor 100: waits");
+        assert!(payable(&small, &[], &terms, ROOM, NOW).is_empty(), "70 owed, floor 100: waits");
         let enough = vec![credit("a", "1-61", 40.0, 1.0), credit("b", "1-61", 30.0, 2.0), credit("c", "1-61", 50.0, 3.0)];
-        let plan = payable(&enough, &terms, ROOM, 0.0);
+        let plan = payable(&enough, &[], &terms, ROOM, NOW);
         assert_eq!(plan.len(), 1);
         assert_eq!(plan[0].amount_base, 120.0, "paid whole, in one transaction");
-        assert_eq!(plan[0].credit_ids.len(), 3);
+        assert_eq!(plan[0].parts.len(), 3);
         // Floor 100 but a cap of 50: the floor is the cap.
         let mut capped = terms.clone();
         capped.per_helper_cap = 50.0;
-        let plan = payable(&enough, &capped, ROOM, 0.0);
+        let plan = payable(&enough, &[], &capped, ROOM, NOW);
         assert_eq!(plan.len(), 1, "a floor the cap cannot reach still pays");
         assert_eq!(plan[0].amount_base, 50.0);
         // Published and read back.
         assert_eq!(parse_terms(&terms_of(&terms)).unwrap().min_payout, 100.0);
     }
 
+    /// Settle `plan` into the ledger the way a landed payment does.
+    fn land(l: &mut Ledger, plan: Vec<Settlement>, now: f64) {
+        for s in plan {
+            let id = format!("p{}", l.payments.len());
+            let mut p = payment(&id, &s.helper_player, s.amount_base, now, PaymentState::Open);
+            p.parts = s.parts;
+            l.payments.push(p);
+            confirm_in(l, &id, Some("T".into()), now);
+        }
+    }
+
+    /// The bug this ledger was rebuilt around: a credit bigger than the cap
+    /// was paid the cap, marked nothing, counted nothing, and was paid the cap
+    /// again a minute later, forever.
     #[test]
-    fn the_per_helper_cap_is_a_ceiling() {
-        let cs = vec![credit("a", "1-61", 500.0, 1.0)];
-        let plan = payable(&cs, &pay(1.0, 0.0, 100.0), ROOM, 0.0);
+    fn a_capped_payment_is_made_once_an_epoch_until_the_debt_is_gone() {
+        let terms = pay(1.0, 0.0, 100.0);
+        let mut l = Ledger { credits: vec![credit("a", "1-61", 250.0, 1.0)], ..Default::default() };
+        let plan = payable(&l.credits, &l.payments, &terms, ROOM, NOW);
         assert_eq!(plan[0].amount_base, 100.0);
         assert!(plan[0].capped);
-        // A capped payment must not pretend to discharge the whole debt.
-        assert!(plan[0].credit_ids.is_empty(), "500 owed, 100 paid: nothing is fully covered");
+        assert_eq!(plan[0].parts, vec![("a".to_string(), 100.0)]);
+        land(&mut l, plan, NOW);
+        assert_eq!(l.credits[0].owed(), 150.0, "and the rest stays owed");
+        assert!(payable(&l.credits, &l.payments, &terms, ROOM, NOW + 60_000.0).is_empty(), "a minute later: capped");
+        // Two more epochs finish it, and it is never paid past what was owed.
+        let mut now = NOW;
+        for want in [100.0, 50.0] {
+            now += 3_600_001.0;
+            let plan = payable(&l.credits, &l.payments, &terms, ROOM, now);
+            assert_eq!(plan[0].amount_base, want);
+            land(&mut l, plan, now);
+        }
+        assert!(l.credits[0].settled_at.is_some());
+        assert!(payable(&l.credits, &l.payments, &terms, ROOM, now + 3_600_001.0).is_empty());
+        assert_eq!(l.payments.iter().map(|p| p.amount_base).sum::<f64>(), 250.0);
+    }
+
+    /// A payment whose outcome is unknown is neither free nor made again.
+    #[test]
+    fn an_unconfirmed_payment_is_held() {
+        let terms = pay(1.0, 100.0, 0.0);
+        let cs = vec![credit("a", "1-61", 80.0, 1.0), credit("b", "1-62", 80.0, 2.0)];
+        let mut open = payment("p", "1-61", 80.0, NOW, PaymentState::Open);
+        open.parts = vec![("a".into(), 80.0)];
+        let plan = payable(&cs, &[open.clone()], &terms, ROOM, NOW + 60_000.0);
+        assert_eq!(plan.len(), 1);
+        assert_eq!((plan[0].helper_player.as_str(), plan[0].amount_base), ("1-62", 20.0), "its budget stays spent");
+        // However old it is: only the chain's answer releases it.
+        let plan = payable(&cs, &[open], &terms, ROOM, NOW + 86_400_000.0);
+        assert!(plan.iter().all(|s| s.helper_player != "1-61"));
+    }
+
+    #[test]
+    fn only_a_definite_refusal_releases_a_payment() {
+        assert!(definitely_unsent("refused: not enough ualpha"));
+        assert!(definitely_unsent("skipped by a mandate: cap reached"));
+        assert!(!definitely_unsent("virtual-player op 'sign' timed out after 60s"));
+        assert!(!definitely_unsent("broadcast HTTP error: connection reset"));
+        let h = "44AD4FC1C9E3FF1B51195575027DEF7249A70EB6F0C4995E1952DC9B3DBE7468";
+        let e = format!("Resource not found. Original: Transaction with ID {h} was submitted but was not yet found");
+        assert!(!definitely_unsent(&e));
+        assert_eq!(tx_hash_in(&e).as_deref(), Some(h));
+        assert_eq!(tx_hash_in("timed out"), None);
+    }
+
+    /// The send is matched on who, what and when — never on amount alone.
+    #[test]
+    fn an_unanswered_payment_is_found_by_its_own_send() {
+        let t0 = crate::mcp::onboarding::parse_ts("2026-11-24T21:07:00Z").unwrap() as f64;
+        let p = payment("p", "1-61", 80.0, t0, PaymentState::Open);
+        let row = |hash: &str, to: &str, amt: &str, at: &str, code: i64| {
+            json!({ "txhash": hash, "timestamp": at, "code": code, "tx": { "body": { "messages": [
+                { "@type": "/structs.structs.MsgVaultSend", "ownerId": "1-194", "recipientOwnerId": to,
+                  "amount": [{ "denom": "ualpha", "amount": amt }] } ] } } })
+        };
+        let after = "2026-11-24T21:07:13Z";
+        assert_eq!(match_send(&[row("AA", "1-61", "80", after, 0)], &p, &[]).as_deref(), Some("AA"));
+        assert_eq!(match_send(&[row("AA", "1-61", "80", after, 0)], &p, &["aa".into()]), None, "another payment's");
+        assert_eq!(match_send(&[row("AA", "1-610", "80", after, 0)], &p, &[]), None);
+        assert_eq!(match_send(&[row("AA", "1-61", "800", after, 0)], &p, &[]), None);
+        assert_eq!(match_send(&[row("AA", "1-61", "80", after, 5)], &p, &[]), None, "failed on chain");
+        assert_eq!(match_send(&[row("AA", "1-61", "80", "2026-11-24T20:00:00Z", 0)], &p, &[]), None, "an earlier payment");
+        // "Not there" needs a page that reaches back past the signing.
+        assert!(covers(&[row("AA", "1-9", "1", after, 0)], t0), "a short page is the whole history");
+        let full: Vec<Value> = (0..100).map(|i| row(&format!("{i}"), "1-9", "1", after, 0)).collect();
+        assert!(!covers(&full, t0));
+    }
+
+    #[test]
+    fn an_old_proof_cannot_be_billed() {
+        let now = crate::mcp::onboarding::parse_ts("2026-11-24T21:07:00Z").unwrap() as f64;
+        let at = |t: &str| json!({ "tx_response": { "timestamp": t } });
+        assert!(recent_enough(&at("2026-11-20T00:00:00Z"), now));
+        assert!(!recent_enough(&at("2026-10-01T00:00:00Z"), now));
+        assert!(!recent_enough(&json!({}), now));
     }
 
     #[test]
@@ -1056,7 +1443,7 @@ mod tests {
             credit("a", "1-61", 80.0, 1.0),
             credit("b", "1-62", 80.0, 2.0),
         ];
-        let plan = payable(&cs, &pay(1.0, 100.0, 0.0), ROOM, 0.0);
+        let plan = payable(&cs, &[], &pay(1.0, 100.0, 0.0), ROOM, NOW);
         let total: f64 = plan.iter().map(|s| s.amount_base).sum();
         assert_eq!(total, 100.0, "the cap is the cap, however many helpers there are");
     }
@@ -1064,7 +1451,9 @@ mod tests {
     #[test]
     fn a_spent_epoch_pays_nothing_more() {
         let cs = vec![credit("a", "1-61", 80.0, 1.0)];
-        assert!(payable(&cs, &pay(1.0, 100.0, 0.0), ROOM, 100.0).is_empty());
+        let made = [payment("p", "1-62", 100.0, NOW, PaymentState::Paid)];
+        assert!(payable(&cs, &made, &pay(1.0, 100.0, 0.0), ROOM, NOW).is_empty());
+        assert_eq!(payable(&cs, &made, &pay(1.0, 100.0, 0.0), ROOM, NOW + 3_600_001.0).len(), 1, "the next one does");
     }
 
     /// Settlement must be idempotent: a credit already paid is never paid
@@ -1073,7 +1462,7 @@ mod tests {
     fn settled_credits_are_never_paid_twice() {
         let mut c = credit("a", "1-61", 50.0, 1.0);
         c.settled_at = Some(now_millis());
-        let plan = payable(&[c], &pay(1.0, 0.0, 0.0), ROOM, 0.0);
+        let plan = payable(&[c], &[], &pay(1.0, 0.0, 0.0), ROOM, NOW);
         assert!(plan.is_empty());
     }
 
@@ -1081,7 +1470,7 @@ mod tests {
     fn another_crews_credits_are_not_this_crews_bill() {
         let mut c = credit("a", "1-61", 50.0, 1.0);
         c.room_id = "!other:example.org".into();
-        assert!(payable(&[c], &pay(1.0, 0.0, 0.0), ROOM, 0.0).is_empty());
+        assert!(payable(&[c], &[], &pay(1.0, 0.0, 0.0), ROOM, NOW).is_empty());
     }
 
     /// A crew paying in a guild token must not settle debts denominated in
@@ -1090,35 +1479,28 @@ mod tests {
     fn a_credit_in_another_denom_is_left_alone() {
         let mut c = credit("a", "1-61", 50.0, 1.0);
         c.denom = "uguild.0-1".into();
-        assert!(payable(&[c], &pay(1.0, 0.0, 0.0), ROOM, 0.0).is_empty());
+        assert!(payable(&[c], &[], &pay(1.0, 0.0, 0.0), ROOM, NOW).is_empty());
     }
 
     #[test]
     fn fractions_of_a_base_unit_are_not_paid() {
         let cs = vec![credit("a", "1-61", 0.4, 1.0)];
-        assert!(payable(&cs, &pay(1.0, 0.0, 0.0), ROOM, 0.0).is_empty());
+        assert!(payable(&cs, &[], &pay(1.0, 0.0, 0.0), ROOM, NOW).is_empty());
     }
 
+    /// Credits settled before payments were recorded still count.
     #[test]
-    fn cover_discharges_whole_credits_oldest_first() {
-        let a = credit("a", "1-61", 30.0, 1.0);
-        let b = credit("b", "1-61", 30.0, 2.0);
-        let c = credit("c", "1-61", 30.0, 3.0);
-        let refs: Vec<&Credit> = vec![&a, &b, &c];
-        assert_eq!(cover(&refs, 65.0), vec!["a".to_string(), "b".to_string()]);
-        assert_eq!(cover(&refs, 20.0), Vec::<String>::new());
-    }
-
-    #[test]
-    fn only_settled_credits_count_against_the_epoch() {
-        let now = 1_000_000.0;
+    fn the_epoch_counts_payments_and_older_settlements() {
+        let now = 1_000_000_000.0;
         let mut fresh = credit("a", "1-61", 40.0, now);
         fresh.settled_at = Some(now - 1_000.0);
         let mut old = credit("b", "1-61", 40.0, now);
         old.settled_at = Some(now - 10_000_000.0);
         let unsettled = credit("c", "1-61", 40.0, now);
-        let spent = spent_this_epoch(&[fresh, old, unsettled], ROOM, 3600, now);
-        assert_eq!(spent, 40.0);
+        let made = [payment("p", "1-62", 7.0, now - 1_000.0, PaymentState::Paid), payment("q", "1-62", 9.0, now - 10_000_000.0, PaymentState::Paid)];
+        let cs = [fresh, old, unsettled];
+        assert_eq!(spent_this_epoch(&cs, &made, ROOM, 3600, now), 47.0);
+        assert_eq!(spent_on(&cs, &made, ROOM, "1-62", 3600, now), 7.0);
     }
 
     #[test]

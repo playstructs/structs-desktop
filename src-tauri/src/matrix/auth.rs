@@ -957,10 +957,10 @@ pub async fn refresh(session: &Session) -> Result<Session, RefreshError> {
         .map_err(|e| RefreshError::Transient(format!("token refresh: {}", e)))?;
     let status = resp.status().as_u16();
     if !(200..300).contains(&status) {
-        // 4xx is the issuer's verdict on the token; anything else is the
-        // issuer having a bad day.
+        // A refusal is the issuer's verdict on the token; being told to slow
+        // down, or anything else, is the issuer having a bad day.
         let msg = format!("token refresh refused ({})", status);
-        return Err(if (400..500).contains(&status) {
+        return Err(if matches!(status, 400 | 401 | 403) {
             RefreshError::Dead(msg)
         } else {
             RefreshError::Transient(msg)

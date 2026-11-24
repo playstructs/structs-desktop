@@ -5,6 +5,7 @@ pub mod combat;
 pub mod native_signer;
 pub mod combat_lists;
 pub mod auto_raid;
+pub mod command_ship;
 pub mod auto_response;
 pub mod companion;
 pub mod config;

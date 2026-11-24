@@ -83,11 +83,16 @@ pub fn extract_type_id(s: &Value) -> String {
 /// `land`/`water`/`air`/`space` slot arrays of their ENTITY (LCD data, which we
 /// read correctly). Union those and you have exactly the player's structs.
 /// Returns `[]` on any resolve error (caller treats it as "nothing to act on").
+/// ANY: half a player is not a smaller player. A fleet that failed to read used
+/// to leave the planet's structs standing alone, which reads as "no Command
+/// Ship" and as empty slots, and both get built into.
 pub async fn player_struct_ids(client: &CosmosClient, pid: &str) -> Vec<String> {
+    try_player_struct_ids(client, pid).await.unwrap_or_default()
+}
+
+async fn try_player_struct_ids(client: &CosmosClient, pid: &str) -> Result<Vec<String>, String> {
     let mut ids = Vec::new();
-    let Ok(player) = client.query_entity("player", pid).await else {
-        return ids;
-    };
+    let player = client.query_entity("player", pid).await?;
     let p = player.get("Player");
     let planet_id = p
         .and_then(|x| x.get("planetId"))
@@ -104,7 +109,8 @@ pub async fn player_struct_ids(client: &CosmosClient, pid: &str) -> Vec<String> 
         if loc.is_empty() {
             continue;
         }
-        if let Ok(e) = client.query_entity(kind, loc).await {
+        {
+            let e = client.query_entity(kind, loc).await?;
             let obj = e.get(wrapper);
             for ambit in ["land", "water", "air", "space"] {
                 if let Some(arr) = obj.and_then(|o| o.get(ambit)).and_then(|a| a.as_array()) {
@@ -136,7 +142,7 @@ pub async fn player_struct_ids(client: &CosmosClient, pid: &str) -> Vec<String> 
     // array and commandStruct — avoids double-querying it in player_structs.
     let mut seen = std::collections::HashSet::new();
     ids.retain(|id| seen.insert(id.clone()));
-    ids
+    Ok(ids)
 }
 
 /// Like [`player_struct_ids`], but returns each struct as a FLAT, list-shaped
@@ -147,12 +153,21 @@ pub async fn player_struct_ids(client: &CosmosClient, pid: &str) -> Vec<String> 
 /// where a loop needs per-struct location/ambit/slot/type_name (auto_build slot
 /// detection, auto_defend combat-struct classification); use `player_struct_ids`
 /// where the loop re-queries the entity itself anyway (auto_harvest).
+///
+/// Like it, `[]` when any of it could not be read. A struct the chain has
+/// pruned is not a failure; it is simply not there.
 pub async fn player_structs(client: &CosmosClient, pid: &str) -> Vec<Value> {
-    let ids = player_struct_ids(client, pid).await;
+    try_player_structs(client, pid).await.unwrap_or_default()
+}
+
+async fn try_player_structs(client: &CosmosClient, pid: &str) -> Result<Vec<Value>, String> {
+    let ids = try_player_struct_ids(client, pid).await?;
     let mut out = Vec::with_capacity(ids.len());
     for sid in ids {
-        let Ok(e) = client.query_entity("struct", &sid).await else {
-            continue;
+        let e = match client.query_entity("struct", &sid).await {
+            Ok(e) => e,
+            Err(e) if crate::mcp::cosmos_client::is_absent_object(&e) => continue,
+            Err(e) => return Err(e),
         };
         let s = e.get("Struct");
         let sa = e.get("structAttributes");
@@ -179,8 +194,57 @@ pub async fn player_structs(client: &CosmosClient, pid: &str) -> Vec<Value> {
             "is_built": Value::Bool(parse_bool(sa.and_then(|x| x.get("isBuilt")))),
         }));
     }
-    out
+    Ok(out)
 }
+
+/// Per-key back-off with doubling, for work the chain refuses for a reason that
+/// does not change by asking again. Keyed on the smallest thing that is being
+/// refused (an edge, a build, a target), so one bad item steps aside instead of
+/// holding up everything behind it.
+pub struct Backoff {
+    base_ms: f64,
+    max_ms: f64,
+    keys: Mutex<HashMap<String, (f64, u32)>>,
+}
+
+impl Backoff {
+    pub fn new(base_ms: f64, max_ms: f64) -> Self {
+        Self { base_ms, max_ms, keys: Mutex::new(HashMap::new()) }
+    }
+
+    /// May `key` be tried now?
+    pub fn ready(&self, key: &str) -> bool {
+        self.ready_at(key, crate::hasher::types::now_millis())
+    }
+
+    fn ready_at(&self, key: &str, now: f64) -> bool {
+        self.keys.lock().unwrap_or_else(|e| e.into_inner()).get(key).is_none_or(|(until, _)| now >= *until)
+    }
+
+    /// It was refused: wait, twice as long each time in a row.
+    pub fn fail(&self, key: &str) {
+        self.fail_at(key, crate::hasher::types::now_millis())
+    }
+
+    fn fail_at(&self, key: &str, now: f64) {
+        let mut m = self.keys.lock().unwrap_or_else(|e| e.into_inner());
+        // Long past its wait: an old grievance, not a streak.
+        let max = self.max_ms;
+        m.retain(|_, (until, _)| now - *until < max * 2.0);
+        let e = m.entry(key.to_string()).or_insert((0.0, 0));
+        let wait = (self.base_ms * 2f64.powi(e.1.min(16) as i32)).min(self.max_ms);
+        *e = (now + wait, e.1.saturating_add(1));
+    }
+
+    /// It worked.
+    pub fn clear(&self, key: &str) {
+        self.keys.lock().unwrap_or_else(|e| e.into_inner()).remove(key);
+    }
+}
+
+/// Proof completions the chain refused, by object. The anchor does not move on
+/// a refusal, so the same proof would be ground and submitted again at once.
+pub static COMPLETION_BACKOFF: LazyLock<Backoff> = LazyLock::new(|| Backoff::new(5.0 * 60_000.0, 2.0 * 3_600_000.0));
 
 /// TTL'd cache behind [`player_structs`]. `player_structs` costs 3 + N LCD reads
 /// per player, which is fine for a per-player loop body but ruinous for anything
@@ -739,6 +803,21 @@ pub(crate) fn test_pid(s: &str) -> PlayerId {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_refused_key_waits_longer_each_time_and_alone() {
+        let b = Backoff::new(1_000.0, 8_000.0);
+        assert!(b.ready_at("a", 0.0));
+        for (n, wait) in [(0, 1_000.0), (1, 2_000.0), (2, 4_000.0), (3, 8_000.0), (4, 8_000.0)] {
+            let t = n as f64 * 8_000.0;
+            b.fail_at("a", t);
+            assert!(!b.ready_at("a", t + wait - 1.0), "refusal {n}");
+            assert!(b.ready_at("a", t + wait), "refusal {n}");
+        }
+        assert!(b.ready_at("b", 0.0), "one key's refusals are its own");
+        b.clear("a");
+        assert!(b.ready_at("a", 0.0));
+    }
+
     #[test]
     fn charged_types_and_reservation_counts() {
         use super::*;

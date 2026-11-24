@@ -167,25 +167,29 @@ pub async fn find_dynamic_allocation(
     client: &CosmosClient,
     controller: &str,
     substation_id: &str,
-) -> Option<(String, u64)> {
-    let arr = client.list_all_entities("allocation", "Allocation").await.ok()?;
-    let id = arr
+) -> Result<Option<(String, u64)>, String> {
+    // `Err` is "could not look": callers CREATE an allocation on `None`.
+    let arr = client.list_all_entities("allocation", "Allocation").await?;
+    let Some(id) = arr
         .iter()
         .find(|a| {
             a.get("controller").and_then(|c| c.as_str()) == Some(controller)
                 && a.get("destinationId").and_then(|d| d.as_str()) == Some(substation_id)
                 && a.get("type").and_then(|t| t.as_str()) == Some("dynamic")
         })
-        .and_then(|a| a.get("id").and_then(|i| i.as_str()))?
-        .to_string();
-    let full = client.query_entity("allocation", &id).await.ok()?;
+        .and_then(|a| a.get("id").and_then(|i| i.as_str()))
+        .map(String::from)
+    else {
+        return Ok(None);
+    };
+    let full = client.query_entity("allocation", &id).await?;
     let power = full
         .get("gridAttributes")
         .and_then(|g| g.get("power"))
         .and_then(|p| p.as_str())
         .and_then(|s| s.parse::<u64>().ok())
         .unwrap_or(0);
-    Some((id, power))
+    Ok(Some((id, power)))
 }
 
 /// Resolve the guild's reactor + entry substation into one power picture.
@@ -224,7 +228,15 @@ pub async fn resolve_guild_power(
 
     // ── Entry substation (the pool every connected player draws from) ──
     if !substation_id.is_empty() {
-        if let Ok(sub) = client.query_entity("substation", &substation_id).await {
+        // An unread substation is NOT one with no power and nobody on it:
+        // callers read zero capacity as "nothing to dilute" and drop their
+        // power gate. Only a substation the chain says is gone may be zeros.
+        let sub = match client.query_entity("substation", &substation_id).await {
+            Ok(v) => Some(v),
+            Err(e) if crate::mcp::cosmos_client::is_absent_object(&e) => None,
+            Err(e) => return Err(format!("substation {substation_id}: {e}")),
+        };
+        if let Some(sub) = sub {
             let ga = sub.get("gridAttributes");
             out.sub_capacity = num(ga.and_then(|x| x.get("capacity")));
             out.sub_connection_capacity = num(ga.and_then(|x| x.get("connectionCapacity")));

@@ -826,14 +826,24 @@ pub async fn locations_at_planet(
     client: &crate::mcp::cosmos_client::CosmosClient,
     planet_id: &str,
 ) -> std::collections::HashSet<String> {
+    try_locations_at_planet(client, planet_id).await.0
+}
+
+/// [`locations_at_planet`], and whether the walk was complete. `false` means
+/// some fleet could not be read: one that is missing may still be here.
+pub async fn try_locations_at_planet(
+    client: &crate::mcp::cosmos_client::CosmosClient,
+    planet_id: &str,
+) -> (std::collections::HashSet<String>, bool) {
     let mut out = std::collections::HashSet::new();
     out.insert(planet_id.to_string());
-    let Ok(planet) = client.entity("planet", planet_id).await else { return out };
+    let Ok(planet) = client.entity("planet", planet_id).await else { return (out, false) };
     let body = planet.get("Planet").unwrap_or(&planet);
     let owner = str_of(body.get("owner"));
     let docked = fleets_docked_at(client, planet_id, body, owner.as_deref()).await;
+    let complete = docked.warning.is_none();
     out.extend(docked.fleets.into_iter().map(|(fid, _)| fid));
-    out
+    (out, complete)
 }
 
 /// What [`fleets_docked_at`] found: each fleet with its body, in a stable
@@ -1512,13 +1522,22 @@ struct RaidState {
     /// True once a guild read has answered for this planet (an answer of
     /// "no raid" is still an answer).
     seeded: bool,
+    /// When it was last learned. Anything learned before the stream last
+    /// broke may have changed in the gap, and is read again.
+    at_ms: u64,
 }
 
 static RAID_STATE: LazyLock<Mutex<HashMap<String, RaidState>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
 /// Statuses after which the raid is over and the raider gone.
-const TERMINAL_RAID: &[&str] = &["raidSuccessful", "attackerRetreated", "attackerDefeated", "raidVoided", "raidCancelled"];
+fn raid_is_over(status: &str) -> bool {
+    crate::mcp::raid_view::TERMINAL_STATUSES.contains(&status) || matches!(status, "raidVoided" | "raidCancelled")
+}
+
+fn wall_ms() -> u64 {
+    crate::hasher::types::now_millis() as u64
+}
 
 /// Fold one stream frame into the cache. Returns true when the planet's raid
 /// state changed, so the caller can force a snapshot for its windows.
@@ -1531,7 +1550,7 @@ pub fn note_raid_frame(planet_id: &str, category: &str, detail: &Value) -> bool 
             let status = str_of(detail.get("status")).or_else(|| str_of(detail.get("raid_status")));
             let fleet = str_of(detail.get("fleet_id")).or_else(|| str_of(detail.get("raiding_fleet")));
             if let Some(st) = status {
-                if TERMINAL_RAID.contains(&st.as_str()) {
+                if raid_is_over(&st) {
                     e.status = None;
                     e.fleet = None;
                 } else {
@@ -1541,6 +1560,7 @@ pub fn note_raid_frame(planet_id: &str, category: &str, detail: &Value) -> bool 
                     }
                 }
                 e.seeded = true;
+                e.at_ms = wall_ms();
             }
         }
         "block_raid_start" => {
@@ -1551,11 +1571,12 @@ pub fn note_raid_frame(planet_id: &str, category: &str, detail: &Value) -> bool 
                 e.status = None;
                 e.fleet = None;
                 e.seeded = true;
+                e.at_ms = wall_ms();
             }
         }
         _ => {}
     }
-    *e != before
+    (&e.status, &e.fleet, e.seeded) != (&before.status, &before.fleet, before.seeded)
 }
 
 /// What the cache holds for a planet, if anything has been learned yet.
@@ -1564,8 +1585,22 @@ pub fn raid_state_cached(planet_id: &str) -> Option<(Option<String>, Option<Stri
         .lock()
         .unwrap()
         .get(planet_id)
-        .filter(|e| e.seeded)
+        .filter(|e| e.seeded && e.at_ms >= crate::mcp::grass_native::last_break_ms())
         .map(|e| (e.status.clone(), e.fleet.clone()))
+}
+
+/// A guild raid row as live state: `(None, None)` when it is over, or when it
+/// has gone quiet for so long that it only looks live (rows are left on
+/// `initiated` for weeks by raids that ended without a closing event).
+fn live_raid_row(r: &Value, now_ms: f64) -> (Option<String>, Option<String>) {
+    let status = str_of(r.get("status")).filter(|s| !raid_is_over(s));
+    let stale = str_of(r.get("updated_at"))
+        .and_then(|t| crate::mcp::onboarding::parse_ts(&t))
+        .is_some_and(|t| now_ms - t as f64 > crate::mcp::raid_view::STALE_AFTER_MS);
+    match status {
+        Some(s) if !stale => (Some(s), str_of(r.get("fleet_id"))),
+        _ => (None, None),
+    }
 }
 
 async fn raid_state_for(
@@ -1579,15 +1614,26 @@ async fn raid_state_for(
     }
     // First sight of this planet (or the stream is not to be trusted): one
     // guild read seeds the cache.
-    let mut out = (None, None);
-    if let Ok(raid) = client.guild.planet_raid_active_by_planet(planet_id).await {
-        let r = raid.as_array().and_then(|a| a.first()).unwrap_or(&raid);
-        out = (str_of(r.get("status")), str_of(r.get("fleet_id")));
-    }
+    let out = match client.guild.planet_raid_active_by_planet(planet_id).await {
+        Ok(raid) => {
+            let r = raid.as_array().and_then(|a| a.first()).unwrap_or(&raid);
+            live_raid_row(r, wall_ms() as f64)
+        }
+        // Not learned. What was known before the read stands; nothing is
+        // recorded, so "could not ask" never becomes "no raid".
+        Err(_) => {
+            return RAID_STATE
+                .lock()
+                .unwrap()
+                .get(planet_id)
+                .map(|e| (e.status.clone(), e.fleet.clone()))
+                .unwrap_or_default();
+        }
+    };
     let mut m = RAID_STATE.lock().unwrap();
     m.insert(
         planet_id.to_string(),
-        RaidState { status: out.0.clone(), fleet: out.1.clone(), seeded: true },
+        RaidState { status: out.0.clone(), fleet: out.1.clone(), seeded: true, at_ms: wall_ms() },
     );
     out
 }
@@ -2473,6 +2519,16 @@ mod stream_tests {
 mod tests {
     use super::*;
     use crate::mcp::event_buffer::GameEvent;
+
+    #[test]
+    fn a_raid_that_only_looks_live_is_not_shown() {
+        let now = crate::mcp::onboarding::parse_ts("2026-11-24 20:00:00+00").unwrap() as f64;
+        let row = |status: &str, at: &str| json!({ "status": status, "fleet_id": "9-61", "updated_at": at });
+        assert_eq!(live_raid_row(&row("ongoing", "2026-11-24 19:50:00+00"), now), (Some("ongoing".into()), Some("9-61".into())));
+        assert_eq!(live_raid_row(&row("initiated", "2026-11-05 19:50:00+00"), now), (None, None), "weeks old");
+        assert_eq!(live_raid_row(&row("demilitarized", "2026-11-24 19:59:00+00"), now), (None, None));
+        assert_eq!(live_raid_row(&json!({}), now), (None, None));
+    }
 
     #[test]
     fn type_slug_matches_the_lottie_bundle_names() {

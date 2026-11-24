@@ -104,13 +104,14 @@ impl ErrorClass {
 }
 
 /// "429" as an HTTP status, not as three digits inside a nonce or a block
-/// height: neither neighbour may be a digit.
+/// height (neither neighbour may be a digit), nor the tail of an object id
+/// (`5-429`).
 fn standalone_429(l: &str) -> bool {
     let b = l.as_bytes();
     let mut from = 0;
     while let Some(off) = l[from..].find("429") {
         let i = from + off;
-        let before_digit = i > 0 && b[i - 1].is_ascii_digit();
+        let before_digit = i > 0 && (b[i - 1].is_ascii_digit() || b[i - 1] == b'-');
         let after_digit = b.get(i + 3).map_or(false, |c| c.is_ascii_digit());
         if !before_digit && !after_digit {
             return true;
@@ -263,6 +264,42 @@ fn record(
     }
 }
 
+/// Every error for a send this app declined to make starts with this. Callers
+/// tell "deferred, nothing was spent" from a real refusal with
+/// [`was_skipped`]; they used to each match their own copy of the wording, and
+/// a rewording turned every deferral into a 30-minute back-off.
+const SKIPPED_PREFIX: &str = "skipped by ";
+
+/// Did we decline to send this ourselves (mirror gate, mandate)?
+pub fn was_skipped(err: &str) -> bool {
+    err.starts_with(SKIPPED_PREFIX)
+}
+
+/// Did the chain refuse because the acting player is offline?
+pub fn is_player_offline(err: &str) -> bool {
+    err.contains("is OFFLINE") || classify(err) == ErrorClass::PlayerOffline
+}
+
+/// Could the same send succeed shortly with nothing changed? True for anything
+/// that was not a verdict on the message: our own deferral, the bridge or the
+/// node not answering, throttling, or charge that regenerates by itself. False
+/// is a refusal that will be repeated, which is what a back-off is for.
+pub fn worth_retrying_soon(err: &str) -> bool {
+    was_skipped(err)
+        || err.starts_with("stale:")
+        || err.contains("HTTP error")
+        || err.contains("not yet found")
+        || matches!(
+            classify(err),
+            ErrorClass::SequenceMismatch
+                | ErrorClass::InsufficientCharge
+                | ErrorClass::BlockQuota
+                | ErrorClass::RateLimited
+                | ErrorClass::BridgeDown
+                | ErrorClass::Timeout
+        )
+}
+
 /// Record a send the mirror's gate refused: the chain was certain to reject
 /// it, so no transaction was spent. Returns the caller's error.
 fn gate_refusal(context: &Context, action: &str, attempt: u32, since: f64, d: &crate::mirror::gate::Decision) -> String {
@@ -279,7 +316,7 @@ fn gate_refusal(context: &Context, action: &str, attempt: u32, since: f64, d: &c
         translated: None,
         duration_ms: now_millis() - since,
     });
-    format!("skipped by the mirror ({}): {}", d.rule, d.detail)
+    format!("{SKIPPED_PREFIX}the mirror ({}): {}", d.rule, d.detail)
 }
 
 /// A mandate in the standing orders caps this loop and the cap is reached.
@@ -297,7 +334,7 @@ fn mandate_refusal(context: &Context, action: &str, why: &str) -> String {
         translated: None,
         duration_ms: 0.0,
     });
-    format!("skipped by a mandate: {why}")
+    format!("{SKIPPED_PREFIX}a mandate: {why}")
 }
 
 fn mandate_check(context: &Context) -> Option<String> {
@@ -601,16 +638,28 @@ pub async fn sign_once(
     payload: Value,
     context: impl Into<Context>,
 ) -> Result<Value, String> {
+    sign_once_coded(app, index, type_url, payload, context).await.map_err(|(e, _)| e)
+}
+
+/// [`sign_once`], with the code the CHAIN refused it with. No code means the
+/// chain never answered: the transaction may still land.
+pub async fn sign_once_coded(
+    app: &tauri::AppHandle,
+    index: u32,
+    type_url: &str,
+    payload: Value,
+    context: impl Into<Context>,
+) -> Result<Value, (String, Option<i64>)> {
     let context: Context = context.into();
     let context = &context;
     let started = now_millis();
     if let Some(d) = crate::mirror::gate::check_message(type_url, &payload) {
         if d.refused() {
-            return Err(gate_refusal(context, type_url, 1, started, &d));
+            return Err((gate_refusal(context, type_url, 1, started, &d), None));
         }
     }
     if let Some(why) = mandate_check(context) {
-        return Err(mandate_refusal(context, type_url, &why));
+        return Err((mandate_refusal(context, type_url, &why), None));
     }
     let payload_seen = payload.clone();
     let prediction = crate::mirror::preview::predict(type_url, &payload);
@@ -649,8 +698,21 @@ pub async fn sign_once(
             }
             Ok(value)
         }
-        AttemptResult::Failure { raw, .. } => Err(translate_error(&raw)),
+        AttemptResult::Failure { raw, code } => {
+            let code = code.or_else(|| refused_with(&raw));
+            Err((translate_error(&raw), code))
+        }
     }
+}
+
+/// The code in a `Broadcasting transaction failed with code N` refusal — the
+/// node's own answer, so the transaction is not in the mempool. Two codes are
+/// not refusals: 19 means it already IS there, and 32 (sequence mismatch) can
+/// follow a broadcast that landed.
+fn refused_with(raw: &str) -> Option<i64> {
+    let rest = raw.split_once("Broadcasting transaction failed with code ")?.1;
+    let code: i64 = rest.split(|c: char| !c.is_ascii_digit()).next()?.parse().ok()?;
+    (code != 19 && code != 32).then_some(code)
 }
 
 /// Single recorded attempt, NO retry — for interactive MCP paths where the
@@ -704,6 +766,42 @@ mod tests {
     use super::*;
 
     #[test]
+    fn an_outage_is_worth_retrying_and_a_verdict_is_not() {
+        for e in [
+            "virtual-player op 'sign' timed out after 60s (is the app signed in?)",
+            "broadcast HTTP error: connection reset",
+            "skipped by a mandate: cap reached",
+            "Insufficient charge. Wait for charge to accumulate (1 per block, ~6 seconds each).",
+            "HTTP 429 Too Many Requests",
+        ] {
+            assert!(worth_retrying_soon(e), "{e}");
+        }
+        for e in [
+            "Invalid target — check ambit targeting rules.",
+            "struct (5-9) cannot defend",
+            "spendable balance 0ualpha is smaller than 5ualpha: insufficient funds",
+        ] {
+            assert!(!worth_retrying_soon(e), "{e}");
+        }
+    }
+
+    #[test]
+    fn only_the_chains_own_refusal_carries_a_code() {
+        assert_eq!(refused_with("Broadcasting transaction failed with code 5 (codespace: sdk). Log: insufficient funds"), Some(5));
+        assert_eq!(refused_with("Broadcasting transaction failed with code 19 (codespace: sdk). Log: tx already in mempool"), None);
+        assert_eq!(refused_with("Broadcasting transaction failed with code 32 (codespace: sdk). Log: account sequence mismatch"), None);
+        assert_eq!(refused_with("Transaction with ID ABC was submitted but was not yet found"), None);
+        assert_eq!(refused_with("broadcast HTTP error: timed out"), None);
+    }
+
+    #[test]
+    fn a_declined_send_is_recognised_as_skipped() {
+        let ctx = Context::from("auto_build:1-9");
+        assert!(was_skipped(&mandate_refusal(&ctx, "MsgX", "cap reached")));
+        assert!(!was_skipped("Broadcasting transaction failed with code 9"));
+    }
+
+    #[test]
     fn classification_matches_chain_vocabulary() {
         assert_eq!(classify("account sequence mismatch, expected 5, got 4"), ErrorClass::SequenceMismatch);
         assert_eq!(classify("failed: insufficient charge"), ErrorClass::InsufficientCharge);
@@ -746,6 +844,9 @@ mod tests {
         assert_eq!(ErrorClass::WorkFailure.outcome(), "work_failure");
         assert_eq!(classify("block 2471429: something else"), ErrorClass::Other);
         assert_eq!(classify("status 429"), ErrorClass::RateLimited);
+        // Player 1-429's refusal is not the node throttling us.
+        assert_eq!(classify("struct (5-429) is already built"), ErrorClass::Other);
+        assert_eq!(classify("player 1-429: permission denied"), ErrorClass::Other);
     }
 
     #[test]

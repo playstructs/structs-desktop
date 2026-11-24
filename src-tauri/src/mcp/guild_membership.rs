@@ -587,7 +587,13 @@ pub async fn sub_power(client: &CosmosClient, id: &str) -> Option<SubPower> {
 
 /// A player's draw and their current substation's share.
 pub async fn draw_of(client: &CosmosClient, player: &str) -> (Draw, f64) {
-    let Ok(v) = client.query_entity("player", player).await else { return (Draw::default(), 0.0) };
+    try_draw_of(client, player).await.unwrap_or((Draw::default(), 0.0))
+}
+
+/// [`draw_of`] for a caller about to SIGN on the answer: a player we could not
+/// read is not one with no capacity and no substation.
+pub async fn try_draw_of(client: &CosmosClient, player: &str) -> Result<(Draw, f64), String> {
+    let v = client.query_entity("player", player).await?;
     let ga = v.get("gridAttributes");
     let d = Draw {
         load: num(ga.and_then(|x| x.get("load"))),
@@ -599,7 +605,7 @@ pub async fn draw_of(client: &CosmosClient, player: &str) -> (Draw, f64) {
         Some(s) => s.share_with(0),
         None => 0.0,
     };
-    (d, share)
+    Ok((d, share))
 }
 
 /// Fuel the player has infused across every reactor (direct join counts the

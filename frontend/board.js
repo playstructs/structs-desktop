@@ -1298,6 +1298,9 @@
           notes.appendChild(stateBlock('error', w + ' wedged — its scan has been running long enough ' +
             'that the single-flight guard never cleared'));
         });
+        (h.loops_failing || []).forEach(function (f) {
+          notes.appendChild(stateBlock('warning', f + ' failing — every scan ends in an error'));
+        });
         (h.loops_overdue || []).forEach(function (o) {
           notes.appendChild(stateBlock('warning', o + ' overdue — enabled, but has not completed a ' +
             'scan within its own interval'));

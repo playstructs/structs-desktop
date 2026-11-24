@@ -1043,6 +1043,18 @@ async fn authed(
 
 /// The same, on a named client — so `/sync` can use the long-poll one without
 /// every other request inheriting its 45-second patience.
+/// The body of a homeserver answer. A success whose body is cut off is a
+/// failed request, not an empty one: read as empty, a truncated `/sync` lost
+/// its place and started over from nothing. An error's body only adds detail.
+async fn body_of(resp: reqwest::Response) -> Result<Value, String> {
+    let ok = resp.status().is_success();
+    match resp.json().await {
+        Ok(v) => Ok(v),
+        Err(e) if ok => Err(format!("the answer could not be read: {e}")),
+        Err(_) => Ok(Value::Null),
+    }
+}
+
 async fn authed_on(
     client: &reqwest::Client,
     session: &Session,
@@ -1064,7 +1076,7 @@ async fn authed_on(
         .await
         .map_err(|e| e.to_string())?;
     let mut status = resp.status();
-    let mut v: Value = resp.json().await.unwrap_or(Value::Null);
+    let mut v: Value = body_of(resp).await?;
 
     // Once, not in a loop: a server still refusing after it told us when to
     // come back is not going to be talked round by asking faster.
@@ -1076,7 +1088,7 @@ async fn authed_on(
                 .await
                 .map_err(|e| e.to_string())?;
             status = resp.status();
-            v = resp.json().await.unwrap_or(Value::Null);
+            v = body_of(resp).await?;
         } else {
             return Err(format!(
                 "the homeserver is rate limiting this; try again in {}s",
@@ -1096,7 +1108,7 @@ async fn authed_on(
             .await
             .map_err(|e| e.to_string())?;
         let status = resp.status();
-        let v: Value = resp.json().await.unwrap_or(Value::Null);
+        let v: Value = body_of(resp).await?;
         if status.is_success() {
             return Ok(v);
         }
@@ -2652,8 +2664,15 @@ fn maybe_notify(
     room_id: &str,
     messages: &[Message],
     session: &Session,
+    // The first sync of a session: history replayed, not news arriving.
+    replayed: bool,
 ) {
     if window_is_watched(app) {
+        return;
+    }
+    // Of what is replayed, only a room with something unread has anything to
+    // say — every launch used to announce each DM's last message again.
+    if replayed && STATE.read().unwrap().get(guild_id).and_then(|gs| gs.rooms.get(room_id)).is_none_or(|r| r.unread == 0) {
         return;
     }
     // Silenced rooms still count as unread; they are simply not allowed to
@@ -2687,7 +2706,8 @@ fn maybe_notify(
      * are a person speaking, and a redaction notifying you about a message you
      * were already notified about is the same bug wearing a different hat.
      */
-    let hit = messages.iter().find(|m| {
+    // The newest: a replay arrives oldest first.
+    let hit = messages.iter().rev().find(|m| {
         !m.is_self
             && matches!(m.kind, "text" | "emote" | "image")
             && (is_dm || m.mentions_me)
@@ -3203,7 +3223,7 @@ pub fn start_sync(app: tauri::AppHandle, guild_id: String) {
                         if super::is_work_bus(&room_id) {
                             // A firehose by design; never an interruption.
                         } else {
-                            maybe_notify(&app, &guild_id, &room_id, &messages, &session);
+                            maybe_notify(&app, &guild_id, &room_id, &messages, &session, since.is_none());
                         }
                         if bus.as_deref() == Some(room_id.as_str()) {
                             crate::mcp::crew_pay::absorb_done_frames(&room_id, &messages);

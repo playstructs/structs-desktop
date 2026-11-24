@@ -218,9 +218,30 @@ fn parse_permission_page(v: &Value, player_id: &str) -> Vec<(String, u64)> {
         .collect()
 }
 
+/// Is this LCD answer the chain's definite "no such object"? The chain answers
+/// a missing (destroyed, pruned, never-created) object with HTTP **500** and
+/// gRPC code 2 / "codespace structs code 1050: object not found", so the status
+/// alone cannot tell it from a node that is struggling. Works on a raw body
+/// and on the `API returned …` error string built from one.
+///
+/// Deliberately narrow: a gateway's "404 page not found" or "upstream not
+/// found" is an endpoint failing to answer, not the chain answering no.
+pub(crate) fn is_absent_object(body: &str) -> bool {
+    body.contains("object not found") || body.contains("structs code 1050")
+}
+
+/// Should this HTTP answer be retried and, if it persists, counted as endpoint
+/// pressure? An absent object is an ANSWER: asking again cannot change it, and
+/// counting it halved the loops' read fan-out for a day on 2026-11-24 while the
+/// node was answering in 50 ms.
+fn is_pressure(status: u16, body: &str) -> bool {
+    (status == 429 || status >= 500) && !is_absent_object(body)
+}
+
 /// One shared GET with a single jittered retry on transport errors, timeouts,
 /// 429s, and 5xx — safe because these are idempotent reads. Retried-and-still-
-/// failing pressure errors feed the AIMD loop-concurrency controller.
+/// failing pressure errors feed the AIMD loop-concurrency controller. An
+/// absent object ([`is_absent_object`]) is returned at once and never counted.
 pub(crate) async fn get_json(url: &str) -> Result<Value, String> {
     note_lcd_request_for(url);
     let mut last_err = String::new();
@@ -245,8 +266,7 @@ pub(crate) async fn get_json(url: &str) -> Result<Value, String> {
                         .map_err(|e| format!("JSON parse error: {}", e));
                 }
                 last_err = format!("API returned {}: {}", status, body);
-                let retryable = status.as_u16() == 429 || status.is_server_error();
-                if !retryable {
+                if !is_pressure(status.as_u16(), &body) {
                     return Err(last_err);
                 }
             }
@@ -478,7 +498,7 @@ impl CosmosClient {
             .unwrap_or(0.0);
         let body = resp.text().await.map_err(|e| format!("Read error: {}", e))?;
         if !status.is_success() {
-            if status.as_u16() == 429 || status.is_server_error() {
+            if is_pressure(status.as_u16(), &body) {
                 crate::mcp::loop_util::report_failure();
             }
             return Err(format!("API returned {}: {}", status, body.chars().take(300).collect::<String>()));
@@ -689,6 +709,23 @@ const LCD_MAX_PAGES_PER_WALK: usize = 200;
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// The chain's "no such object" is a 500. It is an answer, not a fault.
+    #[test]
+    fn an_absent_object_is_not_endpoint_pressure() {
+        let gone = r#"{"code":2, "message":"codespace structs code 1050: object not found", "details":[]}"#;
+        assert!(is_absent_object(gone));
+        assert!(is_absent_object(&format!("API returned 500 Internal Server Error: {gone}")));
+        assert!(!is_pressure(500, gone));
+        // Everything that IS the endpoint struggling still counts.
+        assert!(is_pressure(500, r#"{"code":13,"message":"runtime error"}"#));
+        assert!(is_pressure(502, "<html>Bad Gateway</html>"));
+        assert!(is_pressure(503, "upstream host not found"));
+        assert!(is_pressure(429, "slow down"));
+        // And a plain refusal still does not.
+        assert!(!is_pressure(404, r#"{"code":5,"message":"player (1-9) not found"}"#));
+        assert!(!is_pressure(400, "bad request"));
+    }
 
     #[test]
     fn a_tally_counts_routes_with_ids_folded() {

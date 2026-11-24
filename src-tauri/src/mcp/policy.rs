@@ -700,19 +700,13 @@ impl PolicyStore {
         let Some(path) = Self::config_path() else {
             return Self::default();
         };
-        match std::fs::read_to_string(&path) {
-            Ok(contents) => serde_json::from_str(&contents).unwrap_or_default(),
-            Err(_) => Self::default(),
-        }
+        crate::mcp::config_store::load_or_default(&path)
     }
 
     pub fn save(&self) -> Result<(), String> {
         let path = Self::config_path().ok_or("Could not determine config directory")?;
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-        }
         let json = serde_json::to_string_pretty(self).map_err(|e| e.to_string())?;
-        std::fs::write(&path, json).map_err(|e| e.to_string())
+        crate::mcp::config_store::write_state(&path, json.as_bytes())
     }
 }
 

@@ -175,11 +175,14 @@ pub async fn resolve(player_id: &str) -> Option<Ident> {
     let client = crate::mcp::cosmos_client::CosmosClient::new();
     let v = match client.entity("player", player_id).await {
         Ok(v) => v,
-        Err(_) => {
-            // A destroyed or invented id answers 500; remember so the next
-            // repaint does not ask again.
-            if let Ok(mut m) = MISSING.write() {
-                m.insert(player_id.to_string());
+        Err(e) => {
+            // An invented id answers 500 "object not found"; remember so the
+            // next repaint does not ask again. A read that merely FAILED says
+            // nothing about the player, and this set is never cleared.
+            if crate::mcp::cosmos_client::is_absent_object(&e) {
+                if let Ok(mut m) = MISSING.write() {
+                    m.insert(player_id.to_string());
+                }
             }
             return None;
         }

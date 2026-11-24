@@ -79,10 +79,26 @@ fn load() -> StoreFile {
             return f.clone_shallow();
         }
     }
-    let file = fs::read(path())
-        .ok()
-        .and_then(|b| serde_json::from_slice::<StoreFile>(&b).ok())
-        .unwrap_or_default();
+    use crate::mcp::config_store::{protect, read_state, set_aside, FileRead};
+    let p = path();
+    let file = match read_state::<StoreFile>(&p) {
+        FileRead::Read(f) => f,
+        FileRead::Missing => StoreFile::default(),
+        FileRead::Corrupt(e) => {
+            eprintln!("[Structs Matrix] session store does not parse ({e}); kept aside");
+            if set_aside(&p).is_none() {
+                protect(&p, "it could not be parsed or copied aside");
+            }
+            StoreFile::default()
+        }
+        // Nothing is written over sessions we merely failed to read; a
+        // sign-in this run lives in memory.
+        FileRead::Unreadable(e) => {
+            eprintln!("[Structs Matrix] session store could not be read: {e}");
+            protect(&p, "it could not be read at launch");
+            StoreFile::default()
+        }
+    };
     if let Ok(mut guard) = CACHE.write() {
         *guard = Some(file.clone_shallow());
     }
@@ -103,11 +119,16 @@ impl StoreFile {
 }
 
 fn save(file: &StoreFile) {
+    // Memory first: what is signed in is signed in whether or not it persists.
+    if let Ok(mut guard) = CACHE.write() {
+        *guard = Some(file.clone_shallow());
+    }
     let Ok(body) = serde_json::to_vec_pretty(file) else {
         return;
     };
     let p = path();
-    if fs::write(&p, body).is_err() {
+    if let Err(e) = crate::mcp::config_store::write_state(&p, &body) {
+        eprintln!("[Structs Matrix] session store not saved: {e}");
         return;
     }
     // Owner-only. Best effort: a filesystem without unix permissions (or a
@@ -117,9 +138,6 @@ fn save(file: &StoreFile) {
     {
         use std::os::unix::fs::PermissionsExt;
         let _ = fs::set_permissions(&p, fs::Permissions::from_mode(0o600));
-    }
-    if let Ok(mut guard) = CACHE.write() {
-        *guard = Some(file.clone_shallow());
     }
 }
 

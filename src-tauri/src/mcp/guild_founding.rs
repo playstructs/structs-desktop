@@ -607,18 +607,25 @@ pub fn file_for(player: &str, label: &str) -> String {
 }
 
 pub fn load(player: &str, label: &str) -> Option<FoundState> {
+    use crate::mcp::config_store::{protect, read_state, FileRead};
     let path = crate::mcp::config_store::config_path(&file_for(player, label))?;
-    let text = std::fs::read_to_string(path).ok()?;
-    serde_json::from_str(&text).ok()
+    match read_state(&path) {
+        FileRead::Read(st) => Some(st),
+        FileRead::Missing => None,
+        // A plan that exists and cannot be read may be half signed. Starting
+        // over would sign it again, so the file refuses to be replaced and
+        // every step, which saves first, stops here.
+        FileRead::Corrupt(e) | FileRead::Unreadable(e) => {
+            protect(&path, &format!("the saved founding plan could not be read ({e})"));
+            None
+        }
+    }
 }
 
 fn save(state: &FoundState) -> Result<(), String> {
     let path = crate::mcp::config_store::config_path(&file_for(&state.founder, &state.choices.label)).ok_or("no config directory")?;
-    if let Some(dir) = path.parent() {
-        let _ = std::fs::create_dir_all(dir);
-    }
     let text = serde_json::to_string_pretty(state).map_err(|e| e.to_string())?;
-    std::fs::write(path, text).map_err(|e| e.to_string())
+    crate::mcp::config_store::write_state(&path, text.as_bytes())
 }
 
 fn now_ms() -> u64 {
@@ -1284,8 +1291,16 @@ fn tx_of(v: &Value) -> String {
 }
 
 /// The guild `pid` owns, if any (a founder owns at most one).
-async fn owned_guild(client: &CosmosClient, pid: &str) -> Option<String> {
-    client.list_all_entities("guild", "Guild").await.ok().and_then(|gs| gs.iter().find(|g| s(g.get("owner")) == pid).map(|g| s(g.get("id"))))
+async fn owned_guild(client: &CosmosClient, pid: &str) -> Result<Option<String>, String> {
+    let gs = client.list_all_entities("guild", "Guild").await.map_err(|e| unread("your guild", e))?;
+    Ok(gs.iter().find(|g| s(g.get("owner")) == pid).map(|g| s(g.get("id"))))
+}
+
+/// A check that decides whether to sign could not be made. The step stops
+/// rather than guess: every one of these once read "could not look" as "not
+/// done yet" and signed a second time.
+fn unread(what: &str, e: impl std::fmt::Display) -> String {
+    format!("could not check {what}, so nothing was signed; resume in a minute ({e})")
 }
 
 async fn run_steps(app: &tauri::AppHandle, st: &mut FoundState) -> Result<(), String> {
@@ -1333,7 +1348,7 @@ async fn run_one(app: &tauri::AppHandle, client: &CosmosClient, address: &str, s
             // The founder owns the guild; this gives the primary every guild
             // permission so the guild cards work from the primary as before.
             let guild = st.guild_id.clone();
-            let held = grant_on(client, &guild, &primary).await;
+            let held = grant_on(client, &guild, &primary).await?;
             if held & crate::mcp::delegation::PERM_ALL == crate::mcp::delegation::PERM_ALL {
                 return Ok(String::new());
             }
@@ -1349,7 +1364,7 @@ async fn run_one(app: &tauri::AppHandle, client: &CosmosClient, address: &str, s
         }
         "infuse" => {
             // Capacity may already be there (a resumed plan, or staked since).
-            let (draw, old) = draw_of(client, &pid).await;
+            let (draw, old) = crate::mcp::guild_membership::try_draw_of(client, &pid).await.map_err(|e| unread("the founder's capacity", e))?;
             if infuse_needed(&draw, old, st.allocation_mw, 0.04) == 0 {
                 return Ok(String::new());
             }
@@ -1368,7 +1383,7 @@ async fn run_one(app: &tauri::AppHandle, client: &CosmosClient, address: &str, s
         }
         "allocation" => {
             if resumed {
-                if let Some(a) = crate::mcp::energy_card::newest_unconnected(client, &pid).await {
+                if let Some(a) = crate::mcp::energy_card::newest_unconnected(client, &pid).await.map_err(|e| unread("for an allocation already made", e))? {
                     st.allocation_id = a;
                     return Ok(String::new());
                 }
@@ -1388,7 +1403,7 @@ async fn run_one(app: &tauri::AppHandle, client: &CosmosClient, address: &str, s
             }
             let probe = || {
                 let pid = pid.clone();
-                async move { crate::mcp::energy_card::newest_unconnected(client, &pid).await.map(Value::String) }
+                async move { crate::mcp::energy_card::newest_unconnected(client, &pid).await.ok().flatten().map(Value::String) }
             };
             st.allocation_id = crate::mcp::energy_card::wait_for(probe)
                 .await
@@ -1404,10 +1419,10 @@ async fn run_one(app: &tauri::AppHandle, client: &CosmosClient, address: &str, s
         "fund" => {
             let guild = st.guild_id.clone();
             // Already staked: the Alpha went where it was meant to.
-            if grid(client, "2", &guild).await > 0.0 {
+            if try_grid(client, "2", &guild).await.map_err(|e| unread("the guild's stake", e))? > 0.0 {
                 return Ok(String::new());
             }
-            let held = guild_vault(client, &guild).await;
+            let held = try_vault(client, &guild).await.map_err(|e| unread("the guild vault", e))?;
             // The baseline is saved BEFORE signing, so a resumed run counts
             // what already arrived and sends only the rest.
             let base = match st.fund_base_ualpha {
@@ -1427,7 +1442,7 @@ async fn run_one(app: &tauri::AppHandle, client: &CosmosClient, address: &str, s
             let want = base + st.infuse_ualpha;
             let probe = || {
                 let guild = guild.clone();
-                async move { (guild_vault(client, &guild).await >= want).then(|| json!(true)) }
+                async move { try_vault(client, &guild).await.is_ok_and(|v| v >= want).then(|| json!(true)) }
             };
             crate::mcp::energy_card::wait_for(probe).await.ok_or("the Alpha was sent but has not arrived yet; resume in a minute")?;
             Ok(tx_of(&r))
@@ -1438,12 +1453,12 @@ async fn run_one(app: &tauri::AppHandle, client: &CosmosClient, address: &str, s
                 let guild = guild.clone();
                 async move { (grid(client, "2", &guild).await > 0.0).then(|| json!(true)) }
             };
-            if staked().await.is_some() {
+            if try_grid(client, "2", &guild).await.map_err(|e| unread("the guild's stake", e))? > 0.0 {
                 return Ok(String::new());
             }
             // Short of the stake: either it was infused and the capacity is
             // a block behind, or the fund step never landed.
-            let held = guild_vault(client, &guild).await;
+            let held = try_vault(client, &guild).await.map_err(|e| unread("the guild vault", e))?;
             if held < st.infuse_ualpha {
                 if crate::mcp::energy_card::wait_for(staked).await.is_some() {
                     return Ok(String::new());
@@ -1480,13 +1495,11 @@ async fn run_one(app: &tauri::AppHandle, client: &CosmosClient, address: &str, s
                 async move {
                     crate::mcp::energy_card::newest(client, "allocation", "Allocation", |a| s(a.get("sourceObjectId")) == guild && s(a.get("destinationId")).is_empty())
                         .await
-                        .as_ref()
-                        .and_then(crate::mcp::energy_card::id_of)
-                        .map(Value::String)
+                        .map(|a| a.as_ref().and_then(crate::mcp::energy_card::id_of).map(Value::String))
                 }
             };
             if resumed {
-                if let Some(a) = find().await.and_then(|v| v.as_str().map(String::from)) {
+                if let Some(a) = find().await.map_err(|e| unread("for an allocation already made", e))?.and_then(|v| v.as_str().map(String::from)) {
                     st.allocation_id = a;
                     return Ok(String::new());
                 }
@@ -1500,7 +1513,9 @@ async fn run_one(app: &tauri::AppHandle, client: &CosmosClient, address: &str, s
                 // load or its capacity is not all usable; route the spare as
                 // a dynamic allocation instead.
                 Err(e) if e.contains("automated_conflict") || e.contains("unsupported_supply") => {
-                    let spare = (grid(client, "2", &guild).await - grid(client, "3", &guild).await).floor();
+                    let capacity = try_grid(client, "2", &guild).await.map_err(|e| unread("the guild's capacity", e))?;
+                    let load = try_grid(client, "3", &guild).await.map_err(|e| unread("the guild's load", e))?;
+                    let spare = (capacity - load).floor();
                     if spare <= 0.0 {
                         return Err(format!("the guild has no spare capacity to route ({e})"));
                     }
@@ -1509,7 +1524,7 @@ async fn run_one(app: &tauri::AppHandle, client: &CosmosClient, address: &str, s
                 }
                 Err(e) => return Err(e),
             };
-            st.allocation_id = crate::mcp::energy_card::wait_for(find)
+            st.allocation_id = crate::mcp::energy_card::wait_for(|| async { find().await.ok().flatten() })
                 .await
                 .and_then(|v| v.as_str().map(String::from))
                 .ok_or("the allocation was signed but has not appeared yet; resume in a minute")?;
@@ -1525,7 +1540,7 @@ async fn run_one(app: &tauri::AppHandle, client: &CosmosClient, address: &str, s
         "connect" => {
             // Connected anywhere already (here, or a substation of their own
             // they chose since): leave them where they are.
-            let (d, _) = draw_of(client, &pid).await;
+            let (d, _) = crate::mcp::guild_membership::try_draw_of(client, &pid).await.map_err(|e| unread("the founder's connection", e))?;
             if !d.substation.is_empty() {
                 return Ok(String::new());
             }
@@ -1548,7 +1563,7 @@ async fn run_one(app: &tauri::AppHandle, client: &CosmosClient, address: &str, s
         }
         "found" => {
             // Never found twice: a guild this founder owns IS the founding.
-            if let Some(g) = owned_guild(client, &pid).await {
+            if let Some(g) = owned_guild(client, &pid).await? {
                 st.guild_id = g;
                 return Ok(String::new());
             }
@@ -1563,7 +1578,7 @@ async fn run_one(app: &tauri::AppHandle, client: &CosmosClient, address: &str, s
             .await?;
             let probe = || {
                 let pid = pid.clone();
-                async move { owned_guild(client, &pid).await.map(Value::String) }
+                async move { owned_guild(client, &pid).await.ok().flatten().map(Value::String) }
             };
             st.guild_id = crate::mcp::energy_card::wait_for(probe)
                 .await
@@ -1603,7 +1618,14 @@ async fn run_one(app: &tauri::AppHandle, client: &CosmosClient, address: &str, s
 /// A grid record (`/structs/grid/<type>-<object id>`: 2 capacity, 3 load).
 /// Guild queries carry no grid attributes, so a guild's power is read here.
 pub async fn grid(client: &CosmosClient, kind: &str, object: &str) -> f64 {
-    client.lcd_get(&format!("/structs/grid/{kind}-{object}")).await.ok().map(|v| num(v.pointer("/gridRecord/value"))).unwrap_or(0.0)
+    try_grid(client, kind, object).await.unwrap_or(0.0)
+}
+
+/// [`grid`] for a caller about to sign on it. A record that was never written
+/// answers 0, so an error is only ever a failure to read.
+async fn try_grid(client: &CosmosClient, kind: &str, object: &str) -> Result<f64, String> {
+    let v = client.lcd_get(&format!("/structs/grid/{kind}-{object}")).await?;
+    Ok(num(v.pointer("/gridRecord/value")))
 }
 
 /// Liquid ualpha in `owner`'s vault (a player or a guild).
@@ -1612,7 +1634,12 @@ pub async fn vault_of(client: &CosmosClient, owner: &str) -> u64 {
 }
 
 async fn guild_vault(client: &CosmosClient, guild: &str) -> u64 {
-    crate::mcp::guild_economy::vault_balance(client, guild, "ualpha").await.unwrap_or(0).min(u64::MAX as u128) as u64
+    try_vault(client, guild).await.unwrap_or(0)
+}
+
+/// [`guild_vault`] for a caller about to send on it.
+async fn try_vault(client: &CosmosClient, owner: &str) -> Result<u64, String> {
+    Ok(crate::mcp::guild_economy::vault_balance(client, owner, "ualpha").await.map_err(|e| e.to_string())?.min(u64::MAX as u128) as u64)
 }
 
 /// Sign one founding message as HD `idx` (0 = the primary). Recorded on the
@@ -1636,13 +1663,12 @@ async fn guild_act(app: &tauri::AppHandle, st: &FoundState, action: &str, args: 
 }
 
 /// Bits `player` holds directly on `object` (a missing record reads 0).
-async fn grant_on(client: &CosmosClient, object: &str, player: &str) -> u64 {
-    client
+async fn grant_on(client: &CosmosClient, object: &str, player: &str) -> Result<u64, String> {
+    let p = client
         .lcd_get(&format!("/structs/permission/{object}%40{player}"))
         .await
-        .ok()
-        .map(|p| num(p.pointer("/permissionRecord/value")) as u64)
-        .unwrap_or(0)
+        .map_err(|e| unread("the grant", e))?;
+    Ok(num(p.pointer("/permissionRecord/value")) as u64)
 }
 
 /// The founder replicant's own steps: made, funded from the primary's vault,
@@ -1682,10 +1708,10 @@ async fn run_founder_step(app: &tauri::AppHandle, client: &CosmosClient, st: &mu
         "founder_fund" => {
             let to = st.founder_player.clone();
             // Spent already: the founder founded with it.
-            if owned_guild(client, &to).await.is_some() {
+            if owned_guild(client, &to).await?.is_some() {
                 return Ok(String::new());
             }
-            let held = guild_vault(client, &to).await;
+            let held = try_vault(client, &to).await.map_err(|e| unread("the founder's vault", e))?;
             let base = match st.founder_fund_base {
                 Some(b) => b,
                 None => {
@@ -1703,7 +1729,7 @@ async fn run_founder_step(app: &tauri::AppHandle, client: &CosmosClient, st: &mu
             let want = base + st.founder_fund_ualpha;
             let probe = || {
                 let to = to.clone();
-                async move { (guild_vault(client, &to).await >= want).then(|| json!(true)) }
+                async move { try_vault(client, &to).await.is_ok_and(|v| v >= want).then(|| json!(true)) }
             };
             crate::mcp::energy_card::wait_for(probe).await.ok_or("the Alpha was sent but has not arrived yet; resume in a minute")?;
             Ok(tx_of(&r))
@@ -1712,7 +1738,7 @@ async fn run_founder_step(app: &tauri::AppHandle, client: &CosmosClient, st: &mu
             use crate::mcp::guild_admin::bits::SUBSTATION_CONNECTION;
             let sub = st.substation_id.clone();
             let to = st.founder_player.clone();
-            if grant_on(client, &sub, &to).await & SUBSTATION_CONNECTION != 0 {
+            if grant_on(client, &sub, &to).await? & SUBSTATION_CONNECTION != 0 {
                 return Ok(String::new());
             }
             let r = sign(
@@ -1740,18 +1766,20 @@ fn label_founder(st: &FoundState) -> Result<(), String> {
 /// Build a substation owned by `owner` from `st.allocation_id`, or adopt the
 /// one a resumed run already built from it.
 async fn build_substation(app: &tauri::AppHandle, client: &CosmosClient, st: &mut FoundState, idx: u32, owner: &str) -> Result<String, String> {
-    let dest = client
-        .query_entity("allocation", &st.allocation_id)
-        .await
-        .ok()
-        .map(|a| s(a.pointer("/Allocation/destinationId")))
-        .unwrap_or_default();
+    let dest = match client.query_entity("allocation", &st.allocation_id).await {
+        Ok(a) => s(a.pointer("/Allocation/destinationId")),
+        Err(e) => return Err(unread("the allocation", e)),
+    };
     if !dest.is_empty() {
         st.substation_id = dest;
         return Ok(String::new());
     }
     let mine = |v: &Value| s(v.get("owner")) == owner;
-    let before = crate::mcp::energy_card::newest(client, "substation", "Substation", mine).await.as_ref().and_then(crate::mcp::energy_card::id_of);
+    let before = crate::mcp::energy_card::newest(client, "substation", "Substation", mine)
+        .await
+        .map_err(|e| unread("your substations", e))?
+        .as_ref()
+        .and_then(crate::mcp::energy_card::id_of);
     let r = sign(
         app,
         idx,
@@ -1765,6 +1793,8 @@ async fn build_substation(app: &tauri::AppHandle, client: &CosmosClient, st: &mu
         async move {
             crate::mcp::energy_card::newest(client, "substation", "Substation", |v| s(v.get("owner")) == owner)
                 .await
+                .ok()
+                .flatten()
                 .filter(|v| crate::mcp::energy_card::id_of(v) != before)
         }
     };

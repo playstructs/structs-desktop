@@ -147,10 +147,42 @@ pub struct CombatLists {
     /// deliberately removes it doesn't get it re-added on every launch.
     #[serde(default)]
     pub own_guild_seeded: bool,
+    /// Which counting rules the harm tallies were accumulated under. See
+    /// [`TALLY_REV`].
+    #[serde(default)]
+    pub tally_rev: u32,
 }
 
-static LISTS: LazyLock<RwLock<CombatLists>> =
-    LazyLock::new(|| RwLock::new(crate::mcp::config_store::load_config::<CombatLists>(FILENAME)));
+/// Bumped when the harm tallies on file cannot be trusted. Rev 1: before it,
+/// `auto_response` recorded the same attack again on EVERY scan — one volley
+/// from seven weeks earlier had become 5,000 attacks and 4,200 lost structs,
+/// saturating that player's heat and renewing the grudge forever.
+const TALLY_REV: u32 = 1;
+
+/// Reset tallies written under older counting rules. Who we hold something
+/// against survives, as do the operator's weights, notes and mutes; only the
+/// numbers nobody can vouch for go. A recorded attacker keeps the one attack
+/// that put them on the list.
+fn repair_tallies(l: &mut CombatLists) -> bool {
+    if l.tally_rev >= TALLY_REV {
+        return false;
+    }
+    for g in &mut l.grudges {
+        g.attacks = g.attacks.min(1);
+        g.damage_taken = 0;
+        g.structs_lost = 0;
+    }
+    l.tally_rev = TALLY_REV;
+    true
+}
+
+static LISTS: LazyLock<RwLock<CombatLists>> = LazyLock::new(|| {
+    let mut lists = crate::mcp::config_store::load_config::<CombatLists>(FILENAME);
+    // Not persisted here: the next mutation writes it, and a file that failed
+    // to parse (loaded as defaults) must not be overwritten by merely reading.
+    repair_tallies(&mut lists);
+    RwLock::new(lists)
+});
 
 pub fn get() -> CombatLists {
     LISTS.read().map(|l| l.clone()).unwrap_or_default()
@@ -562,6 +594,30 @@ mod tests {
         // Saturation: an attacker 25x worse than "heavy" must not score 25x.
         assert!((absurd.heat() - heavy.heat()).abs() < 1e-9);
         assert!(heavy.heat() <= 1.01);
+    }
+
+    /// Tallies inflated by per-scan recording are dropped once; the grudge and
+    /// what the operator set on it stay.
+    #[test]
+    fn untrusted_tallies_are_reset_once() {
+        let mut l = CombatLists::default();
+        let mut inflated = g(GrudgeSource::Auto, 5028, 4261, 0.0);
+        inflated.damage_taken = 9738;
+        inflated.weight = 2.0;
+        inflated.note = Some("killed 5-1958".into());
+        l.grudges.push(inflated);
+        l.grudges.push(g(GrudgeSource::Manual, 0, 0, 0.0));
+
+        assert!(repair_tallies(&mut l));
+        let a = &l.grudges[0];
+        assert_eq!((a.attacks, a.damage_taken, a.structs_lost), (1, 0, 0));
+        assert_eq!((a.weight, a.note.as_deref()), (2.0, Some("killed 5-1958")));
+        assert_eq!(l.grudges[1].attacks, 0, "a hand-added grudge gains no attack");
+
+        // Counted under the current rules: never touched again.
+        l.grudges[0].attacks = 7;
+        assert!(!repair_tallies(&mut l));
+        assert_eq!(l.grudges[0].attacks, 7);
     }
 
     #[test]

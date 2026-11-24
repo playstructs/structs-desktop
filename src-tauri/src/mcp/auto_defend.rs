@@ -577,6 +577,14 @@ pub fn plan_web_reconcile(
 /// avoid re-querying every struct every scan). Entries are EVICTED when either
 /// side dies or when we clear the edge — the old version never removed
 /// anything, so a defender whose target died was frozen out of the web forever.
+/// `{defender}>{protected}` edges the chain refuses to wire.
+static EDGE_BACKOFF: LazyLock<crate::mcp::loop_util::Backoff> =
+    LazyLock::new(|| crate::mcp::loop_util::Backoff::new(15.0 * 60_000.0, 4.0 * 3_600_000.0));
+
+fn edge_key(e: &Edge) -> String {
+    format!("{}>{}", e.defender, e.protected)
+}
+
 static ASSIGNED_CACHE: LazyLock<Mutex<HashMap<String, String>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
 
 // ── Survives a restart ──────────────────────────────────────────────────────
@@ -869,7 +877,12 @@ async fn scan(
                 // scan); otherwise SET it.
                 let missing = desired
                     .iter()
-                    .find(|e| current.get(&e.defender).map(|t| t != &e.protected).unwrap_or(true));
+                    // One the chain keeps refusing steps aside for the next,
+                    // or the rest of the web is never wired.
+                    .find(|e| {
+                        current.get(&e.defender).map(|t| t != &e.protected).unwrap_or(true)
+                            && EDGE_BACKOFF.ready(&edge_key(e))
+                    });
                 let Some(edge) = missing else { return }; // web complete
 
                 // One charged action per player per BLOCK, and auto_build /
@@ -908,6 +921,7 @@ async fn scan(
                             crate::mcp::telemetry::Sev::Notice,
                             format!("perception drift: {} → {} no longer both built on chain — skipped", edge.defender, edge.protected),
                         );
+                        EDGE_BACKOFF.fail(&edge_key(edge));
                         return;
                     }
                     let Ok(live_target) = crate::mcp::verify::defender_target_live(&client, &defender_t).await else {
@@ -959,6 +973,7 @@ async fn scan(
                             cache.insert(edge.defender.clone(), edge.protected.clone());
                         }
                         drop(cache);
+                        EDGE_BACKOFF.clear(&edge_key(edge));
                         run.actions.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         crate::mcp::telemetry::tlog(
                             "auto_defend",
@@ -982,7 +997,10 @@ async fn scan(
                         //  · "cannot defend": the defender is a type the chain
                         //    no longer accepts — un-cache it so the planner
                         //    stops re-proposing a doomed edge on stale state.
-                        let benign = e.contains("not_defending") || e.starts_with("skipped:") || e.contains("already discharged");
+                        if !crate::mcp::tx_retry::worth_retrying_soon(&e) && !e.contains("not_defending") {
+                            EDGE_BACKOFF.fail(&edge_key(edge));
+                        }
+                        let benign = e.contains("not_defending") || crate::mcp::tx_retry::was_skipped(&e) || e.contains("already discharged");
                         if benign || e.contains("cannot defend") {
                             ASSIGNED_CACHE.lock().unwrap().remove(&edge.defender);
                         }

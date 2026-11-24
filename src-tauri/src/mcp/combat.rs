@@ -71,11 +71,47 @@ pub struct WeaponStats {
     pub charge: u64,
 }
 
+/// The `local` bit in a weapon's ambit mask: "wherever this struct stands".
+pub const LOCAL_AMBIT: u64 = 32;
+
+/// What one shot at a target draws back, by when it lands.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct ShotCost {
+    /// Every shot: the target's registered defenders counter BEFORE the volley
+    /// lands, and the planet's cannons answer after it.
+    pub every: u64,
+    /// Every shot but the killing one: the target counters last, and a
+    /// destroyed target cannot.
+    pub unless_killed: u64,
+}
+
+/// Can a ship with `hp` shoot a target until it is dead, and live?
+/// `per_shot` is the damage each of its shots does, `incoming` what the enemy
+/// lands on it each round besides.
+pub fn survives_exchange(hp: f64, cost: ShotCost, incoming: f64, target_hp: f64, per_shot: f64) -> bool {
+    if per_shot <= 0.0 || target_hp <= 0.0 {
+        return false;
+    }
+    let shots = (target_hp / per_shot).ceil();
+    hp > cost.every as f64 * shots + cost.unless_killed as f64 * (shots - 1.0) + incoming * shots
+}
+
 impl WeaponStats {
     /// Build the primary (or secondary) weapon's stats from a synced struct
     /// type. Single source of truth — `simulate`, `plan_strike` and both combat
     /// loops all read weapons through here so a new chain field only has to be
     /// wired once.
+    /// This weapon fired from `ambit_bit`. A LOCAL weapon — the Command Ship's —
+    /// reaches whatever ambit its struct is standing in (`CanTargetAmbit` adds
+    /// the shooter's own ambit to the mask). Read without this, mask 32 matches
+    /// no ambit at all, and no Command Ship could ever be planned to fire.
+    pub fn standing_in(mut self, ambit_bit: u64) -> Self {
+        if self.ambits & LOCAL_AMBIT != 0 {
+            self.ambits |= ambit_bit;
+        }
+        self
+    }
+
     pub fn from_type(t: &crate::game_state::StructTypeInfo, secondary: bool) -> Self {
         if secondary {
             Self {
@@ -200,7 +236,7 @@ pub struct SimResult {
 }
 
 /// Apply armour: total reduced by `reduction`, floored at 1 if any shot landed.
-fn after_reduction(hits: f64, damage: u64, reduction: u64) -> f64 {
+pub(crate) fn after_reduction(hits: f64, damage: u64, reduction: u64) -> f64 {
     if hits <= 0.0 {
         return 0.0;
     }
@@ -464,6 +500,41 @@ mod tests {
     }
     fn no_def() -> DefenseProfile {
         DefenseProfile::default()
+    }
+
+    /// The Command Ship's mask is 32 and nothing else. It shoots what shares
+    /// its ambit, and only that.
+    #[test]
+    fn a_local_weapon_reaches_where_its_struct_stands() {
+        let mut w = w(1, 1, 1, 1, 2);
+        w.ambits = LOCAL_AMBIT;
+        let d = DefenseProfile::basic(0, 1, 1);
+        assert!(!simulate(&w, 4, 3.0, &d, true).reachable, "the bare mask matches nothing");
+        let on_land = w.clone().standing_in(4);
+        assert!(simulate(&on_land, 4, 3.0, &d, true).reachable);
+        assert!(!simulate(&on_land, 16, 3.0, &d, false).reachable, "it has to go there");
+        // A weapon that is not local gains nothing from where it stands.
+        w.ambits = 16;
+        assert!(!simulate(&w.standing_in(4), 4, 3.0, &d, true).reachable);
+    }
+
+    #[test]
+    fn an_exchange_is_judged_to_the_end() {
+        // 6 HP against a 3 HP blocker countering 1: two shots, two damage.
+        let cost = |every, unless_killed| ShotCost { every, unless_killed };
+        assert!(survives_exchange(6.0, cost(0, 1), 0.0, 3.0, 2.0));
+        // Armour takes one: three shots at 1, defended for 2 a shot: 6 + 2.
+        assert!(!survives_exchange(6.0, cost(2, 1), 0.0, 3.0, 1.0));
+        // Command Ship against a lone Command Ship: three shots, countered
+        // twice, 2 HP to spare — and still won after a blocker cost it one.
+        assert!(survives_exchange(6.0, cost(0, 2), 0.0, 6.0, 2.0));
+        assert!(survives_exchange(5.0, cost(0, 2), 0.0, 6.0, 2.0));
+        assert!(!survives_exchange(4.0, cost(0, 2), 0.0, 6.0, 2.0));
+        // With one defender still countering: 3 + 4.
+        assert!(!survives_exchange(6.0, cost(1, 2), 0.0, 6.0, 2.0));
+        // The killing shot is not countered by what it kills.
+        assert!(survives_exchange(1.0, cost(0, 2), 0.0, 2.0, 2.0));
+        assert!(!survives_exchange(6.0, cost(0, 0), 0.0, 3.0, 0.0), "a shot that does nothing is not one");
     }
 
     #[test]

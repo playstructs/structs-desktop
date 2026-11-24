@@ -620,6 +620,20 @@ impl Snapshot {
         out
     }
 
+    /// Live structs registered to defend `struct_index`.
+    pub fn defenders_of(&self, struct_index: u64) -> Vec<String> {
+        self.struct_attrs
+            .iter()
+            .filter(|(sid, a)| {
+                struct_index != 0
+                    && a[S_PROTECTED] == struct_index
+                    && a[S_STATUS] & status::DESTROYED == 0
+                    && self.structs.contains_key(sid.as_str())
+            })
+            .map(|(sid, _)| sid.clone())
+            .collect()
+    }
+
     /// Snapshot age in ms.
     pub fn age_ms(&self) -> f64 {
         crate::hasher::types::now_millis() - self.taken_ms
@@ -1521,7 +1535,7 @@ pub async fn resolve_pending(client: &CosmosClient, max: usize) -> usize {
             // Not found = pruned before we looked (or not yet indexed); drop
             // it so it does not queue forever. A real transient read error
             // leaves it for the next call.
-            Err(e) if e.contains("not found") => {
+            Err(e) if is_not_found(&e) => {
                 if let Ok(mut g) = CURRENT.write() {
                     if let Some(s) = g.as_mut() {
                         s.pending_new.remove(&sid);
@@ -2017,6 +2031,12 @@ pub fn defender_counts() -> Option<HashMap<u64, usize>> {
     with_snapshot(|s| s.defender_counts())
 }
 
+/// [`Snapshot::defenders_of`] a struct id; `None` before a snapshot.
+pub fn defenders_of(struct_id: &str) -> Option<Vec<String>> {
+    let index = struct_id.rsplit_once('-')?.1.parse().ok()?;
+    with_snapshot(|s| s.defenders_of(index))
+}
+
 /// A completion we signed landed: the chain restarted that planet's clock at
 /// the inclusion block. Record it NOW rather than waiting for the next sweep
 /// — with the clock frames not reaching us from production, the two-minute
@@ -2251,7 +2271,9 @@ fn remembers_misses(kind: &str) -> bool {
 }
 
 pub(crate) fn is_not_found(err: &str) -> bool {
-    err.to_ascii_lowercase().contains("not found")
+    // The chain's own answer, or this cache repeating it. Anything else that
+    // says "not found" is a gateway failing to answer.
+    crate::mcp::cosmos_client::is_absent_object(err) || err.contains("not found (asked ")
 }
 
 fn miss_key(kind: &str, id: &str) -> String {
@@ -2297,7 +2319,8 @@ mod miss_tests {
     #[test]
     fn only_a_definite_not_found_is_a_miss() {
         assert!(is_not_found("API returned 500 Internal Server Error: {\"message\":\"object not found\"}"));
-        assert!(is_not_found("API returned 404 Not Found: "));
+        assert!(is_not_found("struct 5-9 not found (asked 60s ago or less)"));
+        assert!(!is_not_found("API returned 404 Not Found: 404 page not found"), "a gateway, not the chain");
         assert!(!is_not_found("HTTP error: operation timed out"));
         assert!(!is_not_found("API returned 429 Too Many Requests: slow down"));
     }

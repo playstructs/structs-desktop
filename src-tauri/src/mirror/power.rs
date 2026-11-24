@@ -57,7 +57,7 @@ pub fn parse_usable(v: &Value, height: u64) -> Option<Usable> {
 /// The chain answers a missing object with gRPC code 2 /
 /// "codespace structs code 1050: object not found" (HTTP 500).
 pub fn is_not_found(err: &str) -> bool {
-    err.contains("object not found") || err.contains("code 1050")
+    crate::mcp::cosmos_client::is_absent_object(err)
 }
 
 /// Read usable primary capacity for `owners` and existence for

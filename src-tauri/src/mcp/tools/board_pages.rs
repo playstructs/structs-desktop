@@ -184,6 +184,26 @@ pub async fn mcp_player_profile(player: String) -> Result<Value, String> {
         None => None,
     };
 
+    // Only the ones that still exist (see `keep_live`).
+    let allocations = match allocations {
+        Ok(p) => {
+            let rows = p.items;
+            match client.list_all_entities("allocation", "Allocation").await {
+                Ok(live) => {
+                    let ids = rows.iter().filter_map(|r| r.get("id").and_then(|v| v.as_str()).map(String::from)).collect();
+                    let keep = keep_live(ids, &live);
+                    Some(
+                        rows.into_iter()
+                            .filter(|r| r.get("id").and_then(|v| v.as_str()).is_some_and(|id| keep.iter().any(|k| k == id)))
+                            .collect::<Vec<_>>(),
+                    )
+                }
+                Err(_) => Some(rows),
+            }
+        }
+        Err(_) => None,
+    };
+
     Ok(json!({
         "player_id": pid,
         "entity": entity,
@@ -193,7 +213,7 @@ pub async fn mcp_player_profile(player: String) -> Result<Value, String> {
         "raids_launched": raids.ok(),
         "activity": activity.ok().map(|(rows, _)| crate::mcp::terminal::fold_activity_month(&rows)),
         "infusions": infusions.ok().map(|p| p.items),
-        "allocations": allocations.ok().map(|p| p.items),
+        "allocations": allocations,
     }))
 }
 
@@ -1122,26 +1142,32 @@ pub async fn mcp_transfer_execute_impl(
 
     let result = match index {
         // A vplayer signs through the same bridge every loop uses.
-        Some(i) => crate::mcp::tx_retry::sign_with_retry(&app, i, type_url, payload, "board:transfer")
-            .await
-            .map(|_| ()),
+        Some(i) => crate::mcp::tx_retry::sign_with_retry(&app, i, type_url, payload, "board:transfer").await,
         // The primary signs with the device key (HD index 0 — a registered key
         // of the primary). One attempt: the pinned webapp's queue cannot encode
         // MsgVaultSend, and a payment is never blindly re-sent.
-        None => crate::mcp::tx_retry::sign_once(&app, 0, type_url, payload, "board:transfer")
+        // A refusal the CHAIN gave is prefixed so a caller that must know can
+        // tell it from an outcome nobody heard.
+        None => crate::mcp::tx_retry::sign_once_coded(&app, 0, type_url, payload, "board:transfer")
             .await
-            .map(|_| ()),
+            .map_err(|(e, code)| if code.is_some() { format!("refused: {e}") } else { e }),
     };
 
     match result {
-        Ok(()) => {
+        Ok(sent) => {
+            let tx = sent
+                .get("transactionHash")
+                .or_else(|| sent.get("txhash"))
+                .and_then(|h| h.as_str())
+                .unwrap_or_default()
+                .to_string();
             board_feed::push(
                 &app,
                 board_feed::Severity::Notice,
                 "transfer",
                 format!("Sent {amount_str} {denom} from {name} to {to}"),
             );
-            Ok(json!({ "ok": true, "sent": amount_str, "denom": denom, "to": to }))
+            Ok(json!({ "ok": true, "sent": amount_str, "denom": denom, "to": to, "tx": tx }))
         }
         Err(e) => {
             board_feed::push(
@@ -1198,6 +1224,14 @@ async fn allocation_row(client: &crate::mcp::cosmos_client::CosmosClient, id: &s
     }))
 }
 
+/// Keep only the ids present in the chain's own rows, in their given order.
+/// Whole-id comparison: `6-5` must not survive on the strength of `6-53`.
+fn keep_live(ids: Vec<String>, chain_rows: &[Value]) -> Vec<String> {
+    let live: std::collections::HashSet<&str> =
+        chain_rows.iter().filter_map(|a| a.get("id").and_then(|v| v.as_str())).collect();
+    ids.into_iter().filter(|id| live.contains(id.as_str())).collect()
+}
+
 /// The primary's allocations, plus the power budget any change is measured
 /// against and the substations a connection could point at.
 #[tauri::command]
@@ -1223,6 +1257,15 @@ pub async fn mcp_allocations() -> Result<Value, String> {
             if let Some(id) = a.get("id").and_then(|v| v.as_str()) {
                 ids.push(id.to_string());
             }
+        }
+    }
+    // The Guild API keeps rows for allocations the chain has DESTROYED (a
+    // brownout, an unpowered source). Left in, each is one doomed read per
+    // refresh, forever. The chain's own list says which still exist; if it
+    // cannot be read, keep the ids and let the per-id reads decide.
+    if !ids.is_empty() {
+        if let Ok(live) = client.list_all_entities("allocation", "Allocation").await {
+            ids = keep_live(ids, &live);
         }
     }
     if ids.is_empty() {
@@ -2735,7 +2778,16 @@ mod ledger_amount_tests {
 
 #[cfg(test)]
 mod allocation_tests {
-    use super::power_change_refusal;
+    use super::{keep_live, power_change_refusal};
+    use serde_json::json;
+
+    /// The Guild API's list keeps destroyed allocations; the chain's does not.
+    #[test]
+    fn destroyed_allocations_are_dropped_by_whole_id() {
+        let ids = ["6-79", "6-62", "6-53", "6-5"].map(String::from).to_vec();
+        let chain = vec![json!({ "id": "6-53" }), json!({ "id": "6-79" }), json!({ "id": "6-80" })];
+        assert_eq!(keep_live(ids, &chain), vec!["6-79", "6-53"], "order kept, 6-5 is not 6-53");
+    }
 
     const KW: f64 = 1_000_000.0;
 

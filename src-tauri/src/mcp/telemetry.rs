@@ -517,6 +517,9 @@ pub fn tlog(component: &'static str, sev: Sev, msg: impl AsRef<str>) {
     // scans are never mistaken for wedged ones.
     if let Some(name) = crate::mcp::watchdog::loop_name_of(component) {
         crate::mcp::watchdog::note_loop_progress(name);
+        if matches!(sev, Sev::Warn | Sev::Error) {
+            crate::mcp::watchdog::note_loop_warning(name, msg);
+        }
     }
     eprintln!("{} {}", prefix(component), msg);
     send(Msg::Event(EventRow {
@@ -613,7 +616,12 @@ impl LoopRun {
 
     pub fn finish(&self, notes: Option<String>) {
         let finished_ms = self.record_finish(notes);
-        crate::mcp::watchdog::note_loop_finished(self.loop_name, finished_ms);
+        crate::mcp::watchdog::note_loop_finished(
+            self.loop_name,
+            finished_ms,
+            self.actions.load(Ordering::Relaxed),
+            self.errors.load(Ordering::Relaxed),
+        );
     }
 
     /// Finish for a scan that was INVALIDATED mid-flight (a watchdog reset

@@ -196,8 +196,14 @@ pub async fn tick(app_handle: &tauri::AppHandle, force: bool) {
             );
         }
         Err(e) => {
-            // "nothing to infuse" is normal/quiet; only note real failures.
-            if !e.starts_with("nothing to infuse") {
+            // Nothing to do, or not ready yet, is normal and quiet; only note
+            // real failures.
+            let idle = e.starts_with("nothing to infuse")
+                || e.starts_with("no reactor would raise power")
+                || e.ends_with("not synced yet");
+            if idle {
+                run.blocked(e);
+            } else {
                 run.errors.fetch_add(1, Ordering::Relaxed);
                 crate::mcp::telemetry::tlog("auto_infuse", crate::mcp::telemetry::Sev::Warn, &e);
             }

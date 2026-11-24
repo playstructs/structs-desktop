@@ -334,7 +334,7 @@ async fn slow(client: &CosmosClient, pid: &str, guild_id: &str, my_sub_id: &str,
                 d["supportable_more"] = json!(more);
             }
         }
-        if let Some((aid, mw)) = crate::mcp::guild_power::find_dynamic_allocation(client, pid, &id).await {
+        if let Ok(Some((aid, mw))) = crate::mcp::guild_power::find_dynamic_allocation(client, pid, &id).await {
             d["sharing"] = json!({ "allocation_id": aid, "power_mw": mw });
         }
     }
@@ -357,7 +357,7 @@ async fn slow(client: &CosmosClient, pid: &str, guild_id: &str, my_sub_id: &str,
             let offered = if sub.is_empty() {
                 0.0
             } else {
-                crate::mcp::guild_power::find_dynamic_allocation(client, pid, &sub).await.map(|(_, mw)| mw as f64).unwrap_or(0.0)
+                crate::mcp::guild_power::find_dynamic_allocation(client, pid, &sub).await.ok().flatten().map(|(_, mw)| mw as f64).unwrap_or(0.0)
             };
             Some((id, sub, offered))
         }
@@ -557,7 +557,7 @@ pub async fn mcp_energy_share_impl(app: tauri::AppHandle, power_mw: f64, destina
 async fn share_into(app: &tauri::AppHandle, client: &CosmosClient, pid: &str, dest: &str, power_mw: f64) -> Result<Value, String> {
     let app = app.clone();
     let pid = pid.to_string();
-    let existing = crate::mcp::guild_power::find_dynamic_allocation(client, &pid, dest).await;
+    let existing = crate::mcp::guild_power::find_dynamic_allocation(client, &pid, dest).await?;
     let out = match existing {
         Some((id, _)) if power_mw == 0.0 => {
             crate::mcp::tx_retry::sign_as_primary(
@@ -579,7 +579,7 @@ async fn share_into(app: &tauri::AppHandle, client: &CosmosClient, pid: &str, de
             crate::mcp::tools::board_pages::mcp_allocation_create_impl(app.clone(), pid.clone(), "dynamic".into(), power_mw).await?;
             // The create answers no id: find the unconnected dynamic allocation
             // we just made (the highest index of ours with no destination).
-            let id = newest_unconnected(&client, &pid).await.ok_or(
+            let id = newest_unconnected(&client, &pid).await?.ok_or(
                 "created the allocation but could not find it to connect — it will show on the ALLOC card",
             )?;
             crate::mcp::tools::board_pages::mcp_allocation_connect_impl(app.clone(), id.clone(), dest.to_string()).await?;
@@ -596,26 +596,30 @@ fn index_of(id: &str) -> u64 {
 
 /// The highest-index entity of `kind` matching `keep` — how we find what a
 /// create just made, since the create answers no id.
-pub(crate) async fn newest(client: &CosmosClient, kind: &str, list_key: &str, keep: impl Fn(&Value) -> bool) -> Option<Value> {
-    let arr = client.list_all_entities(kind, list_key).await.ok()?;
-    arr.iter()
+///
+/// `Err` when the list could not be read. "There is none" and "could not look"
+/// must stay apart: a caller that takes the second for the first signs a second
+/// allocation, or adopts an older object as the one it just made.
+pub(crate) async fn newest(client: &CosmosClient, kind: &str, list_key: &str, keep: impl Fn(&Value) -> bool) -> Result<Option<Value>, String> {
+    let arr = client.list_all_entities(kind, list_key).await.map_err(|e| format!("could not list {kind}s: {e}"))?;
+    Ok(arr
+        .iter()
         .filter(|a| keep(a))
         .max_by_key(|a| a.get("id").and_then(|i| i.as_str()).map(index_of).unwrap_or(0))
-        .cloned()
+        .cloned())
 }
 
 pub(crate) fn id_of(v: &Value) -> Option<String> {
     v.get("id").and_then(|i| i.as_str()).map(String::from)
 }
 
-pub(crate) async fn newest_unconnected(client: &CosmosClient, pid: &str) -> Option<String> {
+pub(crate) async fn newest_unconnected(client: &CosmosClient, pid: &str) -> Result<Option<String>, String> {
     let s = |a: &Value, k: &str| a.get(k).and_then(|c| c.as_str()).unwrap_or("").to_string();
     newest(client, "allocation", "Allocation", |a| {
         s(a, "controller") == pid && s(a, "sourceObjectId") == pid && s(a, "type") == "dynamic" && s(a, "destinationId").is_empty()
     })
     .await
-    .as_ref()
-    .and_then(id_of)
+    .map(|a| a.as_ref().and_then(id_of))
 }
 
 /// Poll for something a just-signed tx created (inclusion is a block or two).
@@ -665,7 +669,7 @@ pub async fn mcp_energy_rent_impl(app: tauri::AppHandle, provider_id: String, ca
         a.get("owner").and_then(|v| v.as_str()) == Some(pid.as_str())
             && a.get("providerId").and_then(|v| v.as_str()) == Some(provider_id.as_str())
     };
-    let before = newest(&client, "agreement", "Agreement", agreement_of).await.as_ref().and_then(id_of);
+    let before = newest(&client, "agreement", "Agreement", agreement_of).await?.as_ref().and_then(id_of);
 
     let opened = crate::matrix::matrix_agreement_open(app.clone(), provider_id.clone(), capacity, duration).await?;
 
@@ -675,6 +679,8 @@ pub async fn mcp_energy_rent_impl(app: tauri::AppHandle, provider_id: String, ca
         async move {
             newest(client, "agreement", "Agreement", agreement_of)
                 .await
+                .ok()
+                .flatten()
                 .filter(|a| id_of(a) != before && a.get("allocationId").and_then(|v| v.as_str()).is_some_and(|s| !s.is_empty()))
         }
     })
@@ -732,16 +738,22 @@ pub async fn mcp_energy_sell_impl(app: tauri::AppHandle, power_mw: f64, rate: u6
         return Ok(json!({ "ok": true, "provider_id": provider_id, "substation_id": sub, "grew": out }));
     }
 
+    // The card's view answers "none" when the market could not be read. Before
+    // building a second pipeline, the chain says whether there is a first.
+    if let Some(p) = newest(&client, "provider", "Provider", |p| p.get("owner").and_then(|v| v.as_str()) == Some(pid.as_str())).await? {
+        return Err(format!("you already sell through {}; refresh the card and try again", id_of(&p).unwrap_or_default()));
+    }
+
     // 1. A dynamic allocation from the player (the brownout guard runs here).
     crate::mcp::tools::board_pages::mcp_allocation_create_impl(app.clone(), pid.clone(), "dynamic".into(), power_mw).await?;
-    let allocation = wait_for(|| async { newest_unconnected(&client, &pid).await.map(Value::String) })
+    let allocation = wait_for(|| async { newest_unconnected(&client, &pid).await.ok().flatten().map(Value::String) })
         .await
         .and_then(|v| v.as_str().map(String::from))
         .ok_or("created the allocation but could not find it to build the substation on")?;
 
     // 2. A substation made from it — ours, so a provider may attach to it.
     let subs_before = newest(&client, "substation", "Substation", |s| s.get("owner").and_then(|v| v.as_str()) == Some(pid.as_str()))
-        .await
+        .await?
         .as_ref()
         .and_then(id_of);
     crate::mcp::tx_retry::sign_with_retry(
@@ -759,6 +771,8 @@ pub async fn mcp_energy_sell_impl(app: tauri::AppHandle, power_mw: f64, rate: u6
         async move {
             newest(client, "substation", "Substation", |s| s.get("owner").and_then(|v| v.as_str()) == Some(pid.as_str()))
                 .await
+                .ok()
+                .flatten()
                 .filter(|s| id_of(s) != before)
         }
     })

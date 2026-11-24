@@ -131,7 +131,10 @@ const SATURATED_AFTER_FAILURES: u32 = 5;
 /// The webview answered a sign with an error that means ITS OWN network stack
 /// could not reach the node (pool saturation), not that the tx was rejected.
 fn is_client_stack_error(err: &str) -> bool {
-    err.contains("signing client connect timed out") || err.contains("signAndBroadcast timed out (WS)")
+    err.contains("signing client connect timed out")
+        // This one also covers the wait for inclusion, so while the node is
+        // behind the chain it says nothing about the webview.
+        || (err.contains("signAndBroadcast timed out (WS)") && !crate::mcp::chain_health::lcd_stalled())
 }
 
 fn note_client_result(err: Option<&str>) {

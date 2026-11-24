@@ -194,9 +194,41 @@ impl VirtualPlayerStore {
     fn path_for(owner: Option<&str>) -> Option<PathBuf> {
         crate::mcp::config_store::config_path(&filename_for(owner))
     }
-    fn read_file(path: &PathBuf) -> Option<Self> {
-        let contents = std::fs::read_to_string(path).ok()?;
-        serde_json::from_str(&contents).ok()
+    /// The registry at `path`. `Ok(None)` is no file; `Err` is a file whose
+    /// contents we could not get, which must never be treated as empty: an
+    /// empty registry is re-populated and SAVED, over the whole fleet.
+    fn read_file(path: &PathBuf) -> Result<Option<Self>, String> {
+        use crate::mcp::config_store::{read_state, FileRead};
+        // A read can lose a race for file descriptors; ask again before
+        // declaring the fleet unreadable for the session.
+        for attempt in 0..3 {
+            match read_state(path) {
+                FileRead::Read(v) => return Ok(Some(v)),
+                FileRead::Missing => return Ok(None),
+                FileRead::Corrupt(e) => return Err(format!("does not parse: {e}")),
+                FileRead::Unreadable(e) if attempt == 2 => return Err(format!("could not be read: {e}")),
+                FileRead::Unreadable(_) => std::thread::sleep(std::time::Duration::from_millis(100)),
+            }
+        }
+        unreachable!("the last attempt returns")
+    }
+
+    /// Refuse to write a registry file we could not read, and say so loudly.
+    fn guard(path: &PathBuf, why: &str) {
+        crate::mcp::config_store::protect(path, why);
+        crate::mcp::telemetry::tlog(
+            "vplayer",
+            crate::mcp::telemetry::Sev::Error,
+            format!("{} {why} — virtual players are not loaded, and the file will not be written until it reads again", path.display()),
+        );
+    }
+
+    /// Why this registry's file must not be written, if it must not. A player
+    /// created now could not be recorded, and its HD index would be handed out
+    /// again.
+    pub fn write_refused(&self) -> Option<String> {
+        let owner = self.owner.clone().or_else(current_owner);
+        Self::path_for(owner.as_deref()).and_then(|p| crate::mcp::config_store::write_refused(&p))
     }
     /// The registry of the signed-in account. Before any sign-in this is the
     /// legacy unscoped file (read-only in practice: nothing creates players
@@ -207,16 +239,43 @@ impl VirtualPlayerStore {
     }
     fn load_for(owner: Option<&str>) -> Self {
         let Some(o) = owner else {
-            return Self::path_for(None).and_then(|p| Self::read_file(&p)).unwrap_or_default();
+            let Some(p) = Self::path_for(None) else { return Self::default() };
+            return match Self::read_file(&p) {
+                Ok(found) => found.unwrap_or_default(),
+                Err(e) => {
+                    Self::guard(&p, &e);
+                    Self::default()
+                }
+            };
         };
-        if let Some(mut found) = Self::path_for(Some(o)).and_then(|p| Self::read_file(&p)) {
-            found.owner = Some(o.to_string());
-            return found;
+        let mut store = Self { owner: Some(o.to_string()), players: Vec::new() };
+        let Some(scoped) = Self::path_for(Some(o)) else { return store };
+        match Self::read_file(&scoped) {
+            Ok(Some(mut found)) => {
+                found.owner = Some(o.to_string());
+                return found;
+            }
+            Ok(None) => {}
+            // This account HAS a registry; the legacy file is not its stand-in.
+            Err(e) => {
+                Self::guard(&scoped, &e);
+                return store;
+            }
         }
         // First load for this account: decide what the legacy file is to it.
         let legacy_path = Self::path_for(None);
-        let legacy = legacy_path.as_ref().and_then(Self::read_file);
-        let mut store = Self { owner: Some(o.to_string()), players: Vec::new() };
+        let legacy = match legacy_path.as_ref().map(Self::read_file) {
+            Some(Ok(l)) => l,
+            Some(Err(e)) => {
+                if let Some(lp) = &legacy_path {
+                    Self::guard(lp, &e);
+                }
+                // Unknown whether these players are ours: create nothing.
+                crate::mcp::config_store::protect(&scoped, "the registry it would be adopted from could not be read");
+                return store;
+            }
+            None => None,
+        };
         if let Some(mut legacy) = legacy {
             if legacy_disposition(legacy.owner.as_deref(), Some(o), entries_match_loaded_key(&legacy.players)) == Legacy::Adopt {
                 store.players = std::mem::take(&mut legacy.players);
@@ -225,7 +284,9 @@ impl VirtualPlayerStore {
                 legacy.owner = Some(o.to_string());
                 legacy.players = store.players.clone();
                 if let Some(lp) = &legacy_path {
-                    let _ = serde_json::to_string_pretty(&legacy).map(|j| std::fs::write(lp, j));
+                    if let Ok(j) = serde_json::to_string_pretty(&legacy) {
+                        let _ = crate::mcp::config_store::write_state(lp, j.as_bytes());
+                    }
                 }
                 let _ = store.save();
             }
@@ -235,11 +296,8 @@ impl VirtualPlayerStore {
     pub fn save(&self) -> Result<(), String> {
         let owner = self.owner.clone().or_else(current_owner);
         let path = Self::path_for(owner.as_deref()).ok_or("no config dir")?;
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-        }
         let json = serde_json::to_string_pretty(self).map_err(|e| e.to_string())?;
-        std::fs::write(&path, json).map_err(|e| e.to_string())
+        crate::mcp::config_store::write_state(&path, json.as_bytes())
     }
 
     /// Lowest unused HD index >= 1 (0 is the primary player).
@@ -478,7 +536,9 @@ pub async fn team_owned(client: &crate::mcp::cosmos_client::CosmosClient) -> Tea
         let (planet, fleet) = match cached {
             Some(pf) => pf,
             None => {
-                let pf = match client.query_entity("player", &pid).await {
+                let read = client.query_entity("player", &pid).await;
+                let answered = read.is_ok();
+                let pf = match read {
                     Ok(v) => {
                         let g = |k: &str| {
                             v.get("Player")
@@ -491,10 +551,13 @@ pub async fn team_owned(client: &crate::mcp::cosmos_client::CosmosClient) -> Tea
                     }
                     Err(_) => (String::new(), String::new()),
                 };
-                // Cache the answer either way: a planet-less vplayer is a
+                // An answer, of either kind: a planet-less vplayer is a
                 // real, stable answer until it explores, and the snapshot
                 // (consulted first) picks that change up on its own.
-                OWNED_CACHE.write().unwrap().insert(pid.clone(), pf.clone());
+                // A read that failed is not an answer.
+                if answered {
+                    OWNED_CACHE.write().unwrap().insert(pid.clone(), pf.clone());
+                }
                 pf
             }
         };
@@ -614,6 +677,9 @@ pub async fn spawn_one(
     use serde_json::json;
 
     let guild_id = signup_guild(guild_id)?;
+    if let Some(why) = REGISTRY.read().unwrap_or_else(|e| e.into_inner()).write_refused() {
+        return Err(format!("no player was created: the registry cannot be saved ({why})"));
+    }
     let data = crate::mcp::vplayer_bridge::call(
         app,
         "signup",

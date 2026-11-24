@@ -54,6 +54,7 @@ mod proportionality_tests {
     // shorten a test invites a silently-wrong zero somewhere real.
     fn row(dmg: f64) -> StrikeRow {
         StrikeRow {
+            is_command: false,
             player: "p".into(),
             player_id: None,
             hd_index: None,
@@ -145,15 +146,9 @@ pub(crate) async fn resolve_fire_target(
         return Ok((target.to_string(), "DOWN".to_string(), "target already destroyed".to_string()));
     }
 
-    let defenders = client
-        .guild
-        .struct_defender_by_protected(target, 1)
-        .await
-        .map(|p| p.items)
-        .unwrap_or_default();
+    let defenders = crate::mcp::tools::intel::defenders_of(client, target).await?;
     let mut blockers: Vec<String> = Vec::new();
-    for d in &defenders {
-        let Some(did) = d.get("defending_struct_id").and_then(|x| x.as_str()) else { continue };
+    for did in &defenders {
         if let Ok(de) = client.query_entity("struct", did).await {
             let flag = |k: &str| de.get("structAttributes").and_then(|a| a.get(k)).and_then(|x| x.as_bool()).unwrap_or(false);
             let dead = flag("isDestroyed");
@@ -213,10 +208,11 @@ pub async fn execute(
         ))];
     }
 
-    let plan = match plan_strike(client, &json!({ "target": fire_target })).await {
+    let mut plan = match plan_strike(client, &json!({ "target": fire_target })).await {
         Ok(p) => p,
         Err(e) => return vec![Content::text(format!("structs_strike: {}", e))],
     };
+    crate::mcp::tools::intel::keep_safe_command_shots(client, &mut plan).await;
 
     // One shot per player — charge resets to 0 on any action, so a player can
     // only fire once this window; pick its highest-expected-damage reaching weapon.

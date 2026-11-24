@@ -125,7 +125,7 @@ const SEED_INTERVAL_MS: f64 = 5.0 * 60.0 * 1000.0;
 /// Last time the raid watch was reconciled, ms epoch. 0 = never.
 static LAST_SEED: LazyLock<Mutex<f64>> = LazyLock::new(|| Mutex::new(0.0));
 
-/// Planets [`seed_raid_watch`] has already considered, so the periodic re-seed
+/// Raids [`seed_raid_watch`] has already considered, so the periodic re-seed
 /// never re-adopts one the watch has since dropped.
 ///
 /// Without this the two halves fight: the seed adopts a non-terminal raid row,
@@ -155,6 +155,42 @@ pub fn planet_under_raid(planet_id: &str) -> bool {
         .lock()
         .map(|w| w.contains_key(planet_id))
         .unwrap_or(false)
+}
+
+/// How old an attack record may be and still describe what is happening NOW.
+/// The planet-activity feed is history: its newest row can be weeks old, and a
+/// watched raid reads it every scan. Anything older identifies nobody — the
+/// fleet parked at the planet does.
+const ATTACK_FRESH_MS: f64 = 10.0 * 60.0 * 1000.0;
+
+/// Is this attack record current? An undated row counts as current: alarms are
+/// raised by live events, so something did just happen.
+fn attack_is_current(time: &str, now_ms: f64) -> bool {
+    crate::mcp::onboarding::parse_ts(time)
+        .map(|t| now_ms - t as f64 <= ATTACK_FRESH_MS)
+        .unwrap_or(true)
+}
+
+/// (planet, attacker) → the newest attack `seq` already written to the grudge
+/// list; 0 for a raider who has not fired. A watched raid re-alarms every scan,
+/// and every scan re-reads the same newest row.
+static RECORDED: LazyLock<Mutex<HashMap<(String, String), i64>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// True the first time this (planet, attacker, seq) is seen. `seq` is monotonic
+/// per planet, so a lower one is a row already counted.
+fn first_sight(seen: &mut HashMap<(String, String), i64>, planet: &str, attacker: &str, seq: i64) -> bool {
+    match seen.get_mut(&(planet.to_string(), attacker.to_string())) {
+        Some(last) if seq <= *last => false,
+        Some(last) => {
+            *last = seq;
+            true
+        }
+        None => {
+            seen.insert((planet.to_string(), attacker.to_string()), seq);
+            true
+        }
+    }
 }
 
 static LAST_SCAN: LazyLock<Mutex<f64>> = LazyLock::new(|| Mutex::new(0.0));
@@ -293,6 +329,14 @@ fn reserve_shots(n: usize, cap: usize) -> usize {
     grant
 }
 
+/// Return the newest `n` reservations.
+fn refund_shots(n: usize) {
+    if let Ok(mut log) = SHOT_LOG.lock() {
+        let keep = log.len().saturating_sub(n);
+        log.truncate(keep);
+    }
+}
+
 pub async fn tick(app_handle: &tauri::AppHandle, force: bool) {
     let cfg = get();
     if !cfg.enabled {
@@ -419,14 +463,11 @@ async fn scan(
         .map(|w| w.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
         .unwrap_or_default();
     for (planet_id, defender) in watched {
-        let armed = client
-            .entity("planet", &planet_id)
-            .await
-            .ok()
-            .map(|e| {
-                crate::mcp::loop_util::read_u64_field(e.get("planetAttributes"), "blockStartRaid")
-            })
-            .unwrap_or(0);
+        // A planet we could not read has not been seen to be clear. Keep the
+        // watch and ask again next scan.
+        let Ok(planet) = client.entity("planet", &planet_id).await else { continue };
+        let armed =
+            crate::mcp::loop_util::read_u64_field(planet.get("planetAttributes"), "blockStartRaid");
         // A raid has TWO phases and the clock only covers the second one.
         // `blockStartRaid` stays 0 for the whole `initiated` phase — the raider
         // is parked at our planet working through the defences, and the clock
@@ -445,11 +486,22 @@ async fn scan(
         let still_here = if armed != 0 {
             true
         } else {
-            raiding_fleet(&client, &planet_id, None).await.is_some()
+            match raiding_fleet(&client, &planet_id, None, true).await {
+                Ok(f) => f.is_some(),
+                // Could not look. Keep the watch; standing down needs a "no".
+                Err(_) => continue,
+            }
         };
         if !still_here {
             if let Ok(mut w) = RAID_WATCH.lock() {
                 w.remove(&planet_id);
+            }
+            // The next visit is a new incident.
+            if let Ok(mut r) = RECORDED.lock() {
+                r.retain(|(p, _), _| p != &planet_id);
+            }
+            if let Ok(mut m) = CMD_MOVES.lock() {
+                m.remove(&planet_id);
             }
             crate::mcp::telemetry::tlog(
                 "auto_response",
@@ -500,17 +552,52 @@ async fn scan(
             }
         }
         run.players.fetch_add(1, Ordering::Relaxed);
-        if let Err(e) = handle_alarm(app_handle, &client, cfg, &owned, &alarm, run).await {
-            run.errors.fetch_add(1, Ordering::Relaxed);
-            crate::mcp::telemetry::tlog(
-                "auto_response",
-                crate::mcp::telemetry::Sev::Warn,
-                format!("{}: {}", alarm.planet_id, e),
-            );
-        } else {
-            run.actions.fetch_add(1, Ordering::Relaxed);
+        match handle_alarm(app_handle, &client, cfg, &owned, &alarm, run).await {
+            Ok(acted) => {
+                // An action is a shot landed (or a plan surfaced), not a scan
+                // that looked and held its fire.
+                run.actions.fetch_add(acted as u32, Ordering::Relaxed);
+            }
+            Err(e) => {
+                run.errors.fetch_add(1, Ordering::Relaxed);
+                crate::mcp::telemetry::tlog(
+                    "auto_response",
+                    crate::mcp::telemetry::Sev::Warn,
+                    format!("{}: {}", alarm.planet_id, e),
+                );
+            }
         }
     }
+}
+
+/// planet → times its defender's Command Ship has changed ambit this raid.
+static CMD_MOVES: LazyLock<Mutex<HashMap<String, u32>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Send the defender's own Command Ship after `target`, if it may go.
+async fn bring_command_ship(app: &tauri::AppHandle, client: &CosmosClient, alarm: &Alarm, target: &str) -> Option<&'static str> {
+    let defender = alarm.defender_player.as_ref()?.as_str();
+    if CMD_MOVES.lock().ok()?.get(&alarm.planet_id).copied().unwrap_or(0) >= crate::mcp::command_ship::MAX_MOVES {
+        return None;
+    }
+    // The primary signs with the device key, HD index 0.
+    let is_primary = crate::game_state::GAME_STATE.read().ok()?.player_id.as_deref() == Some(defender);
+    let index = match is_primary {
+        true => 0,
+        false => crate::mcp::virtual_players::REGISTRY.read().ok()?.find(defender)?.index,
+    };
+    let player = client.entity("player", defender).await.ok()?;
+    let fleet = player.pointer("/Player/fleetId").and_then(|x| x.as_str()).filter(|s| !s.is_empty())?.to_string();
+    let ship = crate::mcp::command_ship::Ship {
+        player: defender,
+        index,
+        fleet: &fleet,
+        planet: &alarm.planet_id,
+        component: "auto_response",
+        context: format!("auto_response:{defender}"),
+    };
+    let moved = crate::mcp::command_ship::bring(app, client, &ship, target).await?;
+    *CMD_MOVES.lock().ok()?.entry(alarm.planet_id.clone()).or_default() += 1;
+    Some(moved)
 }
 
 async fn handle_alarm(
@@ -520,7 +607,7 @@ async fn handle_alarm(
     owned: &crate::mcp::tools::events::Owned,
     alarm: &Alarm,
     run: &std::sync::Arc<crate::mcp::telemetry::LoopRun>,
-) -> Result<(), String> {
+) -> Result<bool, String> {
     // ── 1. Who hit us? ──
     // The GRASS event may be a stub, so the authoritative record comes from the
     // Guild API's planet-activity feed. A raid alarm can also identify the
@@ -533,6 +620,7 @@ async fn handle_alarm(
         .await
         .unwrap_or_default()
         .into_iter()
+        .filter(|a| attack_is_current(&a.time, now_millis()))
         .find(|a| {
             let hostile = a
                 .attacker_player_id
@@ -550,13 +638,18 @@ async fn handle_alarm(
         });
 
     let from_shots = attack.as_ref().and_then(|a| a.attacker_player_id.clone());
-    let raider_fleet = raiding_fleet(client, &alarm.planet_id, from_shots.as_deref()).await;
+    let raider_fleet = raiding_fleet(client, &alarm.planet_id, from_shots.as_deref(), alarm.is_raid).await.unwrap_or(None);
     let attacker_player = from_shots.or_else(|| raider_fleet.as_ref().and_then(|f| f.owner.clone()));
 
     // ── 2. Record the grudge, whatever we decide to do about it. ──
     // This happens even in `harden` and even when no shot is possible: the raid
     // loop uses it to retaliate later, on our schedule instead of theirs.
-    if let Some(atk) = attacker_player.as_deref() {
+    // Once per attack: a watched raid comes back through here every scan.
+    let seq = attack.as_ref().map(|a| a.seq).unwrap_or(0);
+    let new_incident = attacker_player.as_deref().filter(|atk| {
+        RECORDED.lock().map(|mut r| first_sight(&mut r, &alarm.planet_id, atk, seq)).unwrap_or(false)
+    });
+    if let Some(atk) = new_incident {
         let (dmg, lost) = attack
             .as_ref()
             .map(|a| (a.total_damage(), a.destroyed_count()))
@@ -643,7 +736,7 @@ async fn handle_alarm(
     // raid against an attacker firing every 38 seconds.
     let cooldown_key = attacker_player.clone().unwrap_or_else(|| alarm.planet_id.clone());
     if cooldown_gags_us(alarm.is_raid, in_cooldown(&cooldown_key, INCIDENT_COOLDOWN_SECS)) {
-        return Ok(());
+        return Ok(false);
     }
 
     // ── 3b. Command Ship triage, in parallel with the response. ──
@@ -699,7 +792,7 @@ async fn handle_alarm(
     let Some(fire_target) = fire_target else {
         run.blocked("attacker not identifiable yet (no attack record, no visiting fleet)");
         alert(app, alarm, "attacker not yet identifiable — no shot taken");
-        return Ok(());
+        return Ok(false);
     };
 
     // ── 4b. Walk the kill-chain. ──
@@ -707,8 +800,16 @@ async fn handle_alarm(
     // blocker absorbs every shot (including counter-immune artillery fire), so
     // shooting the protected target directly wastes the entire response window.
     // Redirect to the current blocker; re-alarms walk strip → kill over scans.
+    let resolved = match crate::mcp::tools::strike::resolve_fire_target(client, &fire_target).await {
+        // The chain prunes a destroyed struct, so "no such object" IS the dead
+        // target — not a read failure to shoot through.
+        Err(e) if crate::mcp::cosmos_client::is_absent_object(&e) => {
+            Ok((fire_target.clone(), "DOWN".to_string(), String::new()))
+        }
+        other => other,
+    };
     let (fire_target, target_kind) =
-        match crate::mcp::tools::strike::resolve_fire_target(client, &fire_target).await {
+        match resolved {
             Ok((t, phase, note)) => {
                 if phase == "DOWN" {
                     // The CHOSEN target is dead — but mid-raid the fleet it
@@ -722,7 +823,7 @@ async fn handle_alarm(
                         Some(next) => (next, "attrition (prior target destroyed)"),
                         None => {
                             run.blocked("resolved attacker struct already destroyed, no other hulls known");
-                            return Ok(());
+                            return Ok(false);
                         }
                     }
                 } else
@@ -752,7 +853,7 @@ async fn handle_alarm(
             alarm.planet_id
         ));
         alert(app, alarm, "no co-located combat structs — nothing can reach the attacker");
-        return Ok(());
+        return Ok(false);
     }
 
     let mut plan = crate::mcp::tools::intel::plan_strike(
@@ -760,6 +861,7 @@ async fn handle_alarm(
         &json!({ "target": fire_target, "players": shooters }),
     )
     .await?;
+    crate::mcp::tools::intel::keep_safe_command_shots(client, &mut plan).await;
     // ── 5b. Attrition fallback. ──
     // The kill-chain above picks ONE target (Command Ship, or its blocker).
     // When that target sits in an ambit none of our surviving hulls can reach,
@@ -786,7 +888,7 @@ async fn handle_alarm(
         // Bounded: each probe is a full strike plan. Six candidates covers a
         // 16-slot fleet's distinct ambits with room to spare.
         for cand in candidates.into_iter().take(6) {
-            let Ok(p2) = crate::mcp::tools::intel::plan_strike(
+            let Ok(mut p2) = crate::mcp::tools::intel::plan_strike(
                 client,
                 &json!({ "target": cand, "players": shooters }),
             )
@@ -794,6 +896,7 @@ async fn handle_alarm(
             else {
                 continue;
             };
+            crate::mcp::tools::intel::keep_safe_command_shots(client, &mut p2).await;
             // A dead hull resolves with 0 HP — shooting it is a wasted tx.
             if p2.tgt_hp > 0.0 && p2.rows.iter().any(|r| r.reachable) {
                 crate::mcp::telemetry::tlog(
@@ -837,7 +940,8 @@ async fn handle_alarm(
         // misses — the CMD's 2/2). This used to be a switch; off, the loop
         // fed 3 HP hulls into a defended Command Ship's counters for nothing.
         let e = best.entry(pid.to_string()).or_insert(r);
-        if (r.counter_risk, -r.score) < (e.counter_risk, -e.score) {
+        // The Command Ship fires only when nothing else of theirs can.
+        if (r.is_command, r.counter_risk, -r.score) < (e.is_command, e.counter_risk, -e.score) {
             *e = r;
         }
     }
@@ -878,6 +982,22 @@ async fn handle_alarm(
     let projected: f64 = shots.iter().map(|s| s.expected_dmg).sum();
     let planned = shots.len();
 
+    // Nothing of theirs is reachable by anything of ours: the Command Ship can
+    // go where the raider is. Only in a raid, only for the target the kill-chain
+    // chose, and only out of a fight it survives. It fires next scan.
+    if planned == 0 && alarm.is_raid && cfg.autonomy != Autonomy::Advise && !plan.rows.iter().any(|r| r.reachable) {
+        if let Some(ambit) = bring_command_ship(app, client, alarm, &fire_target).await {
+            run.acted();
+            crate::mcp::board_feed::push(
+                app,
+                crate::mcp::board_feed::Severity::Notice,
+                "auto_response",
+                format!("{} under attack — Command Ship moved to {ambit} to reach {fire_target}", alarm.label),
+            );
+            return Ok(true);
+        }
+    }
+
     if planned == 0 {
         // With the attrition fallback and the unknown-charge fix above, this
         // now means what it says: nothing we still own reaches ANY hull of the
@@ -888,7 +1008,7 @@ async fn handle_alarm(
             shooters.len(), alarm.planet_id
         ));
         alert(app, alarm, "no shooter reaches any raiding hull with charge ready");
-        return Ok(());
+        return Ok(false);
     }
 
     // ── 6. Fire, or surface the plan. ──
@@ -924,7 +1044,7 @@ async fn handle_alarm(
         if granted == 0 {
             run.blocked(format!("hourly shot budget exhausted ({} max)", cfg.max_shots_per_hour));
             alert(app, alarm, "hourly shot budget exhausted — no response fired");
-            return Ok(());
+            return Ok(false);
         }
         // Survival is a RANKING, not a filter (operator doctrine 2026-08-20:
         // "doing nothing shouldn't be a result"). The old gate held every
@@ -966,6 +1086,13 @@ async fn handle_alarm(
                 fired += 1;
             }
         }
+        // A volley the chain never took must not spend the hour's budget:
+        // another planet may need it.
+        refund_shots(granted.saturating_sub(fired));
+        if fired == 0 {
+            run.blocked(format!("{granted} shot(s) at {fire_target} all failed — see the tx ledger"));
+            return Err(format!("{granted} shot(s) at {fire_target} ({target_kind}) all failed"));
+        }
         crate::mcp::board_feed::push(
             app,
             crate::mcp::board_feed::Severity::Important,
@@ -1004,7 +1131,7 @@ async fn handle_alarm(
         projected_damage: projected,
         note: format!("target HP {:.0}{}", plan.tgt_hp, incoming_summary(attack.as_ref())),
     });
-    Ok(())
+    Ok(advise || fired > 0)
 }
 
 async fn fire(
@@ -1139,11 +1266,12 @@ async fn seed_raid_watch(client: &CosmosClient, owned: &crate::mcp::tools::event
             continue;
         }
         let Some(defender) = owned.player_by_planet.get(&r.planet_id).cloned() else { continue };
-        // Considered once already — either it is still watched, or the watch
-        // looked and stood down. Either way the seed has nothing to add.
+        // This RAID (planet, fleet and status time — not the planet, which can
+        // be raided again) was considered already: it is still watched, or the
+        // watch looked and stood down. Either way the seed has nothing to add.
         match SEEDED_PLANETS.lock() {
             Ok(mut seen) => {
-                if !seen.insert(r.planet_id.clone()) {
+                if !seen.insert(format!("{}|{}|{}", r.planet_id, r.fleet_id.as_deref().unwrap_or(""), r.updated_ms)) {
                     continue;
                 }
             }
@@ -1398,6 +1526,13 @@ fn hostile_and_here(
 /// * Otherwise sweep every fleet parked at the planet and take the first
 ///   hostile one.
 ///
+/// `sweep_anyway` sweeps even when the named attacker is not here: during a
+/// raid the fleet to fight is whoever is parked on us, and a shooter who has
+/// since left must not hide it. Outside a raid it stays off, so one player's
+/// hit-and-run is never answered by shooting a bystander.
+///
+/// `Err` is "could not look everywhere", which is not "nobody is here".
+///
 /// That sweep used to read `locationListStart` alone — the HEAD of the planet's
 /// visitor list — and return `None` outright if that one fleet turned out to be
 /// friendly. The visitor list is a linked list, so a single friendly fleet
@@ -1409,12 +1544,13 @@ async fn raiding_fleet(
     client: &CosmosClient,
     planet_id: &str,
     attacker_player: Option<&str>,
-) -> Option<RaiderFleet> {
+    sweep_anyway: bool,
+) -> Result<Option<RaiderFleet>, String> {
     let is_team: fn(&str) -> bool = crate::mcp::virtual_players::is_team_player;
 
     // Candidates, best first. A named attacker is the strongest signal, so try
     // their fleet before paying for the visitor walk.
-    let mut candidates: Vec<String> = Vec::new();
+    let mut named: Option<String> = None;
     if let Some(atk) = attacker_player.filter(|p| !is_team(p)) {
         if let Ok(pl) = client.entity("player", atk).await {
             if let Some(f) = pl
@@ -1423,74 +1559,102 @@ async fn raiding_fleet(
                 .and_then(|x| x.as_str())
                 .filter(|s| !s.is_empty())
             {
-                candidates.push(f.to_string());
+                named = Some(f.to_string());
             }
         }
     }
-    if candidates.is_empty() {
-        // Reuses the spectator's walker: both list directions, with the same
-        // dangling-pointer guard. Sorted only so the pick is deterministic —
-        // `locations_at_planet` returns a set.
-        let mut visitors: Vec<String> = crate::mcp::spectator::locations_at_planet(client, planet_id)
-            .await
-            .into_iter()
-            .filter(|id| id != planet_id)
-            .collect();
-        visitors.sort();
-        candidates = visitors;
+    if let Some(fleet_id) = &named {
+        if let Some(r) = hostile_fleet_at(client, fleet_id, planet_id, is_team).await? {
+            return Ok(Some(r));
+        }
+        if !sweep_anyway {
+            return Ok(None);
+        }
     }
+    // Reuses the spectator's walker: both list directions, with the same
+    // dangling-pointer guard. Sorted only so the pick is deterministic —
+    // `locations_at_planet` returns a set.
+    let (locations, mut complete) = crate::mcp::spectator::try_locations_at_planet(client, planet_id).await;
+    let mut visitors: Vec<String> = locations.into_iter().filter(|id| id != planet_id).collect();
+    visitors.sort();
 
-    for fleet_id in candidates {
-        let Ok(fleet) = client.entity("fleet", &fleet_id).await else { continue };
-        let Some(f) = fleet.get("Fleet") else { continue };
-        let owner = f.get("owner").and_then(|x| x.as_str()).map(String::from);
-        if !hostile_and_here(
-            owner.as_deref(),
-            f.get("locationId").and_then(|x| x.as_str()),
-            planet_id,
-            is_team,
-        ) {
-            continue; // the raider may be further down the list
+    for fleet_id in visitors {
+        if named.as_deref() == Some(fleet_id.as_str()) {
+            continue; // just read
         }
-        let command_struct = f
-            .get("commandStruct")
-            .and_then(|x| x.as_str())
-            .filter(|s| !s.is_empty())
-            .map(String::from);
-        // A destroyed Command Ship is not a target.
-        let command_struct = match command_struct {
-            Some(cs) => {
-                let dead = client
-                    .entity("struct", &cs)
-                    .await
-                    .map(|e| {
-                        crate::mcp::loop_util::parse_bool(
-                            e.get("structAttributes").and_then(|a| a.get("isDestroyed")),
-                        )
-                    })
-                    .unwrap_or(true);
-                if dead {
-                    None
-                } else {
-                    Some(cs)
-                }
-            }
-            None => None,
-        };
-        let mut hulls: Vec<String> = Vec::new();
-        for row in ["water", "land", "air", "space"] {
-            if let Some(arr) = f.get(row).and_then(|x| x.as_array()) {
-                hulls.extend(
-                    arr.iter()
-                        .filter_map(|x| x.as_str())
-                        .filter(|id| !id.is_empty())
-                        .map(String::from),
-                );
-            }
+        match hostile_fleet_at(client, &fleet_id, planet_id, is_team).await {
+            Ok(Some(r)) => return Ok(Some(r)),
+            // Friendly or gone: the raider may be further down the list.
+            Ok(None) => {}
+            Err(_) => complete = false,
         }
-        return Some(RaiderFleet { fleet_id, owner, command_struct, hulls });
     }
-    None
+    if complete {
+        Ok(None)
+    } else {
+        Err(format!("not every fleet at {planet_id} could be read"))
+    }
+}
+
+/// `fleet_id` as a [`RaiderFleet`], if it is hostile and parked at `planet_id`.
+async fn hostile_fleet_at(
+    client: &CosmosClient,
+    fleet_id: &str,
+    planet_id: &str,
+    is_team: fn(&str) -> bool,
+) -> Result<Option<RaiderFleet>, String> {
+    let fleet = match client.entity("fleet", fleet_id).await {
+        Ok(f) => f,
+        Err(e) if crate::mcp::perception::is_not_found(&e) => return Ok(None),
+        Err(e) => return Err(e),
+    };
+    let Some(f) = fleet.get("Fleet") else { return Err(format!("{fleet_id} read without a Fleet")) };
+    let owner = f.get("owner").and_then(|x| x.as_str()).map(String::from);
+    if !hostile_and_here(
+        owner.as_deref(),
+        f.get("locationId").and_then(|x| x.as_str()),
+        planet_id,
+        is_team,
+    ) {
+        return Ok(None);
+    }
+    let command_struct = f
+        .get("commandStruct")
+        .and_then(|x| x.as_str())
+        .filter(|s| !s.is_empty())
+        .map(String::from);
+    // A destroyed Command Ship is not a target.
+    let command_struct = match command_struct {
+        Some(cs) => {
+            let dead = client
+                .entity("struct", &cs)
+                .await
+                .map(|e| {
+                    crate::mcp::loop_util::parse_bool(
+                        e.get("structAttributes").and_then(|a| a.get("isDestroyed")),
+                    )
+                })
+                .unwrap_or(true);
+            if dead {
+                None
+            } else {
+                Some(cs)
+            }
+        }
+        None => None,
+    };
+    let mut hulls: Vec<String> = Vec::new();
+    for row in ["water", "land", "air", "space"] {
+        if let Some(arr) = f.get(row).and_then(|x| x.as_array()) {
+            hulls.extend(
+                arr.iter()
+                    .filter_map(|x| x.as_str())
+                    .filter(|id| !id.is_empty())
+                    .map(String::from),
+            );
+        }
+    }
+    Ok(Some(RaiderFleet { fleet_id: fleet_id.to_string(), owner, command_struct, hulls }))
 }
 
 /// Team players with structs AT `planet_id` — the only ones that can engage.
@@ -1588,6 +1752,32 @@ mod tests {
         assert!(!c.enabled, "must not fight on first launch");
         assert_eq!(c.autonomy, Autonomy::Advise, "enabling it shows the plan first");
         assert!(!c.include_primary_shooters, "the primary's charge stays home");
+    }
+
+    /// The live failure of 2026-11: a volley from October was read as the
+    /// attack in progress on every scan for a day.
+    #[test]
+    fn only_a_recent_attack_describes_the_present() {
+        let now = crate::mcp::onboarding::parse_ts("2026-11-24 20:54:00+00").unwrap() as f64;
+        assert!(attack_is_current("2026-11-24 20:53:10.135966+00", now));
+        assert!(!attack_is_current("2026-11-24 20:40:00+00", now));
+        assert!(!attack_is_current("2026-10-01 15:46:29.429489+00", now));
+        assert!(attack_is_current("", now), "an undated row follows a live event");
+    }
+
+    /// One attack is one entry on the grudge list, however many scans see it.
+    #[test]
+    fn an_attack_is_recorded_once() {
+        let mut seen = HashMap::new();
+        assert!(first_sight(&mut seen, "2-9462", "1-61", 41));
+        assert!(!first_sight(&mut seen, "2-9462", "1-61", 41), "the next scan");
+        assert!(!first_sight(&mut seen, "2-9462", "1-61", 0), "the row aged out; not a new attack");
+        assert!(first_sight(&mut seen, "2-9462", "1-61", 42), "a new volley");
+        // A raider who never fires is one incident.
+        assert!(first_sight(&mut seen, "2-9462", "1-406", 0));
+        assert!(!first_sight(&mut seen, "2-9462", "1-406", 0));
+        // seq is per planet.
+        assert!(first_sight(&mut seen, "2-7", "1-61", 3));
     }
 
     /// A raid must never be gagged by the per-attacker cooldown: the raider

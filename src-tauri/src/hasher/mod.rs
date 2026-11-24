@@ -652,6 +652,7 @@ pub fn maybe_complete_virtual(app_handle: &AppHandle, snap: &TaskStateSnapshot) 
         match signed
         {
             Ok(v) => {
+                crate::mcp::loop_util::COMPLETION_BACKOFF.clear(&object_id);
                 crate::mcp::telemetry::tlog(
                     "hasher",
                     crate::mcp::telemetry::Sev::Debug,
@@ -691,7 +692,11 @@ pub fn maybe_complete_virtual(app_handle: &AppHandle, snap: &TaskStateSnapshot) 
             Err(e) => {
                 // Surface failures loudly: a completion that never lands leaves
                 // the anchor frozen, so the harvest loop will re-issue the same
-                // proof indefinitely. That treadmill must be visible.
+                // proof indefinitely. That treadmill must be visible — and, when
+                // the refusal was a verdict, slowed.
+                if !crate::mcp::tx_retry::worth_retrying_soon(&e) {
+                    crate::mcp::loop_util::COMPLETION_BACKOFF.fail(&object_id);
+                }
                 crate::mcp::telemetry::tlog(
                     "hasher",
                     crate::mcp::telemetry::Sev::Warn,

@@ -354,6 +354,11 @@ pub struct Expedition {
     /// Consecutive siege rounds that could not fire. `SIEGE_IDLE_ROUNDS` of
     /// them end the expedition.
     pub idle_rounds: usize,
+    /// Times the Command Ship has changed ambit to reach a target.
+    pub cmd_moves: u32,
+    /// Why it is over, once it is: the fleet has been told to come home and is
+    /// tracked until it is seen there. A recall that fails is tried again.
+    pub returning: Option<String>,
     pub note: String,
 }
 
@@ -601,9 +606,16 @@ async fn scan(
     // ── Phase D first: an expedition already in flight outranks new targets. ──
     // Recover anything that was in flight across a restart before supervising,
     // or the raider sits at the enemy planet forever.
-    static READOPTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-    if !READOPTED.swap(true, Ordering::Relaxed) {
-        readopt_expeditions(&client).await;
+    // Once per raider: one whose whereabouts could not be read is asked about
+    // again, rather than left standing at an enemy planet until a restart.
+    // Not repeated for the rest — a fleet away later on was sent by hand.
+    static READOPT: LazyLock<Mutex<Option<Vec<(String, u32)>>>> = LazyLock::new(|| Mutex::new(None));
+    let ask = READOPT.lock().map(|r| r.clone()).unwrap_or_default().unwrap_or_else(raider_list);
+    if !ask.is_empty() {
+        let unread = readopt_expeditions(&client, ask).await;
+        if let Ok(mut r) = READOPT.lock() {
+            *r = Some(unread);
+        }
     }
     supervise(app, &client, cfg, run).await;
 
@@ -698,6 +710,7 @@ async fn scan(
     let eligible: Vec<&Candidate> = board
         .iter()
         .filter(|c| c.blocked_by.is_none() && c.score >= cfg.min_score)
+        .filter(|c| DISPATCH_BACKOFF.ready(&c.planet_id))
         .collect();
     // Raiders choose with a raider's temperament. At temperature 0 this is the
     // top-scoring candidate, exactly as before; warmer spreads our pressure
@@ -710,10 +723,15 @@ async fn scan(
         // the temperament from that player's own profile instead of the role.
     )
     .map(|i| eligible[i])
-    .or_else(|| board
+    .or_else(|| eligible.first().copied())
+    .cloned();
+    // …and, should that one turn out to be out of reach, the rest in order.
+    let others: Vec<Candidate> = eligible
         .iter()
-        .find(|c| c.blocked_by.is_none() && c.score >= cfg.min_score))
-        .cloned();
+        .filter(|c| best.as_ref().is_none_or(|b| b.planet_id != c.planet_id))
+        .take(DISPATCH_TRIES - 1)
+        .map(|c| (*c).clone())
+        .collect();
     {
         let mut tally: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
         for c in &board {
@@ -761,7 +779,7 @@ async fn scan(
         return;
     };
 
-    let in_flight = ACTIVE.lock().map(|a| a.len()).unwrap_or(0);
+    let in_flight = ACTIVE.lock().map(|a| a.values().filter(|e| e.returning.is_none()).count()).unwrap_or(0);
     if in_flight >= cfg.max_concurrent_raids {
         run.blocked(format!(
             "{in_flight} raid(s) already in flight (max_concurrent_raids {})",
@@ -790,21 +808,52 @@ async fn scan(
         return;
     }
 
-    match dispatch(app, &client, cfg, &target).await {
-        Ok(msg) => {
-            run.acted();   // clears any blocked reason from an earlier scan
-            run.actions.fetch_add(1, Ordering::Relaxed);
-            crate::mcp::board_feed::push(app, crate::mcp::board_feed::Severity::Important, "auto_raid", msg);
-        }
-        Err(e) => {
-            run.errors.fetch_add(1, Ordering::Relaxed);
-            crate::mcp::telemetry::tlog(
-                "auto_raid",
-                crate::mcp::telemetry::Sev::Warn,
-                format!("dispatch to {} failed: {}", target.planet_id, e),
-            );
+    for target in std::iter::once(target).chain(others) {
+        match dispatch(app, &client, cfg, &target).await {
+            Dispatch::Sent(msg) => {
+                run.acted(); // clears any blocked reason from an earlier scan
+                run.actions.fetch_add(1, Ordering::Relaxed);
+                crate::mcp::board_feed::push(app, crate::mcp::board_feed::Severity::Important, "auto_raid", msg);
+                return;
+            }
+            Dispatch::NoRaider(why) => {
+                run.blocked(why);
+                return;
+            }
+            Dispatch::OutOfReach(why) => {
+                DISPATCH_BACKOFF.fail(&target.planet_id);
+                run.blocked(why.clone());
+                crate::mcp::telemetry::tlog(
+                    "auto_raid",
+                    crate::mcp::telemetry::Sev::Notice,
+                    format!("not dispatched to {}: {why}", target.planet_id),
+                );
+            }
+            Dispatch::Failed(e) => {
+                run.errors.fetch_add(1, Ordering::Relaxed);
+                run.blocked(format!("dispatch failed: {e}"));
+                crate::mcp::telemetry::tlog(
+                    "auto_raid",
+                    crate::mcp::telemetry::Sev::Warn,
+                    format!("dispatch to {} failed: {}", target.planet_id, e),
+                );
+                return;
+            }
         }
     }
+}
+
+/// Targets one scan may try before it gives up until the next.
+const DISPATCH_TRIES: usize = 5;
+
+enum Dispatch {
+    Sent(String),
+    /// Nobody can go anywhere; another target will not help.
+    NoRaider(String),
+    /// Nobody can usefully go HERE; another target may be reachable.
+    OutOfReach(String),
+    /// The send did not go through for a reason that is not about the target.
+    Failed(String),
 }
 
 /// Sweep the perception snapshot (or, before it loads, the chain's player
@@ -1267,11 +1316,40 @@ fn record_outcome(planet_id: &str, won: bool) {
 /// the raiding fleet is sent home by the chain, so a fleet found back at its
 /// own planet with the raid recorded against it is a win — anything else that
 /// ends an expedition is a failure for cooldown purposes.
+///
+/// Read from the raid_status FEED. This asked `raid/active/fleet`, which only
+/// ever returns raids still running, so no win could match and every one was
+/// booked as a failure.
 async fn expedition_won(client: &CosmosClient, ex: &Expedition) -> bool {
-    let Ok(raid) = client.guild.planet_raid_active_by_fleet(&ex.fleet_id).await else { return false };
-    let r = raid.as_array().and_then(|a| a.first()).cloned().unwrap_or(raid);
-    r.get("planet_id").and_then(|x| x.as_str()) == Some(ex.target_planet.as_str())
-        && r.get("status").and_then(|x| x.as_str()) == Some("raidSuccessful")
+    crate::mcp::guild_api::fetch_all_pages(
+        |page| client.guild.planet_activity_by_category("raid_status", page),
+        3,
+    )
+    .await
+    .map(|rows| seized(&rows, &ex.target_planet, &ex.fleet_id, ex.started_ms))
+    .unwrap_or(false)
+}
+
+/// Does the feed hold a `raidSuccessful` by this fleet on this planet since
+/// `since_ms`? The time bound keeps an earlier win here from counting twice.
+fn seized(rows: &[serde_json::Value], planet_id: &str, fleet_id: &str, since_ms: f64) -> bool {
+    rows.iter().any(|row| {
+        let detail = match row.get("detail") {
+            Some(serde_json::Value::String(s)) => serde_json::from_str(s).unwrap_or(serde_json::Value::Null),
+            Some(v) => v.clone(),
+            None => serde_json::Value::Null,
+        };
+        let is = |v: &serde_json::Value, k: &str, want: &str| v.get(k).and_then(|x| x.as_str()) == Some(want);
+        is(row, "category", "raid_status")
+            && (is(row, "planet_id", planet_id) || is(&detail, "planet_id", planet_id))
+            && is(&detail, "fleet_id", fleet_id)
+            && is(&detail, "status", "raidSuccessful")
+            && row
+                .get("time")
+                .and_then(|t| t.as_str())
+                .and_then(crate::mcp::onboarding::parse_ts)
+                .is_some_and(|t| t as f64 >= since_ms)
+    })
 }
 
 /// A raider's own combat hulls, reduced to what readiness needs. Fleet structs
@@ -1308,98 +1386,122 @@ async fn raider_hulls(
         .collect()
 }
 
-/// Send a raider to `target`. Phase C proper: pick an idle raider, move its
-/// fleet, and register the expedition for Phase D to supervise.
+/// Send a raider to `target`. Phase C proper: pick an idle raider that can
+/// hurt it, move its fleet, and register the expedition for Phase D to
+/// supervise. Every idle raider is tried: the preferred one being blind to
+/// this target, or refused the move, says nothing about the next.
 async fn dispatch(
     app: &tauri::AppHandle,
     client: &CosmosClient,
     cfg: &AutoRaidConfig,
     target: &Candidate,
-) -> Result<String, String> {
-    let (raider_pid, raider_idx) = pick_raider(client).await.ok_or_else(|| {
-        "no idle raider available (need a profile with `raids`, a live Command Ship, and a fleet on station)".to_string()
-    })?;
-    let (fleet_id, home_planet) = raider_location(client, &raider_pid)
-        .await
-        .ok_or_else(|| format!("could not resolve {}'s fleet", raider_pid))?;
+) -> Dispatch {
+    let _ = cfg;
+    let raiders = idle_raiders(client).await;
+    if raiders.is_empty() {
+        return Dispatch::NoRaider(
+            "no idle raider available (need a profile with `raids`, a live Command Ship, and a fleet on station)".to_string(),
+        );
+    }
+    let mut last = String::new();
+    for (raider_pid, raider_idx) in raiders {
+        let Some((fleet_id, home_planet)) = raider_location(client, &raider_pid).await else {
+            last = format!("could not resolve {raider_pid}'s fleet");
+            continue;
+        };
 
-    // Can this raider actually hurt the thing it is being sent to kill?
-    // Checked HERE rather than in `gate` because it depends on the raider that
-    // was picked, not on the target alone. Not optional: with this check
-    // switched off one raider flew 27 round trips to a planet it could not put
-    // a shot into, 54 minutes each, and fired nothing.
-    if !target.command_ambit.is_empty() {
-        let bit = crate::mcp::tools::format::ambit_bit(&target.command_ambit);
-        if bit != 0 {
-            let hulls = raider_hulls(client, &raider_pid, &fleet_id).await;
-            let r = crate::mcp::readiness::assess(&hulls, bit, true);
-            if r.blind_mask & bit != 0 {
-                let posture = r
-                    .per_ambit
-                    .first()
-                    .map(|a| a.posture.as_str())
-                    .unwrap_or("unreachable");
-                return Err(format!(
-                    "{raider_pid} has no viable shot into {} where {}'s Command Ship sits ({posture}) —                      the trip would leave its own planet raidable and never land a hit",
-                    target.command_ambit, target.planet_id
-                ));
+        // Can this raider actually hurt the thing it is being sent to kill?
+        // Checked HERE rather than in `gate` because it depends on the raider
+        // that was picked, not on the target alone. Not optional: with this
+        // check switched off one raider flew 27 round trips to a planet it
+        // could not put a shot into, 54 minutes each, and fired nothing.
+        if !target.command_ambit.is_empty() {
+            let bit = crate::mcp::tools::format::ambit_bit(&target.command_ambit);
+            if bit != 0 {
+                let hulls = raider_hulls(client, &raider_pid, &fleet_id).await;
+                let r = crate::mcp::readiness::assess(&hulls, bit, true);
+                if r.blind_mask & bit != 0 {
+                    let posture = r.per_ambit.first().map(|a| a.posture.as_str()).unwrap_or("unreachable");
+                    last = format!(
+                        "{raider_pid} has no viable shot into {} where {}'s Command Ship sits ({posture}) — \
+                         the trip would leave its own planet raidable and never land a hit",
+                        target.command_ambit, target.planet_id
+                    );
+                    continue;
+                }
             }
         }
+
+        let sent = crate::mcp::tx_retry::sign_with_retry(
+            app,
+            raider_idx,
+            "/structs.structs.MsgFleetMove",
+            json!({ "fleetId": fleet_id, "destinationLocationId": target.planet_id }),
+            &format!("auto_raid:{raider_pid}"),
+        )
+        .await;
+        if let Err(e) = &sent {
+            if crate::mcp::tx_retry::was_skipped(e) {
+                return Dispatch::Failed(e.clone());
+            }
+            if !crate::mcp::tx_retry::worth_retrying_soon(e) {
+                // A verdict on THIS raider's move.
+                DISPATCH_BACKOFF.fail(&raider_pid);
+                crate::mcp::telemetry::tlog(
+                    "auto_raid",
+                    crate::mcp::telemetry::Sev::Warn,
+                    format!("{raider_pid}'s move to {} refused: {e}", target.planet_id),
+                );
+                last = format!("{raider_pid}'s move was refused: {e}");
+                continue;
+            }
+            // Nobody heard the outcome, so the fleet may be on its way: it is
+            // supervised as if it were, and a second one is not sent after it.
+        }
+
+        TARGET_COOLDOWN.lock().unwrap().insert(target.planet_id.clone(), now_millis());
+        HISTORY.lock().unwrap().entry(target.planet_id.clone()).or_insert((0, 0)).0 += 1;
+        ACTIVE.lock().unwrap().insert(
+            raider_pid.clone(),
+            Expedition {
+                raider_player: raider_pid.clone(),
+                raider_index: raider_idx,
+                fleet_id,
+                home_planet,
+                target_planet: target.planet_id.clone(),
+                target_player: target.player_id.to_string(),
+                started_ms: now_millis(),
+                hashing: false,
+                ongoing_since_block: None,
+                siege_shots: 0,
+                idle_rounds: 0,
+                cmd_moves: 0,
+                returning: None,
+                note: if sent.is_ok() { "en route".into() } else { "en route (move unconfirmed)".into() },
+            },
+        );
+        return match sent {
+            Ok(_) => Dispatch::Sent(format!(
+                "raider {} dispatched to {} ({}) — {:.0} ore, {}",
+                raider_pid, target.planet_id, target.name, target.stored_ore, target.vulnerability_reason
+            )),
+            Err(e) => Dispatch::Failed(e),
+        };
     }
-
-    crate::mcp::tx_retry::sign_with_retry(
-        app,
-        raider_idx,
-        "/structs.structs.MsgFleetMove",
-        json!({ "fleetId": fleet_id, "destinationLocationId": target.planet_id }),
-        &format!("auto_raid:{raider_pid}"),
-    )
-    .await?;
-
-    TARGET_COOLDOWN
-        .lock()
-        .unwrap()
-        .insert(target.planet_id.clone(), now_millis());
-    HISTORY
-        .lock()
-        .unwrap()
-        .entry(target.planet_id.clone())
-        .or_insert((0, 0))
-        .0 += 1;
-    ACTIVE.lock().unwrap().insert(
-        raider_pid.clone(),
-        Expedition {
-            raider_player: raider_pid.clone(),
-            raider_index: raider_idx,
-            fleet_id,
-            home_planet,
-            target_planet: target.planet_id.clone(),
-            target_player: target.player_id.to_string(),
-            started_ms: now_millis(),
-            hashing: false,
-            ongoing_since_block: None,
-            siege_shots: 0,
-            idle_rounds: 0,
-            note: "en route".into(),
-        },
-    );
-    Ok(format!(
-        "raider {} dispatched to {} ({}) — {:.0} ore, {}",
-        raider_pid, target.planet_id, target.name, target.stored_ore, target.vulnerability_reason
-    ))
+    Dispatch::OutOfReach(last)
 }
 
-/// An idle raider: role `Raider`, fleet on station at its own planet, Command
+/// Idle raiders, best first: role `Raider`, fleet on station at its own planet, Command
 /// Ship alive, and not already on an expedition.
-async fn pick_raider(client: &CosmosClient) -> Option<(String, u32)> {
+async fn idle_raiders(client: &CosmosClient) -> Vec<(String, u32)> {
     let busy: Vec<String> = ACTIVE.lock().map(|a| a.keys().cloned().collect()).unwrap_or_default();
     let candidates: Vec<(String, u32)> = {
-        let reg = crate::mcp::virtual_players::REGISTRY.read().ok()?;
+        let Ok(reg) = crate::mcp::virtual_players::REGISTRY.read() else { return Vec::new() };
         reg.players
             .iter()
             .filter(|p| raids(p))
             .filter_map(|p| p.player_id.clone().map(|id| (id, p.index)))
-            .filter(|(id, _)| !busy.contains(id))
+            .filter(|(id, _)| !busy.contains(id) && DISPATCH_BACKOFF.ready(id))
             .collect()
     };
     // Eligible raiders with the ore they are carrying, so the pick can prefer the
@@ -1470,7 +1572,7 @@ async fn pick_raider(client: &CosmosClient) -> Option<(String, u32)> {
         b.3.cmp(&a.3)
             .then(a.2.partial_cmp(&b.2).unwrap_or(std::cmp::Ordering::Equal))
     });
-    eligible.into_iter().next().map(|(pid, idx, _, _)| (pid, idx))
+    eligible.into_iter().map(|(pid, idx, _, _)| (pid, idx)).collect()
 }
 
 async fn raider_location(client: &CosmosClient, pid: &str) -> Option<(String, String)> {
@@ -1495,21 +1597,22 @@ async fn raider_location(client: &CosmosClient, pid: &str) -> Option<(String, St
 /// than its own planet is, by definition, on an expedition. Re-created entries
 /// carry `hashing: false`, which is exactly what makes `supervise` restart the
 /// proof (or abort and sail home) on the very next pass.
-async fn readopt_expeditions(client: &CosmosClient) {
-    let raiders: Vec<(String, u32)> = {
-        let Ok(reg) = crate::mcp::virtual_players::REGISTRY.read() else { return };
-        reg.players
-            .iter()
-            .filter(|p| raids(p))
-            .filter_map(|p| p.player_id.clone().map(|id| (id, p.index)))
-            .collect()
-    };
+///
+/// Returns the raiders that could not be read, to be asked about again.
+async fn readopt_expeditions(client: &CosmosClient, raiders: Vec<(String, u32)>) -> Vec<(String, u32)> {
+    let mut unread = Vec::new();
     for (pid, idx) in raiders {
         if ACTIVE.lock().map(|a| a.contains_key(&pid)).unwrap_or(true) {
             continue; // already tracked
         }
-        let Some((fleet_id, home_planet)) = raider_location(client, &pid).await else { continue };
-        let Ok(fl) = client.entity("fleet", &fleet_id).await else { continue };
+        let Some((fleet_id, home_planet)) = raider_location(client, &pid).await else {
+            unread.push((pid, idx));
+            continue;
+        };
+        let Ok(fl) = client.entity("fleet", &fleet_id).await else {
+            unread.push((pid, idx));
+            continue;
+        };
         let where_now = fl
             .get("Fleet")
             .and_then(|x| x.get("locationId"))
@@ -1547,6 +1650,8 @@ async fn readopt_expeditions(client: &CosmosClient) {
                 ongoing_since_block: None,
                 siege_shots: 0,
                 idle_rounds: 0,
+                cmd_moves: 0,
+                returning: None,
                 note: "re-adopted after restart".into(),
             },
         );
@@ -1556,6 +1661,44 @@ async fn readopt_expeditions(client: &CosmosClient) {
             format!("re-adopted in-flight expedition: {pid} is at {where_now}, not home"),
         );
     }
+    unread
+}
+
+fn raider_list() -> Vec<(String, u32)> {
+    crate::mcp::virtual_players::REGISTRY
+        .read()
+        .map(|reg| {
+            reg.players
+                .iter()
+                .filter(|p| raids(p))
+                .filter_map(|p| p.player_id.clone().map(|id| (id, p.index)))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Raiders whose recall did not go through.
+static RECALL_BACKOFF: LazyLock<crate::mcp::loop_util::Backoff> =
+    LazyLock::new(|| crate::mcp::loop_util::Backoff::new(60_000.0, 10.0 * 60_000.0));
+/// Targets a dispatch could not be made to, and raiders whose move was refused.
+static DISPATCH_BACKOFF: LazyLock<crate::mcp::loop_util::Backoff> =
+    LazyLock::new(|| crate::mcp::loop_util::Backoff::new(10.0 * 60_000.0, 2.0 * 3_600_000.0));
+
+/// Order the fleet home. Backs off from the moment it is asked, so a recall
+/// that was accepted has time to land before it is asked again.
+async fn send_home(app: &tauri::AppHandle, ex: &Expedition) -> Result<(), String> {
+    RECALL_BACKOFF.fail(&ex.raider_player);
+    crate::mcp::tx_retry::sign_with_retry(
+        app,
+        ex.raider_index,
+        "/structs.structs.MsgFleetMove",
+        json!({ "fleetId": ex.fleet_id, "destinationLocationId": ex.home_planet }),
+        // NOT `auto_raid:` — this is the deadline-bound retreat.
+        // See tx_gate::classify.
+        &format!("auto_raid_abort:{}", ex.raider_player),
+    )
+    .await
+    .map(|_| ())
 }
 
 /// Phase D — watch every expedition: start the proof when the clock arms, and
@@ -1573,6 +1716,27 @@ async fn supervise(
         .unwrap_or(0);
 
     for mut ex in expeditions {
+        // ── Coming home. ── Tracked until it is SEEN there: a recall that
+        // failed used to be discarded and the fleet forgotten, stranded at the
+        // enemy planet with its own planet raidable until the app restarted.
+        if let Some(why) = ex.returning.clone() {
+            let Ok(fl) = client.entity("fleet", &ex.fleet_id).await else { continue };
+            let here = fl.get("Fleet").and_then(|f| f.get("locationId")).and_then(|x| x.as_str()).unwrap_or_default();
+            if here == ex.home_planet {
+                RECALL_BACKOFF.clear(&ex.raider_player);
+                ACTIVE.lock().unwrap().remove(&ex.raider_player);
+            } else if RECALL_BACKOFF.ready(&ex.raider_player) {
+                if let Err(e) = send_home(app, &ex).await {
+                    crate::mcp::telemetry::tlog(
+                        "auto_raid",
+                        crate::mcp::telemetry::Sev::Warn,
+                        format!("{} is still at {here} ({why}); recall failed, will retry: {e}", ex.raider_player),
+                    );
+                }
+            }
+            continue;
+        }
+
         let elapsed_mins = (now_millis() - ex.started_ms) / 60_000.0;
 
         // ── Abort conditions, cheapest first. ──
@@ -1632,15 +1796,16 @@ async fn supervise(
             // The shield comes back with the clock because the raid proof's
             // difficulty decays over `planetaryShield` blocks — see
             // `start_raid_proof`, which needs it as the decay RANGE.
-            let (clock, shield) = client
-                .entity("planet", &ex.target_planet)
-                .await
-                .ok()
-                .map(|e| {
-                    let v = crate::mcp::types::EntityView::new(&e);
-                    (v.planet_block("blockStartRaid").get(), v.planet_attr_u64("planetaryShield"))
-                })
-                .unwrap_or((0, 0));
+            // Unread is not "clock unset": that counts toward giving up, and
+            // would recall a fleet whose proof is grinding. Try next scan.
+            let Ok(planet) = client.entity("planet", &ex.target_planet).await else {
+                ACTIVE.lock().unwrap().insert(ex.raider_player.clone(), ex);
+                continue;
+            };
+            let (clock, shield) = {
+                let v = crate::mcp::types::EntityView::new(&planet);
+                (v.planet_block("blockStartRaid").get(), v.planet_attr_u64("planetaryShield"))
+            };
             if clock == 0 {
                 // Siege: the clock stays unset while the defender's Command Ship
                 // is up, so every posture but cautious spends the trip trying to
@@ -1649,13 +1814,22 @@ async fn supervise(
                 // all: a round that cannot shoot is counted, and three in a row
                 // end the trip. That is the failure the record is full of.
                 if cfg.sieges() {
-                    let spent = siege_round(app, client, &ex).await;
-                    if spent > 0 {
-                        ex.siege_shots += spent;
-                        ex.idle_rounds = 0;
-                        ex.note = format!("siege — {} shots spent", ex.siege_shots);
-                        ACTIVE.lock().unwrap().insert(ex.raider_player.clone(), ex);
-                        continue;
+                    match siege_round(app, client, &ex).await {
+                        Siege::Fired => {
+                            ex.siege_shots += 1;
+                            ex.idle_rounds = 0;
+                            ex.note = format!("siege — {} shots spent", ex.siege_shots);
+                            ACTIVE.lock().unwrap().insert(ex.raider_player.clone(), ex);
+                            continue;
+                        }
+                        Siege::Moved(ambit) => {
+                            ex.cmd_moves += 1;
+                            ex.idle_rounds = 0;
+                            ex.note = format!("siege — Command Ship moved to {ambit}");
+                            ACTIVE.lock().unwrap().insert(ex.raider_player.clone(), ex);
+                            continue;
+                        }
+                        Siege::Idle => {}
                     }
                     ex.idle_rounds += 1;
                     if ex.idle_rounds >= SIEGE_IDLE_ROUNDS {
@@ -1674,6 +1848,7 @@ async fn supervise(
                 }
             } else {
                 ex.ongoing_since_block = None;
+                ex.idle_rounds = 0; // consecutive, not lifetime
                 // ── Slot ownership. A planet runs ONE raid, and the chain
                 // auto-promotes the next co-located fleet in the SAME block
                 // when the holder leaves — ignoring team. An armed clock does
@@ -1767,26 +1942,21 @@ async fn supervise(
                 // enemy planet is a queued loss, and its own planet is raidable
                 // for as long as it is away. Skipped only when the chain has
                 // already returned it.
-                if !why.contains("home") {
-                    let _ = crate::mcp::tx_retry::sign_with_retry(
-                        app,
-                        ex.raider_index,
-                        "/structs.structs.MsgFleetMove",
-                        json!({ "fleetId": ex.fleet_id, "destinationLocationId": ex.home_planet }),
-                        // NOT `auto_raid:` — this is the deadline-bound retreat.
-                        // See tx_gate::classify.
-                        &format!("auto_raid_abort:{}", ex.raider_player),
-                    )
-                    .await;
-                }
                 record_outcome(&ex.target_planet, won);
-                ACTIVE.lock().unwrap().remove(&ex.raider_player);
-                crate::mcp::board_feed::push(
-                    app,
-                    crate::mcp::board_feed::Severity::Notice,
-                    "auto_raid",
-                    format!("{} recalled from {} — {}", ex.raider_player, ex.target_planet, why),
-                );
+                let at_home = why.contains("home");
+                let failed = if at_home { None } else { send_home(app, &ex).await.err() };
+                let said = match &failed {
+                    None => format!("{} recalled from {} — {}", ex.raider_player, ex.target_planet, why),
+                    Some(e) => format!("{} could not be recalled from {} ({}), retrying: {}", ex.raider_player, ex.target_planet, why, e),
+                };
+                if at_home {
+                    ACTIVE.lock().unwrap().remove(&ex.raider_player);
+                } else {
+                    ex.note = format!("returning — {why}");
+                    ex.returning = Some(why);
+                    ACTIVE.lock().unwrap().insert(ex.raider_player.clone(), ex);
+                }
+                crate::mcp::board_feed::push(app, crate::mcp::board_feed::Severity::Notice, "auto_raid", said);
             }
             None => {
                 ACTIVE.lock().unwrap().insert(ex.raider_player.clone(), ex);
@@ -1798,7 +1968,11 @@ async fn supervise(
 /// One round of the siege kill-chain: fire the raider's own co-located structs
 /// at the defender's Command Ship (or, when a same-ambit blocker shields it, at
 /// that blocker first — `structs_strike`'s STRIP phase). Killing the Command
-/// Ship is what arms the raid clock. Returns how many shots were actually spent.
+/// Ship is what arms the raid clock.
+///
+/// When nothing reaches that target, our own Command Ship goes to it: the one
+/// hull that can stand in any ambit and shoots whatever shares it. Only where
+/// it would win the whole exchange — see [`crate::mcp::command_ship`].
 ///
 /// Only the raider's own structs take part: they are the ones parked at the
 /// target planet, and the whole point of the raider role is that these are the
@@ -1807,23 +1981,23 @@ async fn siege_round(
     app: &tauri::AppHandle,
     client: &CosmosClient,
     ex: &Expedition,
-) -> usize {
+) -> Siege {
     // Re-resolve the defender's Command Ship each round: it may have been
     // rebuilt, or already killed by the previous round.
-    let Ok(pl) = client.entity("player", &ex.target_player).await else { return 0 };
+    let Ok(pl) = client.entity("player", &ex.target_player).await else { return Siege::Idle };
     let fleet = pl
         .get("Player")
         .and_then(|p| p.get("fleetId"))
         .and_then(|x| x.as_str())
         .filter(|s| !s.is_empty());
-    let Some(fleet) = fleet else { return 0 };
-    let Ok(fl) = client.entity("fleet", fleet).await else { return 0 };
+    let Some(fleet) = fleet else { return Siege::Idle };
+    let Ok(fl) = client.entity("fleet", fleet).await else { return Siege::Idle };
     let cmd = fl
         .get("Fleet")
         .and_then(|f| f.get("commandStruct"))
         .and_then(|x| x.as_str())
         .filter(|s| !s.is_empty());
-    let Some(cmd) = cmd else { return 0 }; // already down — the clock should arm
+    let Some(cmd) = cmd else { return Siege::Idle }; // already down — the clock should arm
     if client
         .entity("struct", cmd)
         .await
@@ -1832,7 +2006,7 @@ async fn siege_round(
         })
         .unwrap_or(false)
     {
-        return 0;
+        return Siege::Idle;
     }
 
     // Kill-chain: you cannot damage the Command Ship through a living
@@ -1850,9 +2024,43 @@ async fn siege_round(
             }
             t
         }
+        // Pruned = already destroyed: there is nothing to shoot.
+        Err(e) if crate::mcp::cosmos_client::is_absent_object(&e) => return Siege::Idle,
         Err(_) => cmd.to_string(),
     };
-    fire_best_at(app, client, ex, &fire_at, "siege").await
+    match fire_best_at(app, client, ex, &fire_at, "siege").await {
+        Shot::Fired => Siege::Fired,
+        Shot::NoReach if ex.cmd_moves < crate::mcp::command_ship::MAX_MOVES => {
+            let ship = crate::mcp::command_ship::Ship {
+                player: &ex.raider_player,
+                index: ex.raider_index,
+                fleet: &ex.fleet_id,
+                planet: &ex.target_planet,
+                component: "auto_raid",
+                context: format!("auto_raid_siege:{}", ex.raider_player),
+            };
+            match crate::mcp::command_ship::bring(app, client, &ship, &fire_at).await {
+                Some(ambit) => Siege::Moved(ambit),
+                None => Siege::Idle,
+            }
+        }
+        Shot::NoReach => Siege::Idle,
+        Shot::Failed => Siege::Idle,
+    }
+}
+
+enum Siege {
+    Fired,
+    /// Our Command Ship changed ambit to reach the target; it fires next round.
+    Moved(&'static str),
+    Idle,
+}
+
+enum Shot {
+    Fired,
+    /// Nothing of the raider's can hit it from where it stands.
+    NoReach,
+    Failed,
 }
 
 /// While the raid proof is grinding, every planetary-shield contributor the
@@ -1868,7 +2076,7 @@ async fn shield_grind_round(
     ex: &Expedition,
 ) -> usize {
     let structs = crate::mcp::loop_util::player_structs(client, &ex.target_player).await;
-    let best_shield = {
+    let contributors = {
         let gs = crate::game_state::GAME_STATE.read().unwrap();
         let mut candidates: Vec<(u64, String)> = structs
             .iter()
@@ -1892,44 +2100,52 @@ async fn shield_grind_round(
             })
             .collect();
         candidates.sort_by(|a, b| b.0.cmp(&a.0));
-        candidates.into_iter().next()
+        candidates
     };
-    let Some((contrib, target)) = best_shield else { return 0 };
-    crate::mcp::telemetry::tlog(
-        "auto_raid",
-        crate::mcp::telemetry::Sev::Info,
-        format!(
-            "shield grind: {} targeting {} (−{} planetary shield on kill → shorter proof)",
-            ex.raider_player, target, contrib
-        ),
-    );
-    fire_best_at(app, client, ex, &target, "shield-grind").await
+    // Biggest first; one nothing of ours reaches must not hide the rest.
+    for (contrib, target) in contributors.into_iter().take(4) {
+        if matches!(fire_best_at(app, client, ex, &target, "shield-grind").await, Shot::Fired) {
+            crate::mcp::telemetry::tlog(
+                "auto_raid",
+                crate::mcp::telemetry::Sev::Info,
+                format!(
+                    "shield grind: {} targeting {} (−{} planetary shield on kill → shorter proof)",
+                    ex.raider_player, target, contrib
+                ),
+            );
+            return 1;
+        }
+    }
+    0
 }
 
 /// Fire the raider's best co-located shooter (evasion-, armour- and
-/// counter-aware via `plan_strike`) once at `target`. Returns shots spent.
+/// counter-aware via `plan_strike`) once at `target`.
 async fn fire_best_at(
     app: &tauri::AppHandle,
     client: &CosmosClient,
     ex: &Expedition,
     target: &str,
     label: &str,
-) -> usize {
-    let Ok(plan) = crate::mcp::tools::intel::plan_strike(
+) -> Shot {
+    let Ok(mut plan) = crate::mcp::tools::intel::plan_strike(
         client,
         &json!({ "target": target, "players": [ex.raider_player.clone()] }),
     )
     .await
     else {
-        return 0;
+        return Shot::Failed;
     };
+    crate::mcp::tools::intel::keep_safe_command_shots(client, &mut plan).await;
     // One shot per player per charge cycle, best (evasion- and counter-aware)
     // first. Bounded by the expedition's give-up timer, not a shot count.
     let mut shots: Vec<&crate::mcp::tools::intel::StrikeRow> =
         plan.rows.iter().filter(|r| r.reachable).collect();
     shots.sort_by(|a, b| {
-        a.counter_risk
-            .cmp(&b.counter_risk)
+        // The Command Ship last: it fires when nothing else safely can.
+        a.is_command
+            .cmp(&b.is_command)
+            .then(a.counter_risk.cmp(&b.counter_risk))
             .then(b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal))
     });
     // Survival is a RANKING, not a filter: prefer a shooter that outlives its
@@ -1950,7 +2166,7 @@ async fn fire_best_at(
         break;
     }
     let sacrificial = best.is_none() && doomed_fallback.is_some();
-    let Some(best) = best.or(doomed_fallback) else { return 0 };
+    let Some(best) = best.or(doomed_fallback) else { return Shot::NoReach };
     if sacrificial {
         crate::mcp::telemetry::tlog(
             "auto_raid",
@@ -1989,7 +2205,7 @@ async fn fire_best_at(
                     label, ex.raider_player, best.struct_id, target, best.expected_dmg, best.counter_exposure
                 ),
             );
-            1
+            Shot::Fired
         }
         Err(e) => {
             crate::mcp::telemetry::tlog(
@@ -1997,7 +2213,7 @@ async fn fire_best_at(
                 crate::mcp::telemetry::Sev::Warn,
                 format!("{} shot failed for {}: {}", label, ex.raider_player, e),
             );
-            0
+            Shot::Failed
         }
     }
 }
@@ -2107,6 +2323,22 @@ async fn start_raid_proof(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A win is read from the feed, for this fleet, on this trip.
+    #[test]
+    fn a_seize_is_recognised_once() {
+        let row = |time: &str, status: &str, fleet: &str| {
+            json!({ "category": "raid_status", "planet_id": "2-855", "time": time,
+                    "detail": json!({ "status": status, "fleet_id": fleet, "planet_id": "2-855" }).to_string() })
+        };
+        let t0 = crate::mcp::onboarding::parse_ts("2026-07-28 14:00:00+00").unwrap() as f64;
+        let won = row("2026-07-28 14:45:02.5+00", "raidSuccessful", "9-471");
+        assert!(seized(&[won.clone()], "2-855", "9-471", t0));
+        assert!(!seized(&[won.clone()], "2-855", "9-47", t0), "whole-id match");
+        assert!(!seized(&[won.clone()], "2-85", "9-471", t0));
+        assert!(!seized(&[won], "2-855", "9-471", t0 + 3_600_000.0), "an earlier trip's win");
+        assert!(!seized(&[row("2026-07-28 14:45:02+00", "attackerDefeated", "9-471")], "2-855", "9-471", t0));
+    }
 
     #[test]
     fn completed_planets_are_not_raid_targets() {

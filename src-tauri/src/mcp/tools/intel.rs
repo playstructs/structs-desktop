@@ -478,7 +478,7 @@ async fn query_simulate(client: &CosmosClient, args: &Value) -> Vec<Content> {
         None => return vec![Content::text("simulate: attacker struct type unknown (combat fields not synced?).".to_string())],
     };
 
-    let w = WeaponStats::from_type(att_type, secondary);
+    let w = WeaponStats::from_type(att_type, secondary).standing_in(att_ambit_bit);
     if w.shots == 0 && w.damage == 0 {
         return vec![Content::text(format!(
             "simulate: no {} weapon data for {} — combat fields may not be synced yet (reload the app).",
@@ -589,6 +589,8 @@ pub struct StrikeRow {
     /// HD index for façade signing; `None` for the primary (webview queue).
     pub hd_index: Option<u32>,
     pub struct_id: String,
+    /// A Command Ship: losing it loses the raid, or opens the planet.
+    pub is_command: bool,
     pub weapon: String,
     /// Evasion-aware expected damage — the honest, chain-derived number.
     pub expected_dmg: f64,
@@ -633,6 +635,68 @@ pub async fn shot_is_suicidal(client: &CosmosClient, row: &StrikeRow) -> bool {
         e.get("structAttributes").and_then(|a| a.get("health")),
     );
     hp > 0.0 && hp <= row.counter_risk as f64
+}
+
+/// Drop Command Ship shots that could cost the Command Ship. The one hull the
+/// "trade it for pressure" doctrine does not cover: losing it ends our raid, or
+/// opens our planet. It starts only what it can finish — judged on live health
+/// to the target's death, so it joins in once others have worn a target down —
+/// and anything about that which cannot be read counts as no.
+pub async fn keep_safe_command_shots(client: &CosmosClient, plan: &mut StrikePlan) {
+    if !plan.rows.iter().any(|r| r.is_command && r.reachable) {
+        return;
+    }
+    let mut keep = Vec::with_capacity(plan.rows.len());
+    for row in std::mem::take(&mut plan.rows) {
+        if row.is_command && row.reachable {
+            let safe = match (&plan.target_id, client.query_entity("struct", &row.struct_id).await) {
+                (Some(target), Ok(e)) => {
+                    let hp = crate::mcp::loop_util::parse_f64(e.get("structAttributes").and_then(|a| a.get("health")));
+                    shot_cost(client, target, row.att_ambit_bit)
+                        .await
+                        .is_ok_and(|c| crate::mcp::combat::survives_exchange(hp, c, 0.0, plan.tgt_hp, row.expected_dmg))
+                }
+                _ => false,
+            };
+            if !safe {
+                continue;
+            }
+        }
+        keep.push(row);
+    }
+    plan.rows = keep;
+}
+
+/// What a countered shot at `target`, fired from `att_bit`, costs the shooter.
+/// Strict: a defender that cannot be read is an `Err`, not one that is absent.
+pub async fn shot_cost(client: &CosmosClient, target: &str, att_bit: u64) -> Result<crate::mcp::combat::ShotCost, String> {
+    use crate::mcp::combat::{counter_risk, ShotCost};
+    let mut cost = ShotCost::default();
+    for id in defenders_of(client, target).await? {
+        if let Some(t) = threat_of(client, &id).await? {
+            cost.every += counter_risk(&[t], att_bit);
+        }
+    }
+    if let Some(t) = threat_of(client, target).await? {
+        cost.unless_killed = counter_risk(&[t], att_bit);
+    }
+    // The planet's cannons fire at whoever attacks on it.
+    let e = client.query_entity("struct", target).await?;
+    let loc = e.pointer("/Struct/locationId").and_then(|x| x.as_str()).unwrap_or("").to_string();
+    let planet = match e.pointer("/Struct/locationType").and_then(|x| x.as_str()) {
+        Some("planet") => loc,
+        Some("fleet") => client
+            .query_entity("fleet", &loc)
+            .await?
+            .pointer("/Fleet/locationId")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string(),
+        _ => return Err(format!("{target} stands nowhere known")),
+    };
+    let p = client.query_entity("planet", &planet).await?;
+    cost.every += crate::mcp::loop_util::read_u64_field(p.get("planetAttributes"), "defensiveCannonQuantity");
+    Ok(cost)
 }
 
 /// A computed team strike plan against a resolved target.
@@ -928,8 +992,8 @@ pub async fn plan_strike(client: &CosmosClient, args: &Value) -> Result<StrikePl
         let gs = GAME_STATE.read().unwrap();
         for (player, player_id, hd_index, id, type_id, att_ambit) in &attackers {
             let Some(t) = gs.struct_types.get(type_id) else { continue };
-            let prim = WeaponStats::from_type(t, false);
-            let sec = WeaponStats::from_type(t, true);
+            let prim = WeaponStats::from_type(t, false).standing_in(*att_ambit);
+            let sec = WeaponStats::from_type(t, true).standing_in(*att_ambit);
             if prim.ambits == 0 && sec.ambits == 0 {
                 continue; // non-combat struct
             }
@@ -990,6 +1054,7 @@ pub async fn plan_strike(client: &CosmosClient, args: &Value) -> Result<StrikePl
                 player_id: player_id.clone(),
                 hd_index: *hd_index,
                 struct_id: id.clone(),
+                is_command: t.trigger_raid_defeat_by_destruction == Some(true),
                 weapon: wlabel.to_string(),
                 expected_dmg: r.expected_damage,
                 reachable: r.reachable,
@@ -1021,6 +1086,21 @@ pub async fn plan_strike(client: &CosmosClient, args: &Value) -> Result<StrikePl
     })
 }
 
+/// Structs registered to defend `target`: the guild's table, or the app's own
+/// snapshot when that cannot be read. `Err` when neither can say — an unread
+/// defence is not an undefended target.
+pub async fn defenders_of(client: &CosmosClient, target: &str) -> Result<Vec<String>, String> {
+    match client.guild.struct_defender_by_protected(target, 1).await {
+        Ok(page) => Ok(page
+            .items
+            .iter()
+            .filter_map(|d| d.get("defending_struct_id").and_then(|x| x.as_str()).map(String::from))
+            .collect()),
+        Err(e) => crate::mcp::perception::defenders_of(target)
+            .ok_or_else(|| format!("{target}'s defenders could not be read: {e}")),
+    }
+}
+
 /// Every live struct registered to defend `target` (plus the target itself —
 /// it counters too) as [`DefenderThreat`]s: weapon reach, own ambit, and BOTH
 /// counter values. Feeds `counter_free_ambits` / `counter_exposure` (via the
@@ -1030,56 +1110,63 @@ pub async fn defender_threats(
     target: &str,
 ) -> Vec<crate::mcp::combat::DefenderThreat> {
     let mut ids: Vec<String> = vec![target.to_string()];
-    if let Ok(page) = client.guild.struct_defender_by_protected(target, 1).await {
-        for d in page.items.iter() {
-            if let Some(id) = d.get("defending_struct_id").and_then(|x| x.as_str()) {
-                ids.push(id.to_string());
-            }
-        }
-    }
+    ids.extend(defenders_of(client, target).await.unwrap_or_default());
     let mut threats = Vec::new();
     for id in ids {
-        let Ok(e) = client.query_entity("struct", &id).await else { continue };
-        if crate::mcp::loop_util::parse_bool(
-            e.get("structAttributes").and_then(|x| x.get("isDestroyed")),
-        ) {
-            continue;
-        }
-        let type_id = e
-            .get("Struct")
-            .and_then(|s| s.get("type"))
-            .map(|x| match x {
-                Value::String(s) => s.clone(),
-                other => other.to_string(),
-            })
-            .unwrap_or_default();
-        let ambit_bit = e
-            .get("Struct")
-            .and_then(|s| s.get("operatingAmbit"))
-            .and_then(|x| x.as_str())
-            .map(crate::mcp::tools::format::ambit_bit)
-            .unwrap_or(0);
-        let gs = GAME_STATE.read().unwrap();
-        if let Some(t) = gs.struct_types.get(&type_id) {
-            let counter = t.counter_attack.unwrap_or(0);
-            let counter_same = t.counter_attack_same_ambit.unwrap_or(0);
-            // A struct with no counter value can't punish anyone regardless of
-            // reach (Mobile Artillery's indirectCombatModule, unarmed planetary
-            // structs) — it must not make an ambit look covered.
-            if counter == 0 && counter_same == 0 {
-                continue;
-            }
-            let mask = t.primary_weapon_ambits.unwrap_or(0) | t.secondary_weapon_ambits.unwrap_or(0);
-            // Same-ambit counters are NOT weapon-reach-gated (the Command
-            // Ship's mask reaches nothing real, yet it counters same-ambit
-            // for 2 every time) — so a zero mask with a same-ambit value is
-            // still a threat.
-            if mask != 0 || counter_same > 0 {
-                threats.push(crate::mcp::combat::DefenderThreat { mask, ambit_bit, counter, counter_same });
-            }
+        if let Ok(Some(t)) = threat_of(client, &id).await {
+            threats.push(t);
         }
     }
     threats
+}
+
+/// One struct as a counter threat; `None` when it can punish nobody (gone,
+/// destroyed, or no counter value).
+async fn threat_of(client: &CosmosClient, id: &str) -> Result<Option<crate::mcp::combat::DefenderThreat>, String> {
+    let e = match client.query_entity("struct", id).await {
+        Ok(e) => e,
+        Err(e) if crate::mcp::cosmos_client::is_absent_object(&e) => return Ok(None),
+        Err(e) => return Err(e),
+    };
+    if crate::mcp::loop_util::parse_bool(
+        e.get("structAttributes").and_then(|x| x.get("isDestroyed")),
+    ) {
+        return Ok(None);
+    }
+    let type_id = e
+        .get("Struct")
+        .and_then(|s| s.get("type"))
+        .map(|x| match x {
+            Value::String(s) => s.clone(),
+            other => other.to_string(),
+        })
+        .unwrap_or_default();
+    let ambit_bit = e
+        .get("Struct")
+        .and_then(|s| s.get("operatingAmbit"))
+        .and_then(|x| x.as_str())
+        .map(crate::mcp::tools::format::ambit_bit)
+        .unwrap_or(0);
+    let gs = GAME_STATE.read().unwrap();
+    if let Some(t) = gs.struct_types.get(&type_id) {
+        let counter = t.counter_attack.unwrap_or(0);
+        let counter_same = t.counter_attack_same_ambit.unwrap_or(0);
+        // A struct with no counter value can't punish anyone regardless of
+        // reach (Mobile Artillery's indirectCombatModule, unarmed planetary
+        // structs) — it must not make an ambit look covered.
+        if counter == 0 && counter_same == 0 {
+            return Ok(None);
+        }
+        let mask = t.primary_weapon_ambits.unwrap_or(0) | t.secondary_weapon_ambits.unwrap_or(0);
+        // Same-ambit counters are NOT weapon-reach-gated (the Command
+        // Ship's mask reaches nothing real, yet it counters same-ambit
+        // for 2 every time) — so a zero mask with a same-ambit value is
+        // still a threat.
+        if mask != 0 || counter_same > 0 {
+            return Ok(Some(crate::mcp::combat::DefenderThreat { mask, ambit_bit, counter, counter_same }));
+        }
+    }
+    Ok(None)
 }
 
 /// `intel.strike_options` — team-wide strike planner (display). Reports which of
@@ -2489,6 +2576,17 @@ async fn query_is_active(client: &CosmosClient, args: &Value) -> Vec<Content> {
 async fn query_market(client: &CosmosClient, args: &Value) -> Vec<Content> {
     let denom = args.get("denom").and_then(|v| v.as_str());
 
+    // The guild keeps rows for providers and agreements the chain has closed.
+    let live_ids = |rows: Vec<Value>| -> std::collections::HashSet<String> {
+        rows.iter().filter_map(|r| r.get("id").and_then(|v| v.as_str()).map(String::from)).collect()
+    };
+    let live_providers = client.list_all_entities("provider", "Provider").await.ok().map(live_ids);
+    let live_agreements = client.list_all_entities("agreement", "Agreement").await.ok().map(live_ids);
+    let is_live = |set: &Option<std::collections::HashSet<String>>, row: &Value| match (set, row.get("id").and_then(|v| v.as_str())) {
+        (Some(s), Some(id)) => s.contains(id),
+        _ => true, // could not check
+    };
+
     let providers_res = match denom {
         Some(d) => client.guild.provider_by_denom(d, 1).await,
         None => client.guild.provider_all(1).await,
@@ -2506,8 +2604,9 @@ async fn query_market(client: &CosmosClient, args: &Value) -> Vec<Content> {
 
     match providers_res {
         Ok(page) => {
-            out.push_str(&format!("Providers offering capacity: {}\n", page.items.len()));
-            for p in page.items.iter().take(5) {
+            let open: Vec<&Value> = page.items.iter().filter(|p| is_live(&live_providers, p)).collect();
+            out.push_str(&format!("Providers offering capacity: {}\n", open.len()));
+            for p in open.into_iter().take(5) {
                 let owner = p.get("owner").and_then(|v| v.as_str()).unwrap_or("?");
                 let cap = p.get("capacity_maximum").and_then(|v| v.as_str()).unwrap_or("?");
                 out.push_str(&format!("  {} — cap_max {}\n", owner, cap));
@@ -2517,7 +2616,7 @@ async fn query_market(client: &CosmosClient, args: &Value) -> Vec<Content> {
     }
 
     if let Ok(ag) = agreements_res {
-        let recent: Vec<_> = ag.items.iter().take(5).collect();
+        let recent: Vec<_> = ag.items.iter().filter(|a| is_live(&live_agreements, a)).take(5).collect();
         if !recent.is_empty() {
             out.push_str(&format!("\nRecent agreements: {}\n", recent.len()));
             for a in recent {

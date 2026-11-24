@@ -657,7 +657,11 @@ pub async fn execute(
                 // double-count bug that once forced create-new is fixed, so
                 // raising an existing allocation into freed/infused capacity works.
                 // Only bootstrap a new allocation when none exists yet.
-                match crate::mcp::guild_power::find_dynamic_allocation(client, &host_pid, &gp.substation_id).await {
+                let existing = match crate::mcp::guild_power::find_dynamic_allocation(client, &host_pid, &gp.substation_id).await {
+                    Ok(e) => e,
+                    Err(e) => return vec![Content::text(format!("Error: could not check for an existing allocation, so none was made: {e}"))],
+                };
+                match existing {
                     Some((aid, cur_power)) => {
                         let new_power = cur_power.saturating_add(plan.donate_mw as u64);
                         out.push_str(&format!(
@@ -1380,7 +1384,14 @@ pub async fn execute(
                 Ok(g) => g,
                 Err(e) => return vec![Content::text(format!("BLOCKED: {e}."))],
             };
-            if let Ok(gp) = crate::mcp::guild_power::resolve_guild_power(client, &gid).await {
+            if let Some(why) = REGISTRY.read().unwrap_or_else(|e| e.into_inner()).write_refused() {
+                return vec![Content::text(format!("BLOCKED: the player registry cannot be saved ({why})."))];
+            }
+            {
+                let gp = match crate::mcp::guild_power::resolve_guild_power(client, &gid).await {
+                    Ok(gp) => gp,
+                    Err(e) => return vec![Content::text(format!("BLOCKED: guild power could not be read, so this was not created: {e}."))],
+                };
                 if gp.sub_capacity > 0.0
                     && gp.share_if_one_more < crate::mcp::guild_power::MIN_PLAYER_DRAW_MW
                 {
@@ -1901,14 +1912,14 @@ pub async fn execute(
 /// `objectType` enum for the two locations a struct can occupy — the game's
 /// `LOCATION_TYPE_INDEX` (constants/LocationTypes.js). Anything else falls
 /// back to planet, the value every caller sent before the field existed.
-fn location_type_to_enum(name: &str) -> i64 {
+pub(crate) fn location_type_to_enum(name: &str) -> i64 {
     match name.trim().to_ascii_lowercase().as_str() {
         "fleet" => 9,
         _ => 2,
     }
 }
 
-fn ambit_to_enum(name: &str) -> i64 {
+pub(crate) fn ambit_to_enum(name: &str) -> i64 {
     match name.trim().to_ascii_lowercase().as_str() {
         "water" => 1,
         "land" => 2,
