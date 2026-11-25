@@ -161,7 +161,11 @@ pub struct AutoRaidConfig {
     /// can reach, and proves the raid only when nothing is left to shoot. The
     /// vetoes (own team, allies, protected players) still win.
     pub hunt_guilds: Vec<String>,
-    /// Hunted guilds do not get the `RAID_REST_HOURS` rest.
+    /// Hunt only the accounts the chain shows to be replicants (see
+    /// [`replicant_tell`]); everyone else in a hunted guild is raided like
+    /// anyone. Off, the whole guild is hunted.
+    pub hunt_bots_only: bool,
+    /// Those hunted do not get the `RAID_REST_HOURS` rest.
     pub hunt_skips_rest: bool,
 
     // ── Scoring weights (the playstyle dial) ──
@@ -187,6 +191,7 @@ impl Default for AutoRaidConfig {
             max_concurrent_raids: 2,
             target_cooldown_mins: 120,
             hunt_guilds: Vec::new(),
+            hunt_bots_only: true,
             hunt_skips_rest: false,
             w_ore: 1.0,
             w_opening: 1.0,
@@ -454,10 +459,10 @@ pub struct Candidate {
     /// within `RAID_REST_HOURS`. `None` = rested.
     #[serde(default)]
     pub raided_hours_ago: Option<f64>,
-    /// In a guild we hunt (`hunt_guilds`).
+    /// One we hunt: see `hunt_guilds` and `hunt_bots_only`.
     #[serde(default)]
     pub hunted: bool,
-    /// A hunted player we know to be a replicant. See [`replicant_tell`].
+    /// Known to be a replicant. Asked only of a hunted guild's members.
     #[serde(default)]
     pub replicant: bool,
     /// Structs standing at the target, per ambit (land, water, air, space):
@@ -579,7 +584,7 @@ fn raids(p: &crate::mcp::virtual_players::VirtualPlayer) -> bool {
         .raids
 }
 
-/// Is this player spared the rest because their guild is hunted?
+/// Is this player denied the rest because it is hunted?
 fn skips_rest(c: &Candidate, cfg: &AutoRaidConfig) -> bool {
     c.hunted && cfg.hunt_skips_rest
 }
@@ -595,7 +600,7 @@ pub fn gate(c: &Candidate, cfg: &AutoRaidConfig, cooldown_remaining_mins: f64) -
     }
     // Anyone who raided or was raided in the last day is left alone. Humans
     // are slower than bots; back-to-back raids are no fun to play against.
-    // A hunted guild gets no such courtesy when the operator says so.
+    // The hunted get no such courtesy when the operator says so.
     if let Some(h) = c.raided_hours_ago.filter(|h| !skips_rest(c, cfg) && *h < RAID_REST_HOURS) {
         return Some(format!(
             "resting — in a raid {:.0} h ago, off-limits for {:.0} h more",
@@ -603,8 +608,8 @@ pub fn gate(c: &Candidate, cfg: &AutoRaidConfig, cooldown_remaining_mins: f64) -
             (RAID_REST_HOURS - h).max(1.0)
         ));
     }
-    // A hunted replicant is worth flying to for its structs alone. A person in
-    // a hunted guild still has to be holding something.
+    // A hunted replicant is worth flying to for its structs alone. A person,
+    // when hunted too, still has to be holding something.
     if c.hunted && c.replicant {
         if c.structs() == 0 {
             return Some("nothing standing to kill".into());
@@ -796,10 +801,7 @@ async fn scan(
     .flatten()
     .collect();
 
-    for c in board.iter_mut() {
-        c.hunted = cfg.hunts(&c.guild_id);
-    }
-    mark_replicants(&client, &mut board).await;
+    mark_hunted(&client, cfg, &mut board).await;
     let under_way: std::collections::HashSet<String> =
         ACTIVE.lock().map(|a| a.values().map(|e| e.target_planet.clone()).collect()).unwrap_or_default();
     let now = now_millis();
@@ -1129,8 +1131,8 @@ fn slots_by_ambit(body: Option<&serde_json::Value>) -> [usize; 4] {
     })
 }
 
-/// How strongly the hunt prefers this candidate: 2 a hunted guild's replicant,
-/// 1 any other hunted player, 0 everyone else.
+/// How strongly the hunt prefers this candidate: 2 a hunted replicant, 1 any
+/// other hunted player, 0 everyone else.
 fn hunt_rank(c: &Candidate) -> u8 {
     match (c.hunted, c.replicant) {
         (true, true) => 2,
@@ -1174,49 +1176,73 @@ fn with_hunted(mut hunted: Vec<RosterEntry>, batch: Vec<RosterEntry>) -> Vec<Ros
 static REPLICANT_TELLS: LazyLock<Mutex<HashMap<String, (bool, f64)>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
 const REPLICANT_NO_TTL_MS: f64 = 60.0 * 60_000.0;
 
-/// Does this account carry either replicant tell: full control of its own
-/// player object granted to ANOTHER player, or a name our generators mint?
-/// An empty name says nothing (`is_managed_name` counts it as replaceable).
-fn replicant_tell(permissions: &[serde_json::Value], name: &str) -> bool {
-    !crate::mcp::onboarding_players::replicants_from(permissions).is_empty()
-        || (!name.trim().is_empty() && crate::mcp::callsign::is_managed_name(name))
+/// Is this account a replicant: has it given ANOTHER player full control of
+/// itself? Only its own grant says so. A name a generator could have minted is
+/// also a name a person can type, so it decides nothing here.
+fn replicant_tell(player_id: &str, permissions: &[serde_json::Value]) -> bool {
+    crate::mcp::onboarding_players::replicants_from(permissions).contains_key(player_id)
 }
 
-/// Fill `replicant` on the hunted candidates,
-/// asking the chain only about accounts not already known. A read that fails
-/// decides nothing and is asked again next scan.
-async fn mark_replicants(client: &CosmosClient, board: &mut [Candidate]) {
+/// Ask the chain. `None` is a read that failed, which is never a yes.
+async fn read_replicant(client: &CosmosClient, player_id: &str) -> Option<bool> {
+    let perms = client.lcd_get(&format!("/structs/permission/object/{player_id}")).await.ok()?;
+    let rows = perms.get("permissionRecords")?.as_array()?;
+    Some(replicant_tell(player_id, rows))
+}
+
+/// Pure: is a hunted guild's member itself hunted?
+fn hunts_member(cfg: &AutoRaidConfig, replicant: bool) -> bool {
+    replicant || !cfg.hunt_bots_only
+}
+
+/// Fill `replicant` and `hunted` for the members of the guilds we hunt, asking
+/// the chain only about accounts not already known. A read that fails is not a
+/// yes, and is asked again next scan.
+async fn mark_hunted(client: &CosmosClient, cfg: &AutoRaidConfig, board: &mut [Candidate]) {
     let now = now_millis();
     let known = REPLICANT_TELLS.lock().map(|m| m.clone()).unwrap_or_default();
     let ask: Vec<String> = board
         .iter()
-        .filter(|c| c.hunted)
+        .filter(|c| cfg.hunts(&c.guild_id))
         .map(|c| c.player_id.as_str().to_string())
         .filter(|id| !known.get(id).is_some_and(|(yes, at)| *yes || now - at < REPLICANT_NO_TTL_MS))
         .collect();
     let client_c = client.clone();
     let answers = crate::mcp::loop_util::map_concurrent(ask, crate::mcp::capacity::reads_fanout(), move |id| {
         let client = client_c.clone();
-        async move {
-            let perms = client.lcd_get(&format!("/structs/permission/object/{id}")).await.ok()?;
-            let rows = perms.get("permissionRecords").and_then(|r| r.as_array()).cloned().unwrap_or_default();
-            if replicant_tell(&rows, "") {
-                return Some((id, true));
-            }
-            let player = client.lcd_get(&format!("/structs/player/{id}")).await.ok()?;
-            let name = player.pointer("/Player/name").and_then(|n| n.as_str()).unwrap_or("");
-            Some((id, replicant_tell(&rows, name)))
-        }
+        async move { read_replicant(&client, &id).await.map(|yes| (id, yes)) }
     })
     .await;
     if let Ok(mut m) = REPLICANT_TELLS.lock() {
         for (id, yes) in answers.into_iter().flatten() {
             m.insert(id, (yes, now));
         }
-        for c in board.iter_mut().filter(|c| c.hunted) {
-            c.replicant = m.get(c.player_id.as_str()).is_some_and(|(yes, _)| *yes);
+        for c in board.iter_mut() {
+            let hunted_guild = cfg.hunts(&c.guild_id);
+            c.replicant = hunted_guild && m.get(c.player_id.as_str()).is_some_and(|(yes, _)| *yes);
+            c.hunted = hunted_guild && hunts_member(cfg, c.replicant);
         }
     }
+}
+
+/// Is this player one we hunt, right now? `None` = could not be read.
+async fn is_hunted(client: &CosmosClient, cfg: &AutoRaidConfig, player_id: &str) -> Option<bool> {
+    if cfg.hunt_guilds.is_empty() {
+        return Some(false);
+    }
+    let p = client.entity("player", player_id).await.ok()?;
+    if !cfg.hunts(p.pointer("/Player/guildId").and_then(|x| x.as_str()).unwrap_or("")) {
+        return Some(false);
+    }
+    if hunts_member(cfg, false) {
+        return Some(true);
+    }
+    if REPLICANT_TELLS.lock().ok()?.get(player_id).is_some_and(|(yes, _)| *yes) {
+        return Some(true);
+    }
+    let yes = read_replicant(client, player_id).await?;
+    REPLICANT_TELLS.lock().ok()?.insert(player_id.to_string(), (yes, now_millis()));
+    Some(yes)
 }
 
 /// Resolve everything the gates and score need for one candidate.
@@ -1937,10 +1963,7 @@ async fn readopt_expeditions(client: &CosmosClient, raiders: Vec<(String, u32)>)
                     .map(str::to_string)
             })
             .unwrap_or_default();
-        let hunt = match client.entity("player", &target_player).await {
-            Ok(e) => get().hunts(e.pointer("/Player/guildId").and_then(|x| x.as_str()).unwrap_or("")),
-            Err(_) => false,
-        };
+        let hunt = is_hunted(client, &get(), &target_player).await.unwrap_or(false);
         ACTIVE.lock().unwrap().insert(
             pid.clone(),
             Expedition {
@@ -2028,7 +2051,20 @@ async fn supervise(
 
     // Hunts shoot first, all at once: each is a fleet with its own charge, and
     // signed one after another sixteen of them would take minutes a round.
-    let hunts: Vec<Expedition> = expeditions.iter().filter(|e| e.hunt && e.returning.is_none()).cloned().collect();
+    // A hunt ends the moment its target stops being one we hunt: the setting
+    // was turned off, or this is no bot and we hunt only those. It comes home without
+    // another shot. Unread fires nothing this round.
+    let mut hunts: Vec<Expedition> = Vec::new();
+    let mut called_off: std::collections::HashSet<String> = Default::default();
+    for e in expeditions.iter().filter(|e| e.hunt && e.returning.is_none()) {
+        match is_hunted(client, cfg, &e.target_player).await {
+            Some(true) => hunts.push(e.clone()),
+            Some(false) => {
+                called_off.insert(e.raider_player.clone());
+            }
+            None => {}
+        }
+    }
     let (app_c, client_c) = (app.clone(), client.clone());
     let mut rounds: HashMap<String, HuntRound> =
         crate::mcp::loop_util::map_concurrent(hunts, 16, move |ex| {
@@ -2073,6 +2109,9 @@ async fn supervise(
         let mut hunted_out = false;
         if elapsed_mins > cfg.give_up_after_mins as f64 {
             abort = Some(format!("gave up after {} min", cfg.give_up_after_mins));
+        }
+        if called_off.contains(&ex.raider_player) {
+            abort = Some("hunt called off".into());
         }
         // A raider without a Command Ship can neither raid nor move; the
         // expedition is over. There is deliberately no "recall at N HP" rule:
@@ -2119,7 +2158,9 @@ async fn supervise(
         // ── Hunting. ── The raid is proved only once there is nothing left to
         // shoot: a seize sends the fleet home with hulls still standing.
         if abort.is_none() && ex.hunt {
-            let round = rounds.remove(&ex.raider_player).unwrap_or_default();
+            let round = rounds
+                .remove(&ex.raider_player)
+                .unwrap_or_else(|| HuntRound { did: Hunt::Waiting, ..Default::default() });
             ex.kills += round.kills;
             if let Some(alive) = &round.alive {
                 ex.last_alive = alive.clone();
@@ -2599,6 +2640,9 @@ async fn hunt_round(app: &tauri::AppHandle, client: &CosmosClient, ex: &Expediti
         }
         let aim = match crate::mcp::tools::strike::resolve_fire_target(client, &p.id).await {
             Ok((_, phase, _)) if phase == "DOWN" => continue,
+            // Only ever the hunted player's own: someone else's struct standing
+            // in the way is not ours to shoot.
+            Ok((t, _, _)) if !prey.iter().any(|p| p.id == t) => continue,
             Ok((t, _, _)) => t,
             Err(e) => {
                 unread |= !crate::mcp::cosmos_client::is_absent_object(&e);
@@ -3090,8 +3134,10 @@ mod tests {
     fn defaults_are_safe_and_opportunist() {
         let d = AutoRaidConfig::default();
         assert!(d.hunt_guilds.is_empty() && !d.hunt_skips_rest, "nobody is hunted until the operator names a guild");
+        assert!(d.hunt_bots_only, "and then only its bots");
         let old: AutoRaidConfig = serde_json::from_value(json!({ "enabled": true, "autonomy": "auto" })).unwrap();
         assert!(old.hunt_guilds.is_empty() && !old.hunt_skips_rest, "nor by upgrading with raids already on");
+        assert!(old.hunt_bots_only);
         isolate_lists();
         let c = AutoRaidConfig::default();
         assert!(!c.enabled);
@@ -3477,6 +3523,16 @@ mod tests {
     }
 
     #[test]
+    fn only_bots_are_hunted_unless_told_otherwise() {
+        let cfg = AutoRaidConfig::default();
+        assert!(cfg.hunt_bots_only);
+        assert!(hunts_member(&cfg, true));
+        assert!(!hunts_member(&cfg, false));
+        let whole = AutoRaidConfig { hunt_bots_only: false, ..cfg };
+        assert!(hunts_member(&whole, true) && hunts_member(&whole, false));
+    }
+
+    #[test]
     fn replicants_rank_over_humans_and_hunted_over_everyone() {
         let mut c = cand();
         c.replicant = true;
@@ -3488,13 +3544,16 @@ mod tests {
     }
 
     #[test]
-    fn a_replicant_is_told_by_its_grant_or_its_name() {
-        let own = serde_json::json!({ "permissionId": "1-14702@1-14702", "value": "33554431" });
-        let grant = serde_json::json!({ "permissionId": "1-14760@1-303", "value": "33554431" });
-        assert!(!replicant_tell(&[own.clone()], "Ozmanski"));
-        assert!(!replicant_tell(&[own.clone()], ""), "no name is no evidence");
-        assert!(replicant_tell(&[own.clone(), grant], ""));
-        assert!(replicant_tell(&[own], "VANGUARD-7782"));
+    fn a_replicant_is_told_only_by_its_own_grant() {
+        let row = |id: &str, v: &str| serde_json::json!({ "permissionId": id, "value": v });
+        let own = row("1-14760@1-14760", "33554431");
+        let grant = row("1-14760@1-303", "33554431");
+        assert!(replicant_tell("1-14760", &[own.clone(), grant.clone()]));
+        assert!(!replicant_tell("1-14760", &[own]), "control of yourself is everyone");
+        assert!(!replicant_tell("1-303", &[grant.clone()]), "the one holding the grant is a person");
+        assert!(!replicant_tell("1-1476", &[grant]), "whole ids only");
+        assert!(!replicant_tell("1-14760", &[row("1-14760@1-303", "1")]), "some control is not full control");
+        assert!(!replicant_tell("1-14760", &[]), "no records, no evidence");
     }
 
     #[test]

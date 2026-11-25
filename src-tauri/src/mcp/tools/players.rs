@@ -1234,6 +1234,10 @@ pub async fn execute(
                     v.iter().filter_map(|g| g.as_str()).map(|g| g.trim().to_string()).filter(|g| !g.is_empty()).collect();
                 changed = true;
             }
+            if let Some(v) = a.get("hunt_bots_only").and_then(|v| v.as_bool()) {
+                cfg.hunt_bots_only = v;
+                changed = true;
+            }
             if let Some(v) = a.get("hunt_skips_rest").and_then(|v| v.as_bool()) {
                 cfg.hunt_skips_rest = v;
                 changed = true;
@@ -1262,8 +1266,9 @@ pub async fn execute(
                     String::new()
                 } else {
                     format!(
-                        " · hunting {}{}",
+                        " · hunting {}{}{}",
                         cfg.hunt_guilds.join(", "),
+                        if cfg.hunt_bots_only { " (bots only)" } else { "" },
                         if cfg.hunt_skips_rest { " (no rest)" } else { "" }
                     )
                 },
