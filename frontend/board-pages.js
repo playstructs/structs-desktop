@@ -4430,6 +4430,8 @@
     min_score: { label: 'min score (0-100)', min: 0, max: 100 },
     give_up_after_mins: { label: 'give up after', min: 1, unit: 'min' },
     target_cooldown_mins: { label: 'target cooldown', min: 0, unit: 'min', hint: 'doubles for every failed attempt on that planet, resets on a seize' },
+    hunt_guilds: { label: 'hunt guilds', hint: 'guild ids' },
+    hunt_skips_rest: { label: 'hunted guilds get no 24 h rest' },
     max_concurrent_raids: { label: 'max concurrent raids', min: 1 },
     max_shots_per_hour: { label: 'max shots / hour', min: 0 },
     include_primary_shooters: { label: 'let the primary shoot too' },

@@ -1229,6 +1229,15 @@ pub async fn execute(
                 cfg.interval_secs = v.max(60);
                 changed = true;
             }
+            if let Some(v) = a.get("hunt_guilds").and_then(|v| v.as_array()) {
+                cfg.hunt_guilds =
+                    v.iter().filter_map(|g| g.as_str()).map(|g| g.trim().to_string()).filter(|g| !g.is_empty()).collect();
+                changed = true;
+            }
+            if let Some(v) = a.get("hunt_skips_rest").and_then(|v| v.as_bool()) {
+                cfg.hunt_skips_rest = v;
+                changed = true;
+            }
             if changed {
                 arl::set(cfg.clone());
             }
@@ -1239,7 +1248,7 @@ pub async fn execute(
             }
             let board = arl::target_board();
             let mut out = format!(
-                "Raid targeting {} ({:?}, posture {:?}) — min_ore {:.0} · min_score {:.0} · siege {} · give up after {} min · cooldown {} min (doubles per failure) · ≤{} concurrent{}\n",
+                "Raid targeting {} ({:?}, posture {:?}) — min_ore {:.0} · min_score {:.0} · siege {} · give up after {} min · cooldown {} min (doubles per failure) · ≤{} concurrent{}{}\n",
                 if cfg.enabled { "ON" } else { "OFF" },
                 cfg.autonomy,
                 cfg.posture,
@@ -1249,6 +1258,15 @@ pub async fn execute(
                 cfg.give_up_after_mins,
                 cfg.target_cooldown_mins,
                 cfg.max_concurrent_raids,
+                if cfg.hunt_guilds.is_empty() {
+                    String::new()
+                } else {
+                    format!(
+                        " · hunting {}{}",
+                        cfg.hunt_guilds.join(", "),
+                        if cfg.hunt_skips_rest { " (no rest)" } else { "" }
+                    )
+                },
                 if changed { " (updated)" } else { "" }
             );
             if board.is_empty() {
@@ -1260,11 +1278,16 @@ pub async fn execute(
                     // still sit under min_score — printing that as GO sent
                     // operators hunting for a gate that was not the problem.
                     out.push_str(&format!(
-                        "  {} {} ({}) — {:.0} ore · shield {} (~{:.0} min) · {} defenders · score {:.0} — {}\n",
+                        "  {}{} {} ({}) — {:.0} ore · shield {} (~{:.0} min) · {} defenders · score {:.0} — {}\n",
                         match (c.blocked_by.is_none(), c.score >= cfg.min_score) {
                             (true, true) => "GO   ",
                             (true, false) => "low  ",
                             _ => "no-go",
+                        },
+                        match (c.hunted, c.replicant) {
+                            (true, true) => " [hunted replicant]",
+                            (true, false) => " [hunted]",
+                            _ => "",
                         },
                         c.name,
                         c.planet_id,
@@ -1280,6 +1303,9 @@ pub async fn execute(
             let active = arl::active_expeditions();
             if !active.is_empty() {
                 out.push_str(&format!("{} expedition(s) in flight.\n", active.len()));
+                for e in active.iter().filter(|e| e.hunt || e.kills > 0) {
+                    out.push_str(&format!("  {} at {} ({}) — {}\n", e.raider_player, e.target_planet, e.target_player, e.note));
+                }
             }
             out.push_str("Raids are flown by players whose profile grants `raids` — the primary never leaves home. `low` = passed every gate but under min_score.\n");
             vec![Content::text(out)]

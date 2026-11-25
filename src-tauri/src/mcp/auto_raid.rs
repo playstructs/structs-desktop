@@ -83,6 +83,22 @@ const SIEGE_IDLE_ROUNDS: usize = 3;
 const ONGOING_GRACE_BLOCKS: u64 = 60;
 /// A failed attempt doubles the target's cooldown, up to 2^this.
 const MAX_COOLDOWN_DOUBLINGS: u32 = 4;
+/// Seconds between rounds of a hunt. A weapon costs 3-5 charge and charge
+/// regenerates one a block, so this is about as fast as one fleet can shoot;
+/// at the scan cadence it would fire a fifth as often.
+const HUNT_ROUND_SECS: f64 = 15.0;
+/// Hunt rounds in a row that fire nothing (with charge to fire) before the
+/// hunt is taken to have killed all it can.
+const HUNT_IDLE_ROUNDS: usize = 6;
+/// Cheapest weapon in the game: below this charge nothing can fire.
+const MIN_WEAPON_CHARGE: u64 = 3;
+/// Targets one hunt round plans a shot at before it gives up.
+const HUNT_TRIES: usize = 5;
+/// Raiders one scan may send hunting. Anything else goes one per scan.
+const HUNT_DISPATCHES: usize = 4;
+/// Structs at a target that count as a full score for a hunt: a built-out
+/// fleet and planet.
+const KILL_SCALE: f64 = 28.0;
 /// Hours a player rests after ANY raid they were part of — raider or raided,
 /// ours or anyone's. Bots out-pace humans; a player who just fought gets a
 /// day to rebuild before we come knocking.
@@ -139,6 +155,15 @@ pub struct AutoRaidConfig {
     /// failure on that planet (up to 16×) and resets on a seize.
     pub target_cooldown_mins: u32,
 
+    /// Guilds to hunt ("0-8"). Their members are scored on every scan and
+    /// picked ahead of everyone else, replicants first. A hunt is after hulls:
+    /// it ranks targets by how many structs stand there, shoots every one it
+    /// can reach, and proves the raid only when nothing is left to shoot. The
+    /// vetoes (own team, allies, protected players) still win.
+    pub hunt_guilds: Vec<String>,
+    /// Hunted guilds do not get the `RAID_REST_HOURS` rest.
+    pub hunt_skips_rest: bool,
+
     // ── Scoring weights (the playstyle dial) ──
     pub w_ore: f64,
     /// Window already open now (no siege needed).
@@ -161,6 +186,8 @@ impl Default for AutoRaidConfig {
             give_up_after_mins: 60,
             max_concurrent_raids: 2,
             target_cooldown_mins: 120,
+            hunt_guilds: Vec::new(),
+            hunt_skips_rest: false,
             w_ore: 1.0,
             w_opening: 1.0,
             w_weakness: 0.6,
@@ -193,11 +220,17 @@ impl AutoRaidConfig {
     pub fn sieges(&self) -> bool {
         self.posture != RaidPosture::Cautious
     }
+
+    /// Is this guild being hunted? Whole ids only: "0-1" is not "0-11".
+    pub fn hunts(&self, guild_id: &str) -> bool {
+        !guild_id.is_empty() && self.hunt_guilds.iter().any(|g| g.trim() == guild_id)
+    }
 }
 
 static CONFIG: LazyLock<RwLock<AutoRaidConfig>> =
     LazyLock::new(|| RwLock::new(crate::mcp::config_store::load_config::<AutoRaidConfig>(FILENAME)));
 static LAST_SCAN: LazyLock<Mutex<f64>> = LazyLock::new(|| Mutex::new(0.0));
+static LAST_HUNT_ROUND: LazyLock<Mutex<f64>> = LazyLock::new(|| Mutex::new(0.0));
 /// The last scan's funnel — scored → eligible → dispatching, and the gate
 /// that stopped the most — for the Game Stats window.
 static LAST_FUNNEL: LazyLock<Mutex<serde_json::Value>> = LazyLock::new(|| Mutex::new(serde_json::Value::Null));
@@ -356,6 +389,12 @@ pub struct Expedition {
     pub idle_rounds: usize,
     /// Times the Command Ship has changed ambit to reach a target.
     pub cmd_moves: u32,
+    /// After hulls, not ore: shoots everything before it proves the raid.
+    pub hunt: bool,
+    /// Enemy structs seen go down while we were there.
+    pub kills: usize,
+    /// Enemy structs alive at the last look.
+    pub last_alive: Vec<String>,
     /// Why it is over, once it is: the fleet has been told to come home and is
     /// tracked until it is seen there. A recall that fails is tried again.
     pub returning: Option<String>,
@@ -415,11 +454,27 @@ pub struct Candidate {
     /// within `RAID_REST_HOURS`. `None` = rested.
     #[serde(default)]
     pub raided_hours_ago: Option<f64>,
+    /// In a guild we hunt (`hunt_guilds`).
+    #[serde(default)]
+    pub hunted: bool,
+    /// A hunted player we know to be a replicant. See [`replicant_tell`].
+    #[serde(default)]
+    pub replicant: bool,
+    /// Structs standing at the target, per ambit (land, water, air, space):
+    /// what a hunt could kill there.
+    #[serde(default)]
+    pub structs_by_ambit: [usize; 4],
     #[serde(default)]
     pub score: f64,
     /// `None` = GO. `Some(reason)` = NO-GO, shown verbatim on the board.
     #[serde(default)]
     pub blocked_by: Option<String>,
+}
+
+impl Candidate {
+    pub fn structs(&self) -> usize {
+        self.structs_by_ambit.iter().sum()
+    }
 }
 
 pub fn target_board() -> Vec<Candidate> {
@@ -480,13 +535,25 @@ pub fn score(c: &Candidate, cfg: &AutoRaidConfig) -> f64 {
     let weakness_term = 1.0 - pressure;
     // Personal grudge or standing priority on the whole guild, whichever the
     // operator has set higher.
-    let grudge_term = crate::mcp::combat_lists::grudge_heat(c.player_id.as_str())
-        .max(crate::mcp::combat_lists::guild_weight(Some(&c.guild_id)))
-        .min(1.0);
+    let grudge_term = if c.hunted {
+        1.0
+    } else {
+        crate::mcp::combat_lists::grudge_heat(c.player_id.as_str())
+            .max(crate::mcp::combat_lists::guild_weight(Some(&c.guild_id)))
+            .min(1.0)
+    };
 
+    // A hunt is after hulls: what stands there is the prize, and an open
+    // window is nothing to it, so the prize takes both weights.
+    let (prize, opening) = if c.hunted {
+        let kill_term = (c.structs() as f64 / KILL_SCALE).min(1.0);
+        (kill_term, kill_term)
+    } else {
+        (ore_term, opening_term)
+    };
     let terms = [
-        (cfg.w_ore, ore_term),
-        (cfg.w_opening, opening_term),
+        (cfg.w_ore, prize),
+        (cfg.w_opening, opening),
         (cfg.w_weakness, weakness_term),
         (cfg.w_grudge, grudge_term),
     ];
@@ -512,6 +579,11 @@ fn raids(p: &crate::mcp::virtual_players::VirtualPlayer) -> bool {
         .raids
 }
 
+/// Is this player spared the rest because their guild is hunted?
+fn skips_rest(c: &Candidate, cfg: &AutoRaidConfig) -> bool {
+    c.hunted && cfg.hunt_skips_rest
+}
+
 pub fn gate(c: &Candidate, cfg: &AutoRaidConfig, cooldown_remaining_mins: f64) -> Option<String> {
     // Friend-or-foe first: our own accounts, allied guilds and protected players
     // are never targets, whatever they're holding.
@@ -523,14 +595,21 @@ pub fn gate(c: &Candidate, cfg: &AutoRaidConfig, cooldown_remaining_mins: f64) -
     }
     // Anyone who raided or was raided in the last day is left alone. Humans
     // are slower than bots; back-to-back raids are no fun to play against.
-    if let Some(h) = c.raided_hours_ago.filter(|h| *h < RAID_REST_HOURS) {
+    // A hunted guild gets no such courtesy when the operator says so.
+    if let Some(h) = c.raided_hours_ago.filter(|h| !skips_rest(c, cfg) && *h < RAID_REST_HOURS) {
         return Some(format!(
             "resting — in a raid {:.0} h ago, off-limits for {:.0} h more",
             h,
             (RAID_REST_HOURS - h).max(1.0)
         ));
     }
-    if c.stored_ore < cfg.min_ore {
+    // A hunted replicant is worth flying to for its structs alone. A person in
+    // a hunted guild still has to be holding something.
+    if c.hunted && c.replicant {
+        if c.structs() == 0 {
+            return Some("nothing standing to kill".into());
+        }
+    } else if c.stored_ore < cfg.min_ore {
         return Some(format!("ore {:.0} < min_ore {:.0}", c.stored_ore, cfg.min_ore));
     }
     // Someone is already parked here. A planet runs ONE raid at a time — and
@@ -545,7 +624,7 @@ pub fn gate(c: &Candidate, cfg: &AutoRaidConfig, cooldown_remaining_mins: f64) -
     // will not open one itself, so it only flies at windows already open; the
     // other postures siege, which is where 20 of the last 24 successes came
     // from.
-    if !cfg.sieges() && !c.vulnerable {
+    if !cfg.sieges() && !c.vulnerable && !c.hunted {
         return Some("shields up — cautious posture raids only open windows".into());
     }
     if cooldown_remaining_mins > 0.0 {
@@ -563,11 +642,18 @@ pub async fn tick(app_handle: &tauri::AppHandle, force: bool) {
     }
     let now = now_millis();
     if !force {
-        let mut last = LAST_SCAN.lock().unwrap();
-        if now - *last < (cfg.interval_secs as f64) * 1000.0 {
+        let due = {
+            let mut last = LAST_SCAN.lock().unwrap();
+            let due = now - *last >= (cfg.interval_secs as f64) * 1000.0;
+            if due {
+                *last = now;
+            }
+            due
+        };
+        if !due {
+            hunt_tick(app_handle, &cfg, now).await;
             return;
         }
-        *last = now;
     } else if let Ok(mut last) = LAST_SCAN.lock() {
         *last = now;
     }
@@ -587,6 +673,36 @@ pub async fn tick(app_handle: &tauri::AppHandle, force: bool) {
     if run.errors.load(Ordering::Relaxed) == 0 {
         crate::mcp::loop_util::report_clean_scan();
     }
+    RUNNING.store(false, Ordering::SeqCst);
+}
+
+/// Between scans: one supervise pass while a hunt is under way, so a fleet
+/// shoots as often as its charge allows instead of once a scan.
+async fn hunt_tick(app: &tauri::AppHandle, cfg: &AutoRaidConfig, now: f64) {
+    let hunting =
+        ACTIVE.lock().map(|a| a.values().any(|e| e.hunt && e.returning.is_none())).unwrap_or(false);
+    if !hunting {
+        return;
+    }
+    {
+        let mut last = LAST_HUNT_ROUND.lock().unwrap();
+        if now - *last < HUNT_ROUND_SECS * 1000.0 {
+            return;
+        }
+        *last = now;
+    }
+    if RUNNING.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    let gen = RUN_GEN.load(Ordering::SeqCst);
+    let run = crate::mcp::telemetry::LoopRun::start("auto_raid");
+    supervise(app, &CosmosClient::new(), cfg, &run).await;
+    persist_memory();
+    if RUN_GEN.load(Ordering::SeqCst) != gen {
+        run.finish_stale(Some("invalidated by watchdog reset mid-hunt".into()));
+        return;
+    }
+    run.finish(None);
     RUNNING.store(false, Ordering::SeqCst);
 }
 
@@ -648,15 +764,17 @@ async fn scan(
     if roster.is_empty() {
         return;
     }
-    let batch = next_batch(&roster, EVALUATE_PER_SCAN);
+    let batch = with_hunted(hunted_members(cfg), next_batch(&roster, EVALUATE_PER_SCAN));
 
     // Who fought in the last day. Without it we cannot tell a resting player
     // from a fresh one, so no new raid goes out — expeditions already in
-    // flight were supervised above and carry on.
-    let Some(recent) = recent_raiders(&client).await else {
+    // flight were supervised above and carry on. Hunted guilds that do not rest
+    // stay raidable without it.
+    let recent = recent_raiders(&client).await;
+    if recent.is_none() && (cfg.hunt_guilds.is_empty() || !cfg.hunt_skips_rest) {
         run.blocked("raid history unavailable — not dispatching until resting players are known");
         return;
-    };
+    }
 
     // ── Phase B: evaluate + score. ──
     let client_c = client.clone();
@@ -678,19 +796,35 @@ async fn scan(
     .flatten()
     .collect();
 
+    for c in board.iter_mut() {
+        c.hunted = cfg.hunts(&c.guild_id);
+    }
+    mark_replicants(&client, &mut board).await;
+    let under_way: std::collections::HashSet<String> =
+        ACTIVE.lock().map(|a| a.values().map(|e| e.target_planet.clone()).collect()).unwrap_or_default();
     let now = now_millis();
     for c in board.iter_mut() {
         run.players.fetch_add(1, Ordering::Relaxed);
         c.raided_hours_ago = recent
-            .get(c.player_id.as_str())
+            .as_ref()
+            .and_then(|r| r.get(c.player_id.as_str()))
             .map(|ms| ((now - ms) / 3_600_000.0).max(0.0));
         c.score = score(c, cfg);
-        c.blocked_by = gate(c, cfg, cooldown_remaining_mins(&c.planet_id, cfg.target_cooldown_mins));
+        c.blocked_by = gate(c, cfg, cooldown_remaining_mins(&c.planet_id, cfg.target_cooldown_mins, c.hunted));
+        if c.blocked_by.is_none() && recent.is_none() && !skips_rest(c, cfg) {
+            c.blocked_by = Some("raid history unavailable — resting players unknown".into());
+        }
+        // With no cooldown to hold it, nothing else keeps a second raider from
+        // following the first to a planet that takes one raid.
+        if c.blocked_by.is_none() && under_way.contains(&c.planet_id) {
+            c.blocked_by = Some("our own raid is under way here".into());
+        }
     }
     board.sort_by(|a, b| {
         a.blocked_by
             .is_some()
             .cmp(&b.blocked_by.is_some())
+            .then(hunt_rank(b).cmp(&hunt_rank(a)))
             .then(b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal))
     });
     if let Ok(mut b) = BOARD.lock() {
@@ -712,18 +846,23 @@ async fn scan(
         .filter(|c| c.blocked_by.is_none() && c.score >= cfg.min_score)
         .filter(|c| DISPATCH_BACKOFF.ready(&c.planet_id))
         .collect();
+    // While a hunted player is raidable, nobody else is picked; the temperament
+    // below chooses only within the best rank. The rest stay behind it, in
+    // order, for when that pick turns out to be out of reach.
+    let top_rank = eligible.iter().map(|c| hunt_rank(c)).max().unwrap_or(0);
+    let ranked: Vec<&Candidate> = eligible.iter().copied().filter(|c| hunt_rank(c) == top_rank).collect();
     // Raiders choose with a raider's temperament. At temperature 0 this is the
     // top-scoring candidate, exactly as before; warmer spreads our pressure
     // across the board instead of hammering one planet into its cooldown.
     let best = crate::mcp::variance::pick_now(
-        &eligible,
+        &ranked,
         |c| c.score,
         &crate::mcp::variance::for_role(Some(crate::mcp::virtual_players::VPlayerRole::Raider)),
         // TODO(profile): once dispatch resolves its raider before scoring, take
         // the temperament from that player's own profile instead of the role.
     )
-    .map(|i| eligible[i])
-    .or_else(|| eligible.first().copied())
+    .map(|i| ranked[i])
+    .or_else(|| ranked.first().copied())
     .cloned();
     // …and, should that one turn out to be out of reach, the rest in order.
     let others: Vec<Candidate> = eligible
@@ -808,16 +947,27 @@ async fn scan(
         return;
     }
 
+    let room = cfg.max_concurrent_raids - in_flight;
+    let mut sent = 0usize;
     for target in std::iter::once(target).chain(others) {
+        // Past the first, only another hunt goes out in the same scan.
+        if sent > 0 && (!target.hunted || sent >= room.min(HUNT_DISPATCHES)) {
+            return;
+        }
         match dispatch(app, &client, cfg, &target).await {
             Dispatch::Sent(msg) => {
+                sent += 1;
                 run.acted(); // clears any blocked reason from an earlier scan
                 run.actions.fetch_add(1, Ordering::Relaxed);
                 crate::mcp::board_feed::push(app, crate::mcp::board_feed::Severity::Important, "auto_raid", msg);
-                return;
+                if !target.hunted {
+                    return;
+                }
             }
             Dispatch::NoRaider(why) => {
-                run.blocked(why);
+                if sent == 0 {
+                    run.blocked(why);
+                }
                 return;
             }
             Dispatch::OutOfReach(why) => {
@@ -957,6 +1107,118 @@ fn next_batch(roster: &[RosterEntry], n: usize) -> Vec<RosterEntry> {
     out
 }
 
+const AMBITS: [&str; 4] = ["land", "water", "air", "space"];
+
+/// The struct ids in a planet's or fleet's slots.
+fn slot_ids(body: Option<&serde_json::Value>) -> Vec<String> {
+    AMBITS
+        .iter()
+        .filter_map(|a| body?.get(a)?.as_array())
+        .flatten()
+        .filter_map(|v| v.as_str().filter(|s| !s.is_empty()).map(String::from))
+        .collect()
+}
+
+/// Occupied slots per ambit of a planet's or fleet's row.
+fn slots_by_ambit(body: Option<&serde_json::Value>) -> [usize; 4] {
+    AMBITS.map(|a| {
+        body.and_then(|b| b.get(a))
+            .and_then(|x| x.as_array())
+            .map(|arr| arr.iter().filter(|v| v.as_str().is_some_and(|s| !s.is_empty())).count())
+            .unwrap_or(0)
+    })
+}
+
+/// How strongly the hunt prefers this candidate: 2 a hunted guild's replicant,
+/// 1 any other hunted player, 0 everyone else.
+fn hunt_rank(c: &Candidate) -> u8 {
+    match (c.hunted, c.replicant) {
+        (true, true) => 2,
+        (true, false) => 1,
+        _ => 0,
+    }
+}
+
+/// Every member of a hunted guild who has a planet, straight from the snapshot:
+/// the cached roster is hours old and a fleet being launched grows by the minute.
+fn hunted_members(cfg: &AutoRaidConfig) -> Vec<RosterEntry> {
+    if cfg.hunt_guilds.is_empty() {
+        return Vec::new();
+    }
+    let text = |p: &serde_json::Value, k: &str| p.get(k).and_then(|x| x.as_str()).unwrap_or("").to_string();
+    let members: Vec<(String, String)> = crate::mcp::perception::with_snapshot(|s| {
+        s.players
+            .values()
+            .filter(|p| !text(p, "planetId").is_empty() && cfg.hunts(&text(p, "guildId")))
+            .map(|p| (text(p, "id"), text(p, "guildId")))
+            .collect()
+    })
+    .unwrap_or_default();
+    members
+        .into_iter()
+        .filter(|(id, guild)| !crate::mcp::combat_lists::is_vetoed(id, Some(guild)))
+        .filter_map(|(id, guild)| crate::mcp::types::PlayerId::parse(&id).ok().map(|p| (p, guild)))
+        .collect()
+}
+
+/// Hunted players first, then the scan's normal batch without them.
+fn with_hunted(mut hunted: Vec<RosterEntry>, batch: Vec<RosterEntry>) -> Vec<RosterEntry> {
+    let seen: std::collections::HashSet<_> = hunted.iter().map(|(id, _)| id.clone()).collect();
+    hunted.extend(batch.into_iter().filter(|(id, _)| !seen.contains(id)));
+    hunted
+}
+
+/// player id → is a replicant, with when we asked. A yes is kept for the
+/// session; a no is asked again, because a fresh replicant grants and is
+/// named a few blocks after it appears.
+static REPLICANT_TELLS: LazyLock<Mutex<HashMap<String, (bool, f64)>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+const REPLICANT_NO_TTL_MS: f64 = 60.0 * 60_000.0;
+
+/// Does this account carry either replicant tell: full control of its own
+/// player object granted to ANOTHER player, or a name our generators mint?
+/// An empty name says nothing (`is_managed_name` counts it as replaceable).
+fn replicant_tell(permissions: &[serde_json::Value], name: &str) -> bool {
+    !crate::mcp::onboarding_players::replicants_from(permissions).is_empty()
+        || (!name.trim().is_empty() && crate::mcp::callsign::is_managed_name(name))
+}
+
+/// Fill `replicant` on the hunted candidates,
+/// asking the chain only about accounts not already known. A read that fails
+/// decides nothing and is asked again next scan.
+async fn mark_replicants(client: &CosmosClient, board: &mut [Candidate]) {
+    let now = now_millis();
+    let known = REPLICANT_TELLS.lock().map(|m| m.clone()).unwrap_or_default();
+    let ask: Vec<String> = board
+        .iter()
+        .filter(|c| c.hunted)
+        .map(|c| c.player_id.as_str().to_string())
+        .filter(|id| !known.get(id).is_some_and(|(yes, at)| *yes || now - at < REPLICANT_NO_TTL_MS))
+        .collect();
+    let client_c = client.clone();
+    let answers = crate::mcp::loop_util::map_concurrent(ask, crate::mcp::capacity::reads_fanout(), move |id| {
+        let client = client_c.clone();
+        async move {
+            let perms = client.lcd_get(&format!("/structs/permission/object/{id}")).await.ok()?;
+            let rows = perms.get("permissionRecords").and_then(|r| r.as_array()).cloned().unwrap_or_default();
+            if replicant_tell(&rows, "") {
+                return Some((id, true));
+            }
+            let player = client.lcd_get(&format!("/structs/player/{id}")).await.ok()?;
+            let name = player.pointer("/Player/name").and_then(|n| n.as_str()).unwrap_or("");
+            Some((id, replicant_tell(&rows, name)))
+        }
+    })
+    .await;
+    if let Ok(mut m) = REPLICANT_TELLS.lock() {
+        for (id, yes) in answers.into_iter().flatten() {
+            m.insert(id, (yes, now));
+        }
+        for c in board.iter_mut().filter(|c| c.hunted) {
+            c.replicant = m.get(c.player_id.as_str()).is_some_and(|(yes, _)| *yes);
+        }
+    }
+}
+
 /// Resolve everything the gates and score need for one candidate.
 /// Four reads: player, planet, fleet, Command Ship.
 /// Only an ACTIVE planet can be moved to or raided (v0.22). An absent status
@@ -1034,6 +1296,7 @@ async fn evaluate(
     let mut command_struct: Option<String> = None;
     let mut command_ambit = String::new();
     let mut enemy_fleet_structs = 0usize;
+    let mut structs_by_ambit = slots_by_ambit(planet.get("Planet"));
     if fleet_id.is_empty() {
         reasons.push("no fleet");
     } else if let Ok(fl) = client.entity("fleet", &fleet_id).await {
@@ -1042,6 +1305,10 @@ async fn evaluate(
             && f.and_then(|x| x.get("locationId")).and_then(|x| x.as_str()) == Some(planet_id.as_str());
         if !on_station {
             reasons.push("fleet off-station");
+        } else {
+            for (n, m) in structs_by_ambit.iter_mut().zip(slots_by_ambit(f)) {
+                *n += m;
+            }
         }
         for ambit in ["land", "water", "air", "space"] {
             if let Some(arr) = f.and_then(|x| x.get(ambit)).and_then(|a| a.as_array()) {
@@ -1064,6 +1331,9 @@ async fn evaluate(
                         .and_then(|x| x.as_str())
                         .unwrap_or("")
                         .to_string();
+                    if let Some(i) = AMBITS.iter().position(|a| *a == command_ambit).filter(|_| on_station) {
+                        structs_by_ambit[i] += 1;
+                    }
                     if crate::mcp::loop_util::parse_bool(sa.and_then(|x| x.get("isDestroyed"))) {
                         reasons.push("Command Ship destroyed");
                     } else if !crate::mcp::loop_util::parse_bool(sa.and_then(|x| x.get("isOnline"))) {
@@ -1119,6 +1389,9 @@ async fn evaluate(
         last_action_block: last_action,
         blocks_since_action: crate::mcp::types::Block::new(current_block).since(crate::mcp::types::Block::new(last_action)),
         raided_hours_ago: None,
+        hunted: false,
+        replicant: false,
+        structs_by_ambit,
         score: 0.0,
         blocked_by: None,
     })
@@ -1268,7 +1541,7 @@ async fn recent_raiders(client: &CosmosClient) -> Option<HashMap<String, f64>> {
 /// every consecutive failed attempt on that planet (capped at 2^4 = 16×), so a
 /// target we keep bouncing off drifts from two hours to a day and a half
 /// instead of being re-flown every two hours forever.
-fn cooldown_remaining_mins(planet_id: &str, cooldown_mins: u32) -> f64 {
+fn cooldown_remaining_mins(planet_id: &str, cooldown_mins: u32, hunted: bool) -> f64 {
     let now = now_millis();
     let streak = FAIL_STREAK
         .lock()
@@ -1276,7 +1549,11 @@ fn cooldown_remaining_mins(planet_id: &str, cooldown_mins: u32) -> f64 {
         .and_then(|f| f.get(planet_id).copied())
         .unwrap_or(0)
         .min(MAX_COOLDOWN_DOUBLINGS);
-    let effective = effective_cooldown_mins(cooldown_mins, streak);
+    let effective = if hunted {
+        hunt_cooldown_mins(cooldown_mins, streak)
+    } else {
+        effective_cooldown_mins(cooldown_mins, streak)
+    };
     TARGET_COOLDOWN
         .lock()
         .ok()
@@ -1291,6 +1568,16 @@ fn cooldown_remaining_mins(planet_id: &str, cooldown_mins: u32) -> f64 {
 /// Pure: the cooldown after `streak` consecutive failures.
 pub fn effective_cooldown_mins(cooldown_mins: u32, streak: u32) -> f64 {
     cooldown_mins as f64 * (1u32 << streak.min(MAX_COOLDOWN_DOUBLINGS)) as f64
+}
+
+/// Pure: the same for a hunted target. None after a seize; after a failure it
+/// is one step shorter, kept only so a planet we cannot take does not eat
+/// every raider we have.
+pub fn hunt_cooldown_mins(cooldown_mins: u32, streak: u32) -> f64 {
+    match streak {
+        0 => 0.0,
+        n => effective_cooldown_mins(cooldown_mins, n - 1),
+    }
 }
 
 /// Book the end of an expedition against its target planet.
@@ -1397,7 +1684,13 @@ async fn dispatch(
     target: &Candidate,
 ) -> Dispatch {
     let _ = cfg;
-    let raiders = idle_raiders(client).await;
+    let mut raiders = idle_raiders(client).await;
+    if target.hunted {
+        raiders = by_kill_reach(client, raiders, target).await;
+        if raiders.is_empty() && !idle_raiders(client).await.is_empty() {
+            return Dispatch::OutOfReach(format!("no idle raider reaches a struct at {}", target.planet_id));
+        }
+    }
     if raiders.is_empty() {
         return Dispatch::NoRaider(
             "no idle raider available (need a profile with `raids`, a live Command Ship, and a fleet on station)".to_string(),
@@ -1415,7 +1708,7 @@ async fn dispatch(
         // that was picked, not on the target alone. Not optional: with this
         // check switched off one raider flew 27 round trips to a planet it
         // could not put a shot into, 54 minutes each, and fired nothing.
-        if !target.command_ambit.is_empty() {
+        if !target.hunted && !target.command_ambit.is_empty() {
             let bit = crate::mcp::tools::format::ambit_bit(&target.command_ambit);
             if bit != 0 {
                 let hulls = raider_hulls(client, &raider_pid, &fleet_id).await;
@@ -1476,6 +1769,9 @@ async fn dispatch(
                 siege_shots: 0,
                 idle_rounds: 0,
                 cmd_moves: 0,
+                hunt: target.hunted,
+                kills: 0,
+                last_alive: Vec::new(),
                 returning: None,
                 note: if sent.is_ok() { "en route".into() } else { "en route (move unconfirmed)".into() },
             },
@@ -1483,7 +1779,15 @@ async fn dispatch(
         return match sent {
             Ok(_) => Dispatch::Sent(format!(
                 "raider {} dispatched to {} ({}) — {:.0} ore, {}",
-                raider_pid, target.planet_id, target.name, target.stored_ore, target.vulnerability_reason
+                raider_pid,
+                target.planet_id,
+                target.name,
+                target.stored_ore,
+                if target.hunted {
+                    format!("hunting {} structs", target.structs())
+                } else {
+                    target.vulnerability_reason.clone()
+                }
             )),
             Err(e) => Dispatch::Failed(e),
         };
@@ -1633,6 +1937,10 @@ async fn readopt_expeditions(client: &CosmosClient, raiders: Vec<(String, u32)>)
                     .map(str::to_string)
             })
             .unwrap_or_default();
+        let hunt = match client.entity("player", &target_player).await {
+            Ok(e) => get().hunts(e.pointer("/Player/guildId").and_then(|x| x.as_str()).unwrap_or("")),
+            Err(_) => false,
+        };
         ACTIVE.lock().unwrap().insert(
             pid.clone(),
             Expedition {
@@ -1651,6 +1959,9 @@ async fn readopt_expeditions(client: &CosmosClient, raiders: Vec<(String, u32)>)
                 siege_shots: 0,
                 idle_rounds: 0,
                 cmd_moves: 0,
+                hunt,
+                kills: 0,
+                last_alive: Vec::new(),
                 returning: None,
                 note: "re-adopted after restart".into(),
             },
@@ -1715,6 +2026,19 @@ async fn supervise(
         .map(|g| g.current_block_height)
         .unwrap_or(0);
 
+    // Hunts shoot first, all at once: each is a fleet with its own charge, and
+    // signed one after another sixteen of them would take minutes a round.
+    let hunts: Vec<Expedition> = expeditions.iter().filter(|e| e.hunt && e.returning.is_none()).cloned().collect();
+    let (app_c, client_c) = (app.clone(), client.clone());
+    let mut rounds: HashMap<String, HuntRound> =
+        crate::mcp::loop_util::map_concurrent(hunts, 16, move |ex| {
+            let (app, client) = (app_c.clone(), client_c.clone());
+            async move { (ex.raider_player.clone(), hunt_round(&app, &client, &ex).await) }
+        })
+        .await
+        .into_iter()
+        .collect();
+
     for mut ex in expeditions {
         // ── Coming home. ── Tracked until it is SEEN there: a recall that
         // failed used to be discarded and the fleet forgotten, stranded at the
@@ -1744,6 +2068,9 @@ async fn supervise(
         // Set when the chain has already closed the raid in our favour and
         // sent the fleet home — the expedition is over, not aborted.
         let mut won = false;
+        // Nothing of theirs is left that we can shoot: going straight back
+        // would fire at nothing.
+        let mut hunted_out = false;
         if elapsed_mins > cfg.give_up_after_mins as f64 {
             abort = Some(format!("gave up after {} min", cfg.give_up_after_mins));
         }
@@ -1786,6 +2113,51 @@ async fn supervise(
                         "fleet already home (chain closed the raid)".into()
                     });
                 }
+            }
+        }
+
+        // ── Hunting. ── The raid is proved only once there is nothing left to
+        // shoot: a seize sends the fleet home with hulls still standing.
+        if abort.is_none() && ex.hunt {
+            let round = rounds.remove(&ex.raider_player).unwrap_or_default();
+            ex.kills += round.kills;
+            if let Some(alive) = &round.alive {
+                ex.last_alive = alive.clone();
+            }
+            match round.did {
+                Hunt::Fired => {
+                    ex.siege_shots += 1;
+                    ex.idle_rounds = 0;
+                    run.actions.fetch_add(1, Ordering::Relaxed);
+                }
+                Hunt::Moved => {
+                    ex.cmd_moves += 1;
+                    ex.idle_rounds = 0;
+                }
+                Hunt::Waiting => {}
+                Hunt::Nothing => ex.idle_rounds += 1,
+            }
+            if round.alive.as_ref().is_some_and(|a| a.is_empty()) || ex.idle_rounds >= HUNT_IDLE_ROUNDS {
+                // Done shooting. Take the ore if the window is open and there
+                // is any; otherwise home. Unread is asked again next round.
+                let (Ok(planet), Ok(owner)) =
+                    (client.entity("planet", &ex.target_planet).await, client.entity("player", &ex.target_player).await)
+                else {
+                    ACTIVE.lock().unwrap().insert(ex.raider_player.clone(), ex);
+                    continue;
+                };
+                let armed = !crate::mcp::types::EntityView::new(&planet).planet_block("blockStartRaid").is_zero();
+                let ore = crate::mcp::types::EntityView::new(&owner).grid_f64("ore");
+                ex.hunt = false;
+                ex.idle_rounds = 0;
+                if !armed || ore < cfg.min_ore.max(1.0) {
+                    abort = Some(format!("hunt over, {} killed, {} shots", ex.kills, ex.siege_shots));
+                    hunted_out = true;
+                }
+            } else {
+                ex.note = format!("hunting — {} killed, {} left, {} shots", ex.kills, ex.last_alive.len(), ex.siege_shots);
+                ACTIVE.lock().unwrap().insert(ex.raider_player.clone(), ex);
+                continue;
             }
         }
 
@@ -1943,6 +2315,12 @@ async fn supervise(
                 // for as long as it is away. Skipped only when the chain has
                 // already returned it.
                 record_outcome(&ex.target_planet, won);
+                if ex.kills > 0 && !hunted_out {
+                    // Killing is what it went for: not a failure to back off from.
+                    if let Ok(mut f) = FAIL_STREAK.lock() {
+                        f.remove(&ex.target_planet);
+                    }
+                }
                 let at_home = why.contains("home");
                 let failed = if at_home { None } else { send_home(app, &ex).await.err() };
                 let said = match &failed {
@@ -2028,7 +2406,7 @@ async fn siege_round(
         Err(e) if crate::mcp::cosmos_client::is_absent_object(&e) => return Siege::Idle,
         Err(_) => cmd.to_string(),
     };
-    match fire_best_at(app, client, ex, &fire_at, "siege").await {
+    match fire_best_at(app, client, ex, &fire_at, "siege", true).await {
         Shot::Fired => Siege::Fired,
         Shot::NoReach if ex.cmd_moves < crate::mcp::command_ship::MAX_MOVES => {
             let ship = crate::mcp::command_ship::Ship {
@@ -2045,7 +2423,7 @@ async fn siege_round(
             }
         }
         Shot::NoReach => Siege::Idle,
-        Shot::Failed => Siege::Idle,
+        Shot::Failed | Shot::Unheard => Siege::Idle,
     }
 }
 
@@ -2060,7 +2438,235 @@ enum Shot {
     Fired,
     /// Nothing of the raider's can hit it from where it stands.
     NoReach,
+    /// Nobody heard the answer, or our own gate held it back: not a verdict.
+    Unheard,
     Failed,
+}
+
+#[derive(Default)]
+struct HuntRound {
+    did: Hunt,
+    /// Enemy structs standing when the round began. `None` = could not be read.
+    alive: Option<Vec<String>>,
+    /// Of those standing last round, how many have been destroyed since.
+    kills: usize,
+}
+
+#[derive(Default, PartialEq, Debug)]
+enum Hunt {
+    Fired,
+    Moved,
+    /// On charge, or on a service that did not answer: not a round that found
+    /// nothing to shoot.
+    Waiting,
+    #[default]
+    Nothing,
+}
+
+/// One enemy struct a hunt could shoot.
+#[derive(Debug, Clone)]
+struct Prey {
+    id: String,
+    hp: f64,
+    ambit_bit: u64,
+    hidden: bool,
+    defense: crate::mcp::combat::DefenseProfile,
+}
+
+/// Every built, living struct of `owner`'s at `planet`, from the snapshot.
+async fn prey_at(client: &CosmosClient, owner: &str, planet: &str) -> Result<Vec<Prey>, String> {
+    let p = client.entity("planet", planet).await?;
+    let mut ids = slot_ids(p.get("Planet"));
+    let pl = client.entity("player", owner).await?;
+    if let Some(fid) = pl.pointer("/Player/fleetId").and_then(|x| x.as_str()).filter(|s| !s.is_empty()) {
+        let fl = client.entity("fleet", fid).await?;
+        if fl.pointer("/Fleet/locationId").and_then(|x| x.as_str()) == Some(planet) {
+            ids.extend(slot_ids(fl.get("Fleet")));
+            if let Some(cs) = fl.pointer("/Fleet/commandStruct").and_then(|x| x.as_str()).filter(|s| !s.is_empty()) {
+                ids.push(cs.to_string());
+            }
+        }
+    }
+    let mut out = Vec::new();
+    for id in ids {
+        let e = match client.entity("struct", &id).await {
+            Ok(e) => e,
+            Err(e) if crate::mcp::cosmos_client::is_absent_object(&e) => continue,
+            Err(e) => return Err(e),
+        };
+        let sa = e.get("structAttributes");
+        let flag = |k: &str| crate::mcp::loop_util::parse_bool(sa.and_then(|x| x.get(k)));
+        if flag("isDestroyed") || !flag("isBuilt") {
+            continue;
+        }
+        let type_id = crate::mcp::loop_util::extract_type_id(e.get("Struct").unwrap_or(&serde_json::Value::Null));
+        let gs = crate::game_state::GAME_STATE.read().map_err(|e| e.to_string())?;
+        out.push(Prey {
+            id,
+            hp: crate::mcp::loop_util::parse_f64(sa.and_then(|x| x.get("health"))),
+            ambit_bit: e
+                .pointer("/Struct/operatingAmbit")
+                .and_then(|x| x.as_str())
+                .map(crate::mcp::tools::format::ambit_bit)
+                .unwrap_or(0),
+            hidden: flag("isHidden"),
+            defense: gs.struct_types.get(&type_id).map(crate::mcp::combat::DefenseProfile::from_type).unwrap_or_default(),
+        });
+    }
+    Ok(out)
+}
+
+/// The weapons a raider brought, each with the ambit it fires from.
+async fn raider_weapons(client: &CosmosClient, raider: &str, fleet: &str) -> Vec<(crate::mcp::combat::WeaponStats, u64)> {
+    use crate::mcp::combat::WeaponStats;
+    let structs =
+        crate::mcp::loop_util::player_structs_cached(client, raider, crate::mcp::loop_util::STRUCTS_CACHE_TTL_MS).await;
+    let gs = crate::game_state::GAME_STATE.read().unwrap();
+    structs
+        .iter()
+        .filter(|s| {
+            !crate::mcp::loop_util::parse_bool(s.get("is_destroyed"))
+                && crate::mcp::loop_util::parse_bool(s.get("is_built"))
+                && s.get("location_id").and_then(|x| x.as_str()) == Some(fleet)
+        })
+        .filter_map(|s| {
+            let t = gs.struct_types.get(&crate::mcp::loop_util::extract_type_id(s))?;
+            let stands =
+                s.get("operating_ambit").and_then(|x| x.as_str()).map(crate::mcp::tools::format::ambit_bit).unwrap_or(0);
+            Some([false, true].map(|second| (WeaponStats::from_type(t, second).standing_in(stands), stands)))
+        })
+        .flatten()
+        .filter(|(w, _)| w.ambits != 0)
+        .collect()
+}
+
+/// Pure: the charge it takes our best weapon to kill this struct, if any of
+/// them can. Charge is the only thing a hunt spends per shot, so the cheapest
+/// kills first is the most kills.
+fn kill_cost(p: &Prey, weapons: &[(crate::mcp::combat::WeaponStats, u64)]) -> Option<f64> {
+    weapons
+        .iter()
+        .filter(|(w, _)| w.ambits & p.ambit_bit != 0)
+        .filter(|(_, stands)| !p.hidden || *stands == p.ambit_bit)
+        .map(|(w, stands)| {
+            let r = crate::mcp::combat::simulate(w, p.ambit_bit, p.hp, &p.defense, *stands == p.ambit_bit);
+            (r.expected_damage, w.charge.max(1))
+        })
+        .filter(|(dmg, _)| *dmg > 0.0)
+        .map(|(dmg, charge)| (p.hp.max(1.0) / dmg).ceil() * charge as f64)
+        .min_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+}
+
+/// The order a hunt shoots in: cheapest kill first, which also finishes
+/// whatever the last round wounded. Unreachable structs are left out.
+fn hunt_order<'a>(prey: &'a [Prey], weapons: &[(crate::mcp::combat::WeaponStats, u64)]) -> Vec<&'a Prey> {
+    let mut ranked: Vec<(f64, &Prey)> = prey.iter().filter_map(|p| kill_cost(p, weapons).map(|c| (c, p))).collect();
+    ranked.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+    ranked.into_iter().map(|(_, p)| p).collect()
+}
+
+/// One round of a hunt: one shot, at the struct we can kill soonest. Shots our
+/// hulls outlive come first; a hull is spent only when there is no other shot.
+async fn hunt_round(app: &tauri::AppHandle, client: &CosmosClient, ex: &Expedition) -> HuntRound {
+    let Ok(prey) = prey_at(client, &ex.target_player, &ex.target_planet).await else {
+        return HuntRound { did: Hunt::Waiting, ..Default::default() };
+    };
+    // Gone from the planet is not killed: a fleet can leave.
+    let mut kills = 0;
+    for id in ex.last_alive.iter().filter(|id| !prey.iter().any(|p| p.id == **id)) {
+        kills += match client.entity("struct", id).await {
+            Ok(e) => crate::mcp::loop_util::parse_bool(e.pointer("/structAttributes/isDestroyed")) as usize,
+            Err(e) => crate::mcp::cosmos_client::is_absent_object(&e) as usize,
+        };
+    }
+    let alive = Some(prey.iter().map(|p| p.id.clone()).collect::<Vec<_>>());
+    let done = |did| HuntRound { did, alive, kills };
+    if let Ok(me) = client.entity("player", &ex.raider_player).await {
+        let now = crate::game_state::GAME_STATE.read().map(|g| g.current_block_height).unwrap_or(0);
+        let last = crate::mcp::types::EntityView::new(&me).last_action().get();
+        if now.saturating_sub(last) < MIN_WEAPON_CHARGE {
+            return done(Hunt::Waiting);
+        }
+    }
+    let weapons = raider_weapons(client, &ex.raider_player, &ex.fleet_id).await;
+    // Aim at what would really take the hit: a same-ambit blocker absorbs the
+    // shot meant for what it guards.
+    let mut aims: Vec<String> = Vec::new();
+    let mut unread = false;
+    for p in hunt_order(&prey, &weapons) {
+        if aims.len() >= HUNT_TRIES {
+            break;
+        }
+        let aim = match crate::mcp::tools::strike::resolve_fire_target(client, &p.id).await {
+            Ok((_, phase, _)) if phase == "DOWN" => continue,
+            Ok((t, _, _)) => t,
+            Err(e) => {
+                unread |= !crate::mcp::cosmos_client::is_absent_object(&e);
+                continue;
+            }
+        };
+        if !aims.contains(&aim) {
+            aims.push(aim);
+        }
+    }
+    for spend_hulls in [false, true] {
+        for aim in &aims {
+            match fire_best_at(app, client, ex, aim, "hunt", spend_hulls).await {
+                Shot::Fired => return done(Hunt::Fired),
+                Shot::NoReach => {}
+                Shot::Unheard => return done(Hunt::Waiting),
+                Shot::Failed => return done(Hunt::Nothing),
+            }
+        }
+    }
+    // Nothing we brought reaches: the Command Ship is the one hull that can go
+    // to it, where that costs us nothing.
+    if ex.cmd_moves < crate::mcp::command_ship::MAX_MOVES {
+        let ship = crate::mcp::command_ship::Ship {
+            player: &ex.raider_player,
+            index: ex.raider_index,
+            fleet: &ex.fleet_id,
+            planet: &ex.target_planet,
+            component: "auto_raid",
+            context: format!("auto_raid_siege:{}", ex.raider_player),
+        };
+        let mut targets = aims;
+        targets.extend(prey.iter().map(|p| p.id.clone()).filter(|id| !targets.contains(id)).take(HUNT_TRIES).collect::<Vec<_>>());
+        for t in targets.iter().take(HUNT_TRIES) {
+            if crate::mcp::command_ship::bring(app, client, &ship, t).await.is_some() {
+                return done(Hunt::Moved);
+            }
+        }
+    }
+    done(if unread { Hunt::Waiting } else { Hunt::Nothing })
+}
+
+/// Structs at the target this raider has a viable shot at.
+fn kill_reach(hulls: &[crate::mcp::readiness::Hull], structs_by_ambit: &[usize; 4]) -> usize {
+    AMBITS
+        .iter()
+        .zip(structs_by_ambit)
+        .filter(|(a, _)| {
+            let bit = crate::mcp::tools::format::ambit_bit(a);
+            hulls.iter().any(|h| h.reach & bit != 0)
+        })
+        .map(|(_, n)| n)
+        .sum()
+}
+
+/// Raiders that reach something at the target, the one reaching most first;
+/// ties keep the order they came in.
+async fn by_kill_reach(client: &CosmosClient, raiders: Vec<(String, u32)>, target: &Candidate) -> Vec<(String, u32)> {
+    let mut out: Vec<(usize, (String, u32))> = Vec::new();
+    for (pid, idx) in raiders {
+        let Some((fleet, _)) = raider_location(client, &pid).await else { continue };
+        let n = kill_reach(&raider_hulls(client, &pid, &fleet).await, &target.structs_by_ambit);
+        if n > 0 {
+            out.push((n, (pid, idx)));
+        }
+    }
+    out.sort_by_key(|(n, _)| std::cmp::Reverse(*n));
+    out.into_iter().map(|(_, r)| r).collect()
 }
 
 /// While the raid proof is grinding, every planetary-shield contributor the
@@ -2104,7 +2710,7 @@ async fn shield_grind_round(
     };
     // Biggest first; one nothing of ours reaches must not hide the rest.
     for (contrib, target) in contributors.into_iter().take(4) {
-        if matches!(fire_best_at(app, client, ex, &target, "shield-grind").await, Shot::Fired) {
+        if matches!(fire_best_at(app, client, ex, &target, "shield-grind", true).await, Shot::Fired) {
             crate::mcp::telemetry::tlog(
                 "auto_raid",
                 crate::mcp::telemetry::Sev::Info,
@@ -2127,6 +2733,7 @@ async fn fire_best_at(
     ex: &Expedition,
     target: &str,
     label: &str,
+    spend_hulls: bool,
 ) -> Shot {
     let Ok(mut plan) = crate::mcp::tools::intel::plan_strike(
         client,
@@ -2134,7 +2741,7 @@ async fn fire_best_at(
     )
     .await
     else {
-        return Shot::Failed;
+        return Shot::Unheard;
     };
     crate::mcp::tools::intel::keep_safe_command_shots(client, &mut plan).await;
     // One shot per player per charge cycle, best (evasion- and counter-aware)
@@ -2164,6 +2771,9 @@ async fn fire_best_at(
         }
         best = Some(*s);
         break;
+    }
+    if !spend_hulls {
+        doomed_fallback = None;
     }
     let sacrificial = best.is_none() && doomed_fallback.is_some();
     let Some(best) = best.or(doomed_fallback) else { return Shot::NoReach };
@@ -2213,7 +2823,11 @@ async fn fire_best_at(
                 crate::mcp::telemetry::Sev::Warn,
                 format!("{} shot failed for {}: {}", label, ex.raider_player, e),
             );
-            Shot::Failed
+            if crate::mcp::tx_retry::was_skipped(&e) || crate::mcp::tx_retry::worth_retrying_soon(&e) {
+                Shot::Unheard
+            } else {
+                Shot::Failed
+            }
         }
     }
 }
@@ -2377,6 +2991,9 @@ mod tests {
             last_action_block: 0,
             blocks_since_action: 100_000,
             raided_hours_ago: None,
+            hunted: false,
+            replicant: false,
+            structs_by_ambit: [4, 0, 0, 0],
             score: 0.0,
             blocked_by: None,
         }
@@ -2471,6 +3088,10 @@ mod tests {
     /// sieges. Since v0.21.0 that is where 20 of 24 successful raids came from.
     #[test]
     fn defaults_are_safe_and_opportunist() {
+        let d = AutoRaidConfig::default();
+        assert!(d.hunt_guilds.is_empty() && !d.hunt_skips_rest, "nobody is hunted until the operator names a guild");
+        let old: AutoRaidConfig = serde_json::from_value(json!({ "enabled": true, "autonomy": "auto" })).unwrap();
+        assert!(old.hunt_guilds.is_empty() && !old.hunt_skips_rest, "nor by upgrading with raids already on");
         isolate_lists();
         let c = AutoRaidConfig::default();
         assert!(!c.enabled);
@@ -2754,6 +3375,133 @@ mod tests {
         assert_eq!(effective_cooldown_mins(120, 3), 960.0);
         assert_eq!(effective_cooldown_mins(120, 4), 1920.0);
         assert_eq!(effective_cooldown_mins(120, 9), 1920.0, "capped at 2^4");
+    }
+
+    #[test]
+    fn a_hunted_guild_rests_unless_told_otherwise_and_has_no_cooldown_after_a_seize() {
+        isolate_lists();
+        let cfg = AutoRaidConfig { hunt_guilds: vec!["0-8".into()], ..Default::default() };
+        assert!(cfg.hunts("0-8"));
+        for other in ["0-1", "0-80", "0", "8", ""] {
+            assert!(!cfg.hunts(other), "{other}");
+        }
+        assert!(!AutoRaidConfig { hunt_guilds: vec!["".into()], ..Default::default() }.hunts(""));
+        let mut c = cand();
+        c.raided_hours_ago = Some(0.1);
+        assert!(gate(&c, &cfg, 0.0).is_some());
+        c.hunted = true;
+        assert!(gate(&c, &cfg, 0.0).unwrap().starts_with("resting"), "the rest is its own switch");
+        let cfg = AutoRaidConfig { hunt_skips_rest: true, ..cfg };
+        assert_eq!(gate(&c, &cfg, 0.0), None);
+        c.hunted = false;
+        assert!(gate(&c, &cfg, 0.0).is_some(), "only for the hunted");
+        assert_eq!(hunt_cooldown_mins(120, 0), 0.0);
+        assert_eq!(hunt_cooldown_mins(120, 1), 120.0);
+        assert_eq!(hunt_cooldown_mins(120, 2), 240.0);
+    }
+
+    fn weapon(ambits: u64, damage: u64, charge: u64) -> crate::mcp::combat::WeaponStats {
+        crate::mcp::combat::WeaponStats {
+            shots: 1,
+            guaranteed: 0,
+            success_num: 1,
+            success_den: 1,
+            damage,
+            recoil: 0,
+            ambits,
+            blockable: true,
+            counterable: true,
+            control: crate::mcp::combat::WeaponControl::Unguided,
+            armour_piercing: false,
+            charge,
+        }
+    }
+
+    fn prey(id: &str, hp: f64, ambit_bit: u64) -> Prey {
+        Prey { id: id.into(), hp, ambit_bit, hidden: false, defense: Default::default() }
+    }
+
+    #[test]
+    fn a_hunt_shoots_the_cheapest_kill_first_and_skips_what_it_cannot_reach() {
+        let (land, water, air) = (4u64, 2u64, 8u64);
+        let weapons = [(weapon(land, 2, 3), land), (weapon(water, 2, 5), land)];
+        let all = [prey("bunker", 10.0, land), prey("fresh", 3.0, land), prey("wounded", 1.0, land), prey("sub", 1.0, water), prey("jet", 1.0, air)];
+        let order: Vec<&str> = hunt_order(&all, &weapons).iter().map(|p| p.id.as_str()).collect();
+        assert_eq!(order, ["wounded", "sub", "fresh", "bunker"], "jet is out of reach");
+    }
+
+    #[test]
+    fn a_hidden_struct_is_prey_only_from_its_own_ambit() {
+        let (land, water) = (4u64, 2u64);
+        let mut sub = prey("sub", 3.0, water);
+        sub.hidden = true;
+        assert!(kill_cost(&sub, &[(weapon(water, 2, 3), land)]).is_none());
+        assert!(kill_cost(&sub, &[(weapon(water, 2, 3), water)]).is_some());
+    }
+
+    #[test]
+    fn a_hunt_ranks_by_what_stands_there_not_by_ore() {
+        isolate_lists();
+        let cfg = AutoRaidConfig { hunt_guilds: vec!["0-8".into()], ..Default::default() };
+        let mut many = cand();
+        (many.hunted, many.replicant, many.stored_ore) = (true, true, 0.0);
+        many.structs_by_ambit = [6, 4, 4, 4];
+        let mut few = many.clone();
+        few.structs_by_ambit = [1, 0, 0, 0];
+        assert!(score(&many, &cfg) > score(&few, &cfg));
+        assert_eq!(gate(&many, &cfg, 0.0), None, "a replicant is hunted for its structs, ore or not");
+        many.structs_by_ambit = [0; 4];
+        assert!(gate(&many, &cfg, 0.0).unwrap().contains("nothing standing"));
+        few.replicant = false;
+        assert!(gate(&few, &cfg, 0.0).unwrap().contains("min_ore"), "a person still has to hold something");
+    }
+
+    #[test]
+    fn slots_are_counted_per_ambit() {
+        let row = json!({ "land": ["5-1", "", "5-2"], "water": [""], "space": ["5-3"] });
+        assert_eq!(slots_by_ambit(Some(&row)), [2, 0, 0, 1]);
+        assert_eq!(slot_ids(Some(&row)), ["5-1", "5-2", "5-3"]);
+        assert_eq!(slots_by_ambit(None), [0; 4]);
+    }
+
+    #[test]
+    fn hunting_never_outranks_a_veto() {
+        isolate_lists();
+        let mut l = crate::mcp::combat_lists::CombatLists::default();
+        l.protected_players.push("1-61".into());
+        crate::mcp::combat_lists::set_for_test(l);
+        let mut c = cand();
+        c.hunted = true;
+        assert!(gate(&c, &AutoRaidConfig::default(), 0.0).unwrap().contains("vetoed"));
+        isolate_lists();
+    }
+
+    #[test]
+    fn replicants_rank_over_humans_and_hunted_over_everyone() {
+        let mut c = cand();
+        c.replicant = true;
+        assert_eq!(hunt_rank(&c), 0, "a replicant outside the hunt is nobody special");
+        c.hunted = true;
+        assert_eq!(hunt_rank(&c), 2);
+        c.replicant = false;
+        assert_eq!(hunt_rank(&c), 1);
+    }
+
+    #[test]
+    fn a_replicant_is_told_by_its_grant_or_its_name() {
+        let own = serde_json::json!({ "permissionId": "1-14702@1-14702", "value": "33554431" });
+        let grant = serde_json::json!({ "permissionId": "1-14760@1-303", "value": "33554431" });
+        assert!(!replicant_tell(&[own.clone()], "Ozmanski"));
+        assert!(!replicant_tell(&[own.clone()], ""), "no name is no evidence");
+        assert!(replicant_tell(&[own.clone(), grant], ""));
+        assert!(replicant_tell(&[own], "VANGUARD-7782"));
+    }
+
+    #[test]
+    fn hunted_players_lead_the_batch_once() {
+        let e = |i, g: &str| (crate::mcp::types::PlayerId::from_index(i), g.to_string());
+        let got = with_hunted(vec![e(3, "0-8")], vec![e(1, "0-1"), e(3, "0-1"), e(2, "0-5")]);
+        assert_eq!(got, vec![e(3, "0-8"), e(1, "0-1"), e(2, "0-5")]);
     }
 
     #[test]
